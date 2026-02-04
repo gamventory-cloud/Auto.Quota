@@ -11,6 +11,40 @@ import os
 import altair as alt
 from joblib import Parallel, delayed, cpu_count
 
+
+# [비밀번호 잠금 기능 시작] ---------------------------------------------
+def check_password():
+    """Returns `True` if the user had the correct password."""
+
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if st.session_state["password"] == st.secrets["password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # 보안을 위해 비밀번호 삭제
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # 처음 접속 시 초기화
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        # 비밀번호 입력창 보여주기
+        st.title("🔒 접속 제한")
+        st.text_input(
+            "비밀번호를 입력하세요", type="password", on_change=password_entered, key="password"
+        )
+        st.error("지인들만 사용 가능한 비공개 프로그램입니다.")
+        return False
+    else:
+        # 비밀번호 맞음
+        return True
+
+if not check_password():
+    st.stop()  # 비밀번호 틀리면 여기서 코드 실행 중단! (아래 내용 안 보여줌)
+# [비밀번호 잠금 기능 끝] ---------------------------------------------
+
+
 # 1. 페이지 설정
 st.set_page_config(page_title="Quota Master Pro", layout="wide")
 
