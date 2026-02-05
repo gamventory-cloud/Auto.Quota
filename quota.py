@@ -8,12 +8,11 @@ import traceback
 import numpy as np
 import re
 import os
-import tempfile
 import altair as alt
 from joblib import Parallel, delayed, cpu_count
 
 # ==============================================================================
-# [공통 함수] 텍스트 정제 및 변수명 처리 함수
+# [공통 함수] 텍스트 정제 및 변수명 처리 함수 (전역 위치)
 # ==============================================================================
 def clean_text(text):
     """줄바꿈, 탭, 불필요한 공백을 제거합니다."""
@@ -31,34 +30,44 @@ def extract_base_name(text):
 def sanitize_var_name(text):
     """SPSS 변수명 규칙에 맞게 특수문자를 제거합니다."""
     text = str(text)
+    # [수정] 하이픈(-)과 공백을 먼저 언더바(_)로 치환하여 숫자 붙음 방지
     text = text.replace("-", "_").replace(" ", "_")
+    # 괄호, 슬래시 등 제거 (알파벳, 숫자, 언더바만 남김)
     text = re.sub(r"[^a-zA-Z0-9_]", "", text)
+    # 연속된 언더바는 하나로
     text = re.sub(r"__+", "_", text)
     return text
 
 # [비밀번호 잠금 기능 시작] ---------------------------------------------
 def check_password():
     """Returns `True` if the user had the correct password."""
+
     def password_entered():
+        """Checks whether a password entered by the user is correct."""
         if st.session_state["password"] == st.secrets["password"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]
+            del st.session_state["password"]  # 보안을 위해 비밀번호 삭제
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
+        # 처음 접속 시 초기화
         st.session_state["password_correct"] = False
 
     if not st.session_state["password_correct"]:
+        # 비밀번호 입력창 보여주기
         st.title("🔒 접속 제한")
-        st.text_input("비밀번호를 입력하세요", type="password", on_change=password_entered, key="password")
+        st.text_input(
+            "비밀번호를 입력하세요", type="password", on_change=password_entered, key="password"
+        )
         st.error("지인들만 사용 가능한 비공개 프로그램입니다.")
         return False
     else:
+        # 비밀번호 맞음
         return True
 
 if not check_password():
-    st.stop()
+    st.stop()  # 비밀번호 틀리면 여기서 코드 실행 중단! (아래 내용 안 보여줌)
 # [비밀번호 잠금 기능 끝] ---------------------------------------------
 
 
@@ -71,7 +80,7 @@ app_mode = st.sidebar.radio(
     "메뉴 선택",
     ["🧹 1. 불성실 응답자 에디터", 
      "📊 2. 쿼터 자동 할당 솔루션 (Turbo)", 
-     "🛠️ 3. SPSS 변수명 정제"]
+     "🛠️ 3. SPSS 변수명 정제"] # 메뉴 추가됨
 )
 st.sidebar.markdown("---")
 n_cores = cpu_count()
@@ -602,7 +611,7 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
 
 # ==============================================================================
-# APP MODE 3: SPSS 변수명 정제 (수정됨: Value Label 자동 감지 및 적용)
+# APP MODE 3: SPSS 변수명 정제 (안정화 버전: 엑셀 스타일 제거 + 1,2행 헤더 적용)
 # ==============================================================================
 elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
@@ -611,8 +620,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
     * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
     * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-    * **기능 3:** 엑셀 데이터 파일 다운로드 시 **스타일 제거(순수 데이터)** 및 **1행(새 변수명), 2행(기존 변수명)** 구조 저장
-    * **기능 4:** **[NEW] Code북의 '보기(Value Labels)'를 자동 감지하여 .sav 파일에 적용**
+    * **기능 3:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
     """)
     
     # 1. 파일 업로드
@@ -642,8 +650,6 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
 
                     # 데이터프레임 로드 (분석용)
                     df_raw = st.session_state['spss_all_sheets'][raw_sheet]
-                    # [NEW] SPSS SAV 생성을 위해 Raw 데이터도 세션에 따로 저장
-                    st.session_state['spss_raw_data'] = df_raw
                     
                     # [수정] header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
                     df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
@@ -653,91 +659,59 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     
                     temp_vars = []
                     
-                    # --- [NEW] Value Labels 수집을 위한 변수 ---
-                    # code_book_value_labels[CODE_VAR] = {1: "남성", 2: "여성"}
-                    code_book_value_labels = {} 
-                    current_code_var = None
-
                     # --- [Step 1] Code북 순회 (무조건 1, 2열 사용) ---
                     for idx, row in df_code.iterrows():
                         if len(row) < 2: continue
+                        if pd.isna(row.iloc[0]): continue
                         
-                        col_a_val = clean_text(row.iloc[0]) # 변수명 (Code) or 값
-                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨 or 라벨
+                        col_a_val = clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q1
+                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨 - 예: SQ1. 성별
                         
-                        # (1) 변수 헤더인지 확인 (Raw 데이터에 존재하는지)
-                        is_header = False
-                        if col_a_val and col_a_val.lower() in raw_cols_map:
-                            is_header = True
+                        if not col_a_val: continue
                         
-                        # 헤더인 경우: 변수 정보 추출 및 current_code_var 갱신
-                        if is_header:
-                            current_code_var = col_a_val
-                            if current_code_var not in code_book_value_labels:
-                                code_book_value_labels[current_code_var] = {}
-                            
-                            # [핵심] 라벨에서 기본 이름 추출 (예: "SQ1. 성별" -> "SQ1")
-                            label_base = extract_base_name(col_c_val)
-                            if not label_base: 
-                                label_base = col_a_val # 실패 시 Code명 사용
+                        # [핵심] 라벨에서 기본 이름 추출 (예: "SQ1. 성별" -> "SQ1")
+                        label_base = extract_base_name(col_c_val)
+                        if not label_base: 
+                            label_base = col_a_val # 실패 시 Code명 사용
 
-                            # [스마트 매칭 로직]
-                            # 1. 정확히 일치하는 경우
-                            if col_a_val.lower() in raw_cols_map:
-                                raw_original = raw_cols_map[col_a_val.lower()]
-                                new_var_name = sanitize_var_name(label_base)
-                                
-                                temp_vars.append({
-                                    "Raw 변수명": raw_original,
-                                    "Code 변수명": col_a_val,
-                                    "질문 내용": col_c_val,
-                                    "변경할 변수명": new_var_name,
-                                    "상태": "매칭 성공"
-                                })
-
-                            # 2. 복수응답/세트 문항 탐색 (예: Q5 -> q5_1, q5_2...)
-                            prefix = col_a_val.lower() + "_"
-                            found_multiples = []
-                            for rc_lower, rc_original in raw_cols_map.items():
-                                if rc_lower.startswith(prefix):
-                                    found_multiples.append((rc_lower, rc_original))
+                        # [스마트 매칭 로직]
+                        # 1. 정확히 일치하는 경우
+                        if col_a_val.lower() in raw_cols_map:
+                            raw_original = raw_cols_map[col_a_val.lower()]
+                            new_var_name = sanitize_var_name(label_base)
                             
-                            # 찾은 복수응답 컬럼들 추가
-                            for _, rc_original in found_multiples:
-                                # 접미사 추출
-                                suffix = rc_original[len(col_a_val):] 
-                                if not suffix.startswith('_') and not suffix.startswith('-'):
-                                    suffix = "_" + suffix
+                            temp_vars.append({
+                                "Raw 변수명": raw_original,
+                                "Code 변수명": col_a_val,
+                                "질문 내용": col_c_val,
+                                "변경할 변수명": new_var_name,
+                                "상태": "매칭 성공"
+                            })
 
-                                # 라벨 기반 이름 + 접미사
-                                new_name = sanitize_var_name(label_base + suffix)
-                                
-                                temp_vars.append({
-                                    "Raw 변수명": rc_original,
-                                    "Code 변수명": col_a_val,
-                                    "질문 내용": col_c_val,
-                                    "변경할 변수명": new_name,
-                                    "상태": "매칭 성공 (세트)"
-                                })
+                        # 2. 복수응답/세트 문항 탐색 (예: Q5 -> q5_1, q5_2...)
+                        prefix = col_a_val.lower() + "_"
+                        found_multiples = []
+                        for rc_lower, rc_original in raw_cols_map.items():
+                            if rc_lower.startswith(prefix):
+                                found_multiples.append((rc_lower, rc_original))
                         
-                        # 헤더가 아닌 경우: Value Label 수집 (current_code_var가 있을 때)
-                        elif current_code_var:
-                            # "코드값", "보기" 같은 헤더 행이나 빈 행 무시
-                            if not col_a_val or "코드" in col_a_val or "보기" in col_c_val:
-                                continue
+                        # 찾은 복수응답 컬럼들 추가
+                        for _, rc_original in found_multiples:
+                            # 접미사 추출
+                            suffix = rc_original[len(col_a_val):] 
+                            if not suffix.startswith('_') and not suffix.startswith('-'):
+                                suffix = "_" + suffix
+
+                            # 라벨 기반 이름 + 접미사
+                            new_name = sanitize_var_name(label_base + suffix)
                             
-                            # 값(Key) 정제: 숫자인 경우 float로 변환 시도 (SPSS 호환성)
-                            val_key = col_a_val
-                            try:
-                                # 정수형 문자열이면 정수, 실수형이면 실수로 변환
-                                if float(col_a_val).is_integer():
-                                    val_key = int(float(col_a_val))
-                                else:
-                                    val_key = float(col_a_val)
-                            except:
-                                pass # 변환 실패하면 문자열 그대로 사용 (예: "A", "B")
-                                
-                            code_book_value_labels[current_code_var][val_key] = col_c_val
+                            temp_vars.append({
+                                "Raw 변수명": rc_original,
+                                "Code 변수명": col_a_val,
+                                "질문 내용": col_c_val,
+                                "변경할 변수명": new_name,
+                                "상태": "매칭 성공 (세트)"
+                            })
 
                     # --- [Step 2] 중복 변수명 처리 로직 (추가됨) ---
                     # 1. 먼저 생성된 모든 변수명의 빈도수를 체크
@@ -784,12 +758,8 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                                 "상태": "매칭 실패 (확인 필요)"
                             })
                     
-                    # 세션에 저장
                     st.session_state['spss_result_df'] = pd.DataFrame(final_data)
                     st.session_state['spss_file_name'] = uploaded_file.name.split('.')[0]
-                    # Value Labels도 세션에 저장
-                    st.session_state['spss_val_labels_source'] = code_book_value_labels
-                    
                     st.success("분석이 완료되었습니다! 아래 표에서 결과를 확인하세요.")
                     
         except Exception as e:
@@ -820,7 +790,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
         st.markdown("---")
         st.markdown("### 3. 파일 내보내기")
         
-        c1, c2, c3, c4 = st.columns(4) # 컬럼 4개로 변경
+        c1, c2, c3 = st.columns(3) # 컬럼 3개로 변경
         
         with c1:
             if st.button("📥 SPSS Syntax 생성 (.sps)", key="gen_syntax_btn"):
@@ -849,7 +819,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 final_sps_bytes = final_sps.encode('utf-8-sig')
 
                 st.download_button(
-                    label="📄 Syntax 다운로드",
+                    label="📄 Syntax 파일 다운로드",
                     data=final_sps_bytes,
                     file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
                     mime="text/plain"
@@ -863,14 +833,14 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 edited_df.to_excel(writer, index=False)
                 
             st.download_button(
-                label="📄 매핑 테이블 다운로드",
+                label="📄 매핑 테이블(XLSX) 다운로드",
                 data=out_map.getvalue(),
                 file_name=f"{st.session_state['spss_file_name']}_Mapping.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
         with c3:
-            # [NEW] 변환된 데이터 엑셀 다운로드 (스타일 제거 + 1행/2행 헤더)
+            # [NEW] 변환된 데이터 엑셀 다운로드 (스타일 제거 + 1행/2행 헤더 적용)
             if 'spss_all_sheets' in st.session_state:
                 out_data = io.BytesIO()
                 
@@ -878,32 +848,35 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     # 1. 변경할 이름 딕셔너리 생성
                     rename_map = {}
                     for _, row in edited_df.iterrows():
+                        # 변경할 이름이 있고 기존과 다를 때만
                         if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
                             rename_map[row['Raw 변수명']] = str(row['변경할 변수명']).strip()
                     
-                    # 2. 모든 시트 순회
+                    # 2. 모든 시트 순회하며 저장
                     for sheet_name, df_sheet in st.session_state['spss_all_sheets'].items():
-                        # 타겟 시트 확인
+                        # 변수명 변경 대상 시트인지 확인 (선택한 Raw 시트 or 이름에 DATA/LABEL 포함)
                         is_target = (sheet_name == st.session_state.get('spss_target_sheets', [''])[0]) or \
                                     ('DATA' in sheet_name.upper()) or ('LABEL' in sheet_name.upper())
                         
                         if is_target:
-                            # 1행: 새 변수명
+                            # 1행: 새 변수명 (매칭된 것, 없으면 원래 이름)
                             row1 = [rename_map.get(str(col).strip(), str(col).strip()) for col in df_sheet.columns]
-                            # 2행: 기존 변수명
+                            # 2행: 기존 변수명 (Original Header)
                             row2 = df_sheet.columns.tolist()
                             
-                            # 데이터프레임 조립 (헤더를 데이터로 취급하여 스타일 제거)
+                            # 데이터프레임 조립 (헤더 스타일 제거를 위해 데이터로 취급)
+                            # Header DF (2줄)
                             df_header = pd.DataFrame([row1, row2]) 
+                            # Data DF (Index 무시하고 값만)
                             df_body = pd.DataFrame(df_sheet.values)
                             
+                            # 합치기
                             df_export = pd.concat([df_header, df_body], ignore_index=True)
                             
-                            # 저장 (header=False로 순수 데이터만 저장)
+                            # 저장 (header=False, index=False -> 스타일 없는 순수 데이터)
                             df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
-                            
                         else:
-                            # 타겟 아니면 원본 그대로 (스타일 제거를 위해 헤더를 데이터로 내림)
+                            # 대상 시트가 아니면 원본 그대로 저장 (단, 스타일 제거를 위해 헤더를 데이터로 내림)
                             row1 = df_sheet.columns.tolist()
                             df_header = pd.DataFrame([row1])
                             df_body = pd.DataFrame(df_sheet.values)
@@ -912,76 +885,8 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                             df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                 
                 st.download_button(
-                    label="📊 엑셀 데이터 다운로드",
+                    label="📊 변환된 데이터(XLSX) 다운로드",
                     data=out_data.getvalue(),
                     file_name=f"{st.session_state['spss_file_name']}_Renamed.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
-        with c4:
-            # [NEW] .sav 다운로드 (Value Label 포함)
-            if st.button("💾 .sav 파일 생성"):
-                try:
-                    import pyreadstat
-                    
-                    if 'spss_raw_data' in st.session_state:
-                        # 1. 메타데이터 준비 (변수명 변경 및 라벨)
-                        rename_map = {}
-                        var_label_map = {} # 변수 설명 (Variable Label)
-                        val_label_map = {} # 값 설명 (Value Label)
-                        
-                        # Code북에서 추출한 Value Label 원본
-                        source_val_labels = st.session_state.get('spss_val_labels_source', {})
-                        
-                        for _, row in edited_df.iterrows():
-                            # 변경할 변수명이 유효할 때만 처리
-                            if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
-                                new_name = str(row['변경할 변수명']).strip()
-                                old_raw_name = row['Raw 변수명']
-                                code_var_name = row['Code 변수명'] # 예: Q1
-                                
-                                # Rename Map
-                                rename_map[old_raw_name] = new_name
-                                
-                                # Variable Label (질문 내용)
-                                if row['질문 내용'] and str(row['질문 내용']).strip() not in ['-', 'nan', 'NaN']:
-                                    var_label_map[new_name] = str(row['질문 내용']).strip()
-                                else:
-                                    var_label_map[new_name] = new_name
-                                
-                                # Value Label (보기)
-                                # Code북의 변수명(Q1)에 해당하는 Value Label이 있으면, 새 변수(SQ1)에도 적용
-                                if code_var_name in source_val_labels:
-                                    val_label_map[new_name] = source_val_labels[code_var_name]
-                        
-                        # 2. 데이터프레임 변환 (변수명 변경)
-                        df_sav = st.session_state['spss_raw_data'].rename(columns=rename_map)
-                        
-                        # 3. 임시 파일 저장 (pyreadstat은 파일 경로 필요)
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".sav") as tmp:
-                            pyreadstat.write_sav(
-                                df_sav, 
-                                tmp.name, 
-                                column_labels=var_label_map,
-                                variable_value_labels=val_label_map
-                            )
-                            tmp_path = tmp.name
-                            
-                        # 4. 파일 읽기 및 버튼 생성
-                        with open(tmp_path, "rb") as f:
-                            sav_data = f.read()
-                            
-                        st.download_button(
-                            label="📥 .sav 다운로드",
-                            data=sav_data,
-                            file_name=f"{st.session_state['spss_file_name']}_Renamed.sav",
-                            mime="application/x-spss-sav"
-                        )
-                        st.success("Value Label이 포함된 .sav 파일이 생성되었습니다!")
-                        os.unlink(tmp_path) # 임시 파일 삭제
-                        
-                except ImportError:
-                    st.error("⚠️ 'pyreadstat' 모듈이 없습니다.")
-                    st.info("requirements.txt에 'pyreadstat'을 추가해주세요.")
-                except Exception as e:
-                    st.error(f"오류: {e}")
