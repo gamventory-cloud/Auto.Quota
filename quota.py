@@ -611,14 +611,15 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
 
 # ==============================================================================
-# APP MODE 3: SPSS 변수명 정제 (수정됨: 2번째 열에서 라벨 추출 + 복수응답 처리 강화)
+# APP MODE 3: SPSS 변수명 정제 (수정됨: 중복 변수명에 자동 번호 부여)
 # ==============================================================================
 elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
     st.markdown("""
     **Raw 데이터**와 **Code북**을 비교하여 SPSS 변수명 변경 신텍스를 생성합니다.
-    * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(귀하의 연령은?)**
-    * **기능 개선:** Q5_1 ~ Q5_8 같은 복수응답 문항 자동 인식, Q1-1 하이픈 오류 해결
+    * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
+    * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
+    * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
     """)
     
     # 1. 파일 업로드
@@ -644,7 +645,8 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 with st.spinner('데이터 분석 및 매칭 중...'):
                     # 데이터프레임 로드
                     df_raw = pd.read_excel(uploaded_file, sheet_name=raw_sheet)
-                    df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet)
+                    # [수정] header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
+                    df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
                     
                     # Raw 데이터 컬럼 매핑 (소문자 -> 원본)
                     raw_cols_map = {str(col).strip().lower(): str(col).strip() for col in df_raw.columns}
@@ -656,16 +658,21 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                         if len(row) < 2: continue
                         if pd.isna(row.iloc[0]): continue
                         
-                        col_a_val = clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q5
-                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨
+                        col_a_val = clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q1
+                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨 - 예: SQ1. 성별
                         
                         if not col_a_val: continue
                         
-                        # [스마트 매칭 로직 개선]
-                        # 1. 정확히 일치하는 경우 (예: Q1 -> q1)
+                        # [핵심] 라벨에서 기본 이름 추출 (예: "SQ1. 성별" -> "SQ1")
+                        label_base = extract_base_name(col_c_val)
+                        if not label_base: 
+                            label_base = col_a_val # 실패 시 Code명 사용
+
+                        # [스마트 매칭 로직]
+                        # 1. 정확히 일치하는 경우
                         if col_a_val.lower() in raw_cols_map:
                             raw_original = raw_cols_map[col_a_val.lower()]
-                            new_var_name = sanitize_var_name(col_a_val) # Code명 그대로 사용
+                            new_var_name = sanitize_var_name(label_base)
                             
                             temp_vars.append({
                                 "Raw 변수명": raw_original,
@@ -676,7 +683,6 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                             })
 
                         # 2. 복수응답/세트 문항 탐색 (예: Q5 -> q5_1, q5_2...)
-                        # Code변수명 + "_" 로 시작하는 모든 Raw 컬럼을 찾음
                         prefix = col_a_val.lower() + "_"
                         found_multiples = []
                         for rc_lower, rc_original in raw_cols_map.items():
@@ -685,38 +691,58 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                         
                         # 찾은 복수응답 컬럼들 추가
                         for _, rc_original in found_multiples:
-                            # 접미사 추출 (예: q5_1 -> _1)
-                            # 대소문자 무시하고 raw 컬럼명에서 code 변수명 길이만큼 자름
+                            # 접미사 추출
                             suffix = rc_original[len(col_a_val):] 
-                            # 만약 suffix가 _로 시작하지 않으면 강제로 붙여줌 (안전장치)
                             if not suffix.startswith('_') and not suffix.startswith('-'):
                                 suffix = "_" + suffix
 
-                            # 새 변수명 생성: Code변수명 + Raw접미사 (예: Q5 + _1 -> Q5_1)
-                            # sanitize를 통해 특수문자 정리
-                            new_name = sanitize_var_name(col_a_val + suffix)
+                            # 라벨 기반 이름 + 접미사
+                            new_name = sanitize_var_name(label_base + suffix)
                             
                             temp_vars.append({
                                 "Raw 변수명": rc_original,
-                                "Code 변수명": col_a_val, # 원본 Code명 유지
-                                "질문 내용": col_c_val, # 라벨 공유
+                                "Code 변수명": col_a_val,
+                                "질문 내용": col_c_val,
                                 "변경할 변수명": new_name,
                                 "상태": "매칭 성공 (세트)"
                             })
 
-                    # 리스트를 DataFrame으로 변환
+                    # --- [Step 2] 중복 변수명 처리 로직 (추가됨) ---
+                    # 1. 먼저 생성된 모든 변수명의 빈도수를 체크
+                    name_freq = collections.Counter([item['변경할 변수명'] for item in temp_vars])
+                    
+                    # 2. 중복 카운터 준비
+                    name_counter = collections.defaultdict(int)
+                    
                     final_data = []
                     seen_raw = set()
                     
-                    # 중복 제거 (혹시 로직상 겹친 경우)
+                    # 3. 리스트를 다시 돌면서 중복인 경우 번호 부여
                     for item in temp_vars:
-                        if item['Raw 변수명'] not in seen_raw:
-                            final_data.append(item)
-                            seen_raw.add(item['Raw 변수명'])
+                        # 이미 처리한 Raw 변수는 패스
+                        if item['Raw 변수명'] in seen_raw: continue
+                        
+                        candidate_name = item['변경할 변수명']
+                        
+                        # 중복이 발생하는 이름인 경우에만 번호 붙임 (단독은 그대로)
+                        if name_freq[candidate_name] > 1:
+                            name_counter[candidate_name] += 1
+                            # _1, _2 ... 순서대로 붙임
+                            final_name = f"{candidate_name}_{name_counter[candidate_name]}"
+                        else:
+                            final_name = candidate_name
+                            
+                        item['변경할 변수명'] = final_name
+                        final_data.append(item)
+                        seen_raw.add(item['Raw 변수명'])
 
-                    # --- [Step 2] 매칭 실패 항목 찾기 ---
+                    # --- [Step 3] 매칭 실패 항목 찾기 ---
                     for raw_col in df_raw.columns:
                         raw_col_str = str(raw_col).strip()
+                        
+                        # [수정] NO, ID 등 불필요한 컬럼은 실패 목록에서 제외
+                        if raw_col_str.lower() in ['no', 'id', '번호', '순번']: continue
+                        
                         if raw_col_str not in seen_raw:
                             final_data.append({
                                 "Raw 변수명": raw_col_str,
