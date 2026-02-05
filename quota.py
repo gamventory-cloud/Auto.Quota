@@ -608,15 +608,13 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
 
 # ==============================================================================
-# APP MODE 3: SPSS 변수명 정제 (v60 로직 통합)
+# APP MODE 3: SPSS 변수명 정제 (수정됨: 2번째 열에서 라벨 추출)
 # ==============================================================================
 elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
     st.markdown("""
     **Raw 데이터**와 **Code북**을 비교하여 SPSS 변수명 변경 신텍스를 생성합니다.
-    * **스마트 매칭:** `Q2` (Code) ↔ `q2_1` (Raw) 자동 연결
-    * **중복 처리:** 중복된 질문(`Q1-1`)은 `_1`, `_2` 순서로 자동 번호 부여
-    * **필터링:** 실제 데이터에 없는 보기 번호(1, 2, 3...) 자동 제외
+    * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(귀하의 연령은?)**
     """)
     
     # 1. 파일 업로드
@@ -647,15 +645,19 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     # Raw 데이터 컬럼 매핑 (소문자 -> 원본)
                     raw_cols_map = {str(col).strip().lower(): str(col).strip() for col in df_raw.columns}
                     
-                    # 1차 분석 결과 저장용
                     temp_vars = []
                     
-                    # --- [Step 1] Code북 순회 및 유효 변수 필터링 ---
+                    # --- [Step 1] Code북 순회 (무조건 1, 2열 사용) ---
                     for idx, row in df_code.iterrows():
+                        # 데이터가 너무 적어서 2열이 없으면 건너뜀 (에러 방지)
+                        if len(row) < 2: continue
+                        
+                        # iloc[0]: 1번째 열 (변수명)
+                        # iloc[1]: 2번째 열 (라벨) -> 여기가 수정된 부분입니다!
                         if pd.isna(row.iloc[0]): continue
                         
-                        col_a_val = clean_text(row.iloc[0]) # 원본 변수명
-                        col_c_val = clean_text(row.iloc[2]) # 질문 라벨
+                        col_a_val = clean_text(row.iloc[0]) # 변수명
+                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨 (수정됨: index 2 -> 1)
                         
                         if not col_a_val: continue
                         
@@ -726,6 +728,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     
         except Exception as e:
             st.error(f"오류가 발생했습니다: {e}")
+            st.write("💡 **팁:** Code북 시트에 최소 2개의 열(변수명, 라벨)이 있는지 확인해주세요.")
 
     # 2. 결과 확인 및 수정 에디터
     if 'spss_result_df' in st.session_state:
@@ -757,39 +760,4 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
             if st.button("📥 SPSS Syntax 생성 (.sps)", key="gen_syntax_btn"):
                 sps_lines = []
                 sps_lines.append(f"* Auto Generated Syntax for {st.session_state['spss_file_name']}.")
-                sps_lines.append(f"GET FILE='{st.session_state['spss_file_name']}.sav'.")
-                sps_lines.append("RENAME VARIABLES")
-                
-                count = 0
-                for _, row in edited_df.iterrows():
-                    old_v = str(row['Raw 변수명']).strip()
-                    new_v = str(row['변경할 변수명']).strip()
-                    
-                    if old_v and new_v and (old_v.lower() != new_v.lower()):
-                        sps_lines.append(f"  ({old_v} = {new_v})")
-                        count += 1
-                        
-                sps_lines.append(".")
-                sps_lines.append("EXECUTE.")
-                sps_lines.append(f"SAVE OUTFILE='{st.session_state['spss_file_name']}_Renamed.sav'.")
-                sps_lines.append("EXECUTE.")
-                
-                final_sps = "\n".join(sps_lines)
-                
-                st.download_button(
-                    label="📄 Syntax 파일 다운로드",
-                    data=final_sps,
-                    file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
-                    mime="text/plain"
-                )
-                st.success(f"총 {count}개의 변수 변환 구문이 생성되었습니다.")
-
-        with c2:
-            csv_buffer = io.BytesIO()
-            edited_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="📄 매핑 테이블(CSV) 다운로드",
-                data=csv_buffer,
-                file_name=f"{st.session_state['spss_file_name']}_Mapping.csv",
-                mime="text/csv"
-            )
+                sps
