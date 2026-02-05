@@ -611,7 +611,7 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
 
 # ==============================================================================
-# APP MODE 3: SPSS 변수명 정제 (수정됨: 엑셀 결과 다운로드 추가)
+# APP MODE 3: SPSS 변수명 정제 (수정됨: 엑셀 다운로드 스타일 제거 + 1,2행 헤더 적용)
 # ==============================================================================
 elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
@@ -620,7 +620,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
     * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
     * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-    * **기능 3:** 엑셀 데이터 파일도 변수명이 변경된 상태로 바로 다운로드 가능
+    * **기능 3:** 엑셀 데이터 파일 다운로드 시 **스타일 제거(순수 데이터)** 및 **1행(새 변수명), 2행(기존 변수명)** 구조 저장
     """)
     
     # 1. 파일 업로드
@@ -840,7 +840,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
             )
 
         with c3:
-            # [NEW] 변환된 데이터 엑셀 다운로드 (모든 시트 유지 & 1행에 새 변수명 삽입)
+            # [NEW] 변환된 데이터 엑셀 다운로드 (스타일 제거: 헤더를 데이터로 처리)
             if 'spss_all_sheets' in st.session_state:
                 out_data = io.BytesIO()
                 
@@ -848,40 +848,41 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     # 1. 변경할 이름 딕셔너리 생성
                     rename_map = {}
                     for _, row in edited_df.iterrows():
-                        # 변경할 이름이 있고 기존과 다를 때만
                         if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
                             rename_map[row['Raw 변수명']] = str(row['변경할 변수명']).strip()
                     
-                    # 2. 모든 시트 순회하며 저장
+                    # 2. 모든 시트 순회
                     for sheet_name, df_sheet in st.session_state['spss_all_sheets'].items():
-                        # 변수명 변경 대상 시트인지 확인 (선택한 Raw 시트 or 이름에 DATA/LABEL 포함)
+                        # 타겟 시트 확인 (DATA, LABEL, 또는 선택한 Raw 시트)
                         is_target = (sheet_name == st.session_state.get('spss_target_sheets', [''])[0]) or \
                                     ('DATA' in sheet_name.upper()) or ('LABEL' in sheet_name.upper())
                         
                         if is_target:
-                            # 새 헤더 리스트 생성 (매칭되면 새이름, 아니면 원래이름)
-                            new_header = [rename_map.get(str(col).strip(), str(col).strip()) for col in df_sheet.columns]
+                            # 1행: 새 변수명 (매칭된 것, 없으면 원래 이름)
+                            row1 = [rename_map.get(str(col).strip(), str(col).strip()) for col in df_sheet.columns]
+                            # 2행: 기존 변수명 (Original Header)
+                            row2 = df_sheet.columns.tolist()
                             
-                            # 기존 데이터를 2행부터 시작하도록 밀어내기 위해:
-                            # 1) 현재 데이터프레임 복사
-                            df_export = df_sheet.copy()
+                            # 데이터프레임 조립 (헤더 스타일 제거를 위해 데이터로 취급)
+                            # Header DF (2줄)
+                            df_header = pd.DataFrame([row1, row2]) 
+                            # Data DF (Index 무시하고 값만)
+                            df_body = pd.DataFrame(df_sheet.values)
                             
-                            # 2) 현재 컬럼명(Header)을 데이터의 첫 번째 행으로 삽입할 준비
-                            # (columns를 리스트로 만들어서 DataFrame 생성)
-                            # columns가 object가 아닐 수 있으므로 문자열로 변환
-                            old_header_row = pd.DataFrame([df_sheet.columns.tolist()], columns=df_sheet.columns)
+                            # 합치기
+                            df_export = pd.concat([df_header, df_body], ignore_index=True)
                             
-                            # 3) 기존 헤더를 1행 데이터로 붙임 (concat)
-                            df_export = pd.concat([old_header_row, df_export], ignore_index=True)
+                            # 저장 (header=False, index=False -> 스타일 없는 순수 데이터)
+                            df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                             
-                            # 4) 실제 엑셀의 헤더(1행)를 '새 변수명'으로 교체
-                            df_export.columns = new_header
-                            
-                            # 저장
-                            df_export.to_excel(writer, sheet_name=sheet_name, index=False)
                         else:
-                            # 대상 시트가 아니면 원본 그대로 저장
-                            df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+                            # 타겟 아니면 원본 그대로 (단, 스타일 제거를 위해 헤더를 데이터로 내림)
+                            row1 = df_sheet.columns.tolist()
+                            df_header = pd.DataFrame([row1])
+                            df_body = pd.DataFrame(df_sheet.values)
+                            
+                            df_export = pd.concat([df_header, df_body], ignore_index=True)
+                            df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                 
                 st.download_button(
                     label="📊 변환된 데이터(XLSX) 다운로드",
