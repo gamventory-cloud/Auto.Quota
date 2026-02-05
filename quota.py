@@ -611,7 +611,7 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
 
 # ==============================================================================
-# APP MODE 3: SPSS 변수명 정제 (수정됨: 중복 변수명에 자동 번호 부여)
+# APP MODE 3: SPSS 변수명 정제 (수정됨: 엑셀 결과 다운로드 추가)
 # ==============================================================================
 elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
@@ -620,7 +620,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
     * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
     * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-    * **기능 3:** 다운로드되는 Syntax 파일의 한글 깨짐 방지 (UTF-8 with BOM 적용)
+    * **기능 3:** 엑셀 데이터 파일도 변수명이 변경된 상태로 바로 다운로드 가능
     """)
     
     # 1. 파일 업로드
@@ -646,6 +646,9 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 with st.spinner('데이터 분석 및 매칭 중...'):
                     # 데이터프레임 로드
                     df_raw = pd.read_excel(uploaded_file, sheet_name=raw_sheet)
+                    # [NEW] 원본 데이터 세션에 저장 (나중에 엑셀 다운로드용)
+                    st.session_state['spss_raw_data'] = df_raw
+                    
                     # [수정] header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
                     df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
                     
@@ -785,7 +788,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
         st.markdown("---")
         st.markdown("### 3. 파일 내보내기")
         
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3) # 컬럼 3개로 변경
         
         with c1:
             if st.button("📥 SPSS Syntax 생성 (.sps)", key="gen_syntax_btn"):
@@ -822,11 +825,39 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 st.success(f"총 {count}개의 변수 변환 구문이 생성되었습니다.")
 
         with c2:
-            csv_buffer = io.BytesIO()
-            edited_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+            # [수정] 매핑 테이블을 엑셀로 변경
+            out_map = io.BytesIO()
+            with pd.ExcelWriter(out_map, engine='xlsxwriter') as writer:
+                edited_df.to_excel(writer, index=False)
+                
             st.download_button(
-                label="📄 매핑 테이블(CSV) 다운로드",
-                data=csv_buffer,
-                file_name=f"{st.session_state['spss_file_name']}_Mapping.csv",
-                mime="text/csv"
+                label="📄 매핑 테이블(XLSX) 다운로드",
+                data=out_map.getvalue(),
+                file_name=f"{st.session_state['spss_file_name']}_Mapping.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+        with c3:
+            # [NEW] 변환된 데이터 엑셀 다운로드
+            if 'spss_raw_data' in st.session_state:
+                # 1. 변경할 이름 딕셔너리 생성
+                rename_map = {}
+                for _, row in edited_df.iterrows():
+                    # 변경할 이름이 있는 경우에만 포함
+                    if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
+                        rename_map[row['Raw 변수명']] = str(row['변경할 변수명']).strip()
+                
+                # 2. 데이터프레임 복사본에 이름 변경 적용
+                df_final = st.session_state['spss_raw_data'].rename(columns=rename_map)
+                
+                # 3. 엑셀로 변환
+                out_data = io.BytesIO()
+                with pd.ExcelWriter(out_data, engine='xlsxwriter') as writer:
+                    df_final.to_excel(writer, index=False)
+                
+                st.download_button(
+                    label="📊 변환된 데이터(XLSX) 다운로드",
+                    data=out_data.getvalue(),
+                    file_name=f"{st.session_state['spss_file_name']}_Renamed.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
