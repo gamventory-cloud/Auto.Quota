@@ -11,6 +11,29 @@ import os
 import altair as alt
 from joblib import Parallel, delayed, cpu_count
 
+# ==============================================================================
+# [공통 함수] 텍스트 정제 및 변수명 처리 함수 (전역 위치)
+# ==============================================================================
+def clean_text(text):
+    """줄바꿈, 탭, 불필요한 공백을 제거합니다."""
+    if pd.isna(text): return ""
+    text = str(text).strip()
+    return text.replace("\n", "").replace("\r", "").replace("\t", "")
+
+def extract_base_name(text):
+    """질문 라벨에서 마침표(.) 앞부분만 추출합니다."""
+    text = clean_text(text)
+    if "." in text:
+        return text.split(".")[0].strip()
+    return text.strip()
+
+def sanitize_var_name(text):
+    """SPSS 변수명 규칙에 맞게 특수문자를 제거합니다."""
+    # 괄호, 공백, 슬래시 등 제거
+    text = re.sub(r"[\s\-\(\)\/]", "", text)
+    # 하이픈은 언더바로, 더하기는 제거
+    text = text.replace("-", "_").replace("+", "")
+    return text
 
 # [비밀번호 잠금 기능 시작] ---------------------------------------------
 def check_password():
@@ -52,7 +75,9 @@ st.set_page_config(page_title="Quota Master Pro", layout="wide")
 st.sidebar.title("🧰 작업 메뉴")
 app_mode = st.sidebar.radio(
     "메뉴 선택",
-    ["🧹 1. 불성실 응답자 에디터", "📊 2. 쿼터 자동 할당 솔루션 (Turbo)"]
+    ["🧹 1. 불성실 응답자 에디터", 
+     "📊 2. 쿼터 자동 할당 솔루션 (Turbo)", 
+     "🛠️ 3. SPSS 변수명 정제"] # 메뉴 추가됨
 )
 st.sidebar.markdown("---")
 n_cores = cpu_count()
@@ -581,3 +606,190 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
                     st.dataframe(df_recs.drop(columns=['순서', 'sort_val']), use_container_width=True, hide_index=True)
 
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
+
+# ==============================================================================
+# APP MODE 3: SPSS 변수명 정제 (v60 로직 통합)
+# ==============================================================================
+elif app_mode == "🛠️ 3. SPSS 변수명 정제":
+    st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
+    st.markdown("""
+    **Raw 데이터**와 **Code북**을 비교하여 SPSS 변수명 변경 신텍스를 생성합니다.
+    * **스마트 매칭:** `Q2` (Code) ↔ `q2_1` (Raw) 자동 연결
+    * **중복 처리:** 중복된 질문(`Q1-1`)은 `_1`, `_2` 순서로 자동 번호 부여
+    * **필터링:** 실제 데이터에 없는 보기 번호(1, 2, 3...) 자동 제외
+    """)
+    
+    # 1. 파일 업로드
+    uploaded_file = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=["xlsx"], key="spss_file_uploader")
+    
+    if uploaded_file:
+        try:
+            # 엑셀 파일 로드 및 시트명 확인
+            xl = pd.ExcelFile(uploaded_file)
+            sheet_names = xl.sheet_names
+            
+            # 시트 선택 UI
+            col1, col2 = st.columns(2)
+            with col1:
+                raw_sheet = st.selectbox("Raw 데이터 시트", sheet_names, index=0, key="raw_sheet_select")
+            with col2:
+                # 보통 Code북은 뒤쪽에 있으므로 자동 선택 시도
+                code_idx = 2 if len(sheet_names) > 2 else (1 if len(sheet_names) > 1 else 0)
+                code_sheet = st.selectbox("Code북 시트", sheet_names, index=code_idx, key="code_sheet_select")
+            
+            # 분석 시작 버튼
+            if st.button("분석 시작", key="analyze_btn"):
+                with st.spinner('데이터 분석 및 매칭 중...'):
+                    # 데이터프레임 로드
+                    df_raw = pd.read_excel(uploaded_file, sheet_name=raw_sheet)
+                    df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet)
+                    
+                    # Raw 데이터 컬럼 매핑 (소문자 -> 원본)
+                    raw_cols_map = {str(col).strip().lower(): str(col).strip() for col in df_raw.columns}
+                    
+                    # 1차 분석 결과 저장용
+                    temp_vars = []
+                    
+                    # --- [Step 1] Code북 순회 및 유효 변수 필터링 ---
+                    for idx, row in df_code.iterrows():
+                        if pd.isna(row.iloc[0]): continue
+                        
+                        col_a_val = clean_text(row.iloc[0]) # 원본 변수명
+                        col_c_val = clean_text(row.iloc[2]) # 질문 라벨
+                        
+                        if not col_a_val: continue
+                        
+                        # [스마트 매칭 로직]
+                        match_raw_col = None
+                        
+                        if col_a_val.lower() in raw_cols_map:
+                            match_raw_col = raw_cols_map[col_a_val.lower()]
+                        elif f"{col_a_val.lower()}_1" in raw_cols_map:
+                            match_raw_col = raw_cols_map[f"{col_a_val.lower()}_1"]
+                            
+                        if match_raw_col:
+                            # 변수명 추출
+                            base_name = extract_base_name(col_c_val)
+                            if not base_name: base_name = col_a_val
+                            
+                            base_name = sanitize_var_name(base_name)
+                            
+                            temp_vars.append({
+                                "raw_col": match_raw_col,
+                                "code_var": col_a_val,
+                                "label": col_c_val,
+                                "base_name": base_name
+                            })
+                    
+                    # --- [Step 2] 중복 카운트 및 순차 번호 부여 ---
+                    freq_map = {}
+                    for item in temp_vars:
+                        bn = item['base_name'].lower()
+                        freq_map[bn] = freq_map.get(bn, 0) + 1
+                    
+                    counter_map = {}
+                    final_data = []
+                    
+                    for item in temp_vars:
+                        bn = item['base_name'].lower()
+                        
+                        if freq_map[bn] > 1:
+                            counter_map[bn] = counter_map.get(bn, 0) + 1
+                            new_var_name = f"{item['base_name']}_{counter_map[bn]}"
+                        else:
+                            new_var_name = item['base_name']
+                        
+                        final_data.append({
+                            "Raw 변수명": item['raw_col'],
+                            "Code 변수명": item['code_var'],
+                            "질문 내용 (추출 전)": item['label'],
+                            "변경할 변수명": new_var_name,
+                            "상태": "매칭 성공"
+                        })
+                        
+                    # --- [Step 3] 매칭 실패 항목 찾기 ---
+                    matched_raw_cols = set([x['Raw 변수명'] for x in final_data])
+                    for raw_col in df_raw.columns:
+                        raw_col_str = str(raw_col).strip()
+                        if raw_col_str not in matched_raw_cols:
+                            final_data.append({
+                                "Raw 변수명": raw_col_str,
+                                "Code 변수명": "-",
+                                "질문 내용 (추출 전)": "-",
+                                "변경할 변수명": "", 
+                                "상태": "매칭 실패 (확인 필요)"
+                            })
+                    
+                    st.session_state['spss_result_df'] = pd.DataFrame(final_data)
+                    st.session_state['spss_file_name'] = uploaded_file.name.split('.')[0]
+                    st.success("분석이 완료되었습니다! 아래 표에서 결과를 확인하세요.")
+                    
+        except Exception as e:
+            st.error(f"오류가 발생했습니다: {e}")
+
+    # 2. 결과 확인 및 수정 에디터
+    if 'spss_result_df' in st.session_state:
+        st.markdown("---")
+        st.markdown("### 2. 결과 확인 및 수정")
+        st.info("💡 **'변경할 변수명'** 컬럼을 더블클릭하여 직접 수정할 수 있습니다.")
+        
+        edited_df = st.data_editor(
+            st.session_state['spss_result_df'],
+            column_config={
+                "상태": st.column_config.TextColumn("상태", disabled=True),
+                "Raw 변수명": st.column_config.TextColumn(disabled=True),
+                "Code 변수명": st.column_config.TextColumn(disabled=True),
+                "질문 내용 (추출 전)": st.column_config.TextColumn(disabled=True),
+            },
+            use_container_width=True,
+            height=600,
+            hide_index=True,
+            key="data_editor"
+        )
+        
+        # 3. 다운로드 버튼
+        st.markdown("---")
+        st.markdown("### 3. 파일 내보내기")
+        
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            if st.button("📥 SPSS Syntax 생성 (.sps)", key="gen_syntax_btn"):
+                sps_lines = []
+                sps_lines.append(f"* Auto Generated Syntax for {st.session_state['spss_file_name']}.")
+                sps_lines.append(f"GET FILE='{st.session_state['spss_file_name']}.sav'.")
+                sps_lines.append("RENAME VARIABLES")
+                
+                count = 0
+                for _, row in edited_df.iterrows():
+                    old_v = str(row['Raw 변수명']).strip()
+                    new_v = str(row['변경할 변수명']).strip()
+                    
+                    if old_v and new_v and (old_v.lower() != new_v.lower()):
+                        sps_lines.append(f"  ({old_v} = {new_v})")
+                        count += 1
+                        
+                sps_lines.append(".")
+                sps_lines.append("EXECUTE.")
+                sps_lines.append(f"SAVE OUTFILE='{st.session_state['spss_file_name']}_Renamed.sav'.")
+                sps_lines.append("EXECUTE.")
+                
+                final_sps = "\n".join(sps_lines)
+                
+                st.download_button(
+                    label="📄 Syntax 파일 다운로드",
+                    data=final_sps,
+                    file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
+                    mime="text/plain"
+                )
+                st.success(f"총 {count}개의 변수 변환 구문이 생성되었습니다.")
+
+        with c2:
+            csv_buffer = io.BytesIO()
+            edited_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📄 매핑 테이블(CSV) 다운로드",
+                data=csv_buffer,
+                file_name=f"{st.session_state['spss_file_name']}_Mapping.csv",
+                mime="text/csv"
+            )
