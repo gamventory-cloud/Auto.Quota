@@ -620,6 +620,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
     * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
     * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
+    * **기능 3:** 다운로드되는 Syntax 파일의 한글 깨짐 방지 (UTF-8 with BOM 적용)
     """)
     
     # 1. 파일 업로드
@@ -809,9 +810,12 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 
                 final_sps = "\n".join(sps_lines)
                 
+                # [수정] UTF-8 BOM 인코딩 적용
+                final_sps_bytes = final_sps.encode('utf-8-sig')
+
                 st.download_button(
                     label="📄 Syntax 파일 다운로드",
-                    data=final_sps,
+                    data=final_sps_bytes,
                     file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
                     mime="text/plain"
                 )
