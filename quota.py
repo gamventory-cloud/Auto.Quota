@@ -644,10 +644,12 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
             # 분석 시작 버튼
             if st.button("분석 시작", key="analyze_btn"):
                 with st.spinner('데이터 분석 및 매칭 중...'):
-                    # 데이터프레임 로드
-                    df_raw = pd.read_excel(uploaded_file, sheet_name=raw_sheet)
-                    # [NEW] 원본 데이터 세션에 저장 (나중에 엑셀 다운로드용)
-                    st.session_state['spss_raw_data'] = df_raw
+                    # [NEW] 분석 시작 시 모든 시트를 미리 읽어둠 (다운로드용)
+                    st.session_state['spss_all_sheets'] = pd.read_excel(uploaded_file, sheet_name=None)
+                    st.session_state['spss_target_sheets'] = [raw_sheet] # 기본 타겟은 선택한 Raw 시트
+
+                    # 데이터프레임 로드 (분석용)
+                    df_raw = st.session_state['spss_all_sheets'][raw_sheet]
                     
                     # [수정] header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
                     df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
@@ -838,22 +840,48 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
             )
 
         with c3:
-            # [NEW] 변환된 데이터 엑셀 다운로드
-            if 'spss_raw_data' in st.session_state:
-                # 1. 변경할 이름 딕셔너리 생성
-                rename_map = {}
-                for _, row in edited_df.iterrows():
-                    # 변경할 이름이 있는 경우에만 포함
-                    if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
-                        rename_map[row['Raw 변수명']] = str(row['변경할 변수명']).strip()
-                
-                # 2. 데이터프레임 복사본에 이름 변경 적용
-                df_final = st.session_state['spss_raw_data'].rename(columns=rename_map)
-                
-                # 3. 엑셀로 변환
+            # [NEW] 변환된 데이터 엑셀 다운로드 (모든 시트 유지 & 1행에 새 변수명 삽입)
+            if 'spss_all_sheets' in st.session_state:
                 out_data = io.BytesIO()
+                
                 with pd.ExcelWriter(out_data, engine='xlsxwriter') as writer:
-                    df_final.to_excel(writer, index=False)
+                    # 1. 변경할 이름 딕셔너리 생성
+                    rename_map = {}
+                    for _, row in edited_df.iterrows():
+                        # 변경할 이름이 있고 기존과 다를 때만
+                        if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
+                            rename_map[row['Raw 변수명']] = str(row['변경할 변수명']).strip()
+                    
+                    # 2. 모든 시트 순회하며 저장
+                    for sheet_name, df_sheet in st.session_state['spss_all_sheets'].items():
+                        # 변수명 변경 대상 시트인지 확인 (선택한 Raw 시트 or 이름에 DATA/LABEL 포함)
+                        is_target = (sheet_name == st.session_state.get('spss_target_sheets', [''])[0]) or \
+                                    ('DATA' in sheet_name.upper()) or ('LABEL' in sheet_name.upper())
+                        
+                        if is_target:
+                            # 새 헤더 리스트 생성 (매칭되면 새이름, 아니면 원래이름)
+                            new_header = [rename_map.get(str(col).strip(), str(col).strip()) for col in df_sheet.columns]
+                            
+                            # 기존 데이터를 2행부터 시작하도록 밀어내기 위해:
+                            # 1) 현재 데이터프레임 복사
+                            df_export = df_sheet.copy()
+                            
+                            # 2) 현재 컬럼명(Header)을 데이터의 첫 번째 행으로 삽입할 준비
+                            # (columns를 리스트로 만들어서 DataFrame 생성)
+                            # columns가 object가 아닐 수 있으므로 문자열로 변환
+                            old_header_row = pd.DataFrame([df_sheet.columns.tolist()], columns=df_sheet.columns)
+                            
+                            # 3) 기존 헤더를 1행 데이터로 붙임 (concat)
+                            df_export = pd.concat([old_header_row, df_export], ignore_index=True)
+                            
+                            # 4) 실제 엑셀의 헤더(1행)를 '새 변수명'으로 교체
+                            df_export.columns = new_header
+                            
+                            # 저장
+                            df_export.to_excel(writer, sheet_name=sheet_name, index=False)
+                        else:
+                            # 대상 시트가 아니면 원본 그대로 저장
+                            df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
                 
                 st.download_button(
                     label="📊 변환된 데이터(XLSX) 다운로드",
