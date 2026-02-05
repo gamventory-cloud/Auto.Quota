@@ -29,10 +29,13 @@ def extract_base_name(text):
 
 def sanitize_var_name(text):
     """SPSS 변수명 규칙에 맞게 특수문자를 제거합니다."""
-    # 괄호, 공백, 슬래시 등 제거
-    text = re.sub(r"[\s\-\(\)\/]", "", text)
-    # 하이픈은 언더바로, 더하기는 제거
-    text = text.replace("-", "_").replace("+", "")
+    text = str(text)
+    # [수정] 하이픈(-)과 공백을 먼저 언더바(_)로 치환하여 숫자 붙음 방지
+    text = text.replace("-", "_").replace(" ", "_")
+    # 괄호, 슬래시 등 제거 (알파벳, 숫자, 언더바만 남김)
+    text = re.sub(r"[^a-zA-Z0-9_]", "", text)
+    # 연속된 언더바는 하나로
+    text = re.sub(r"__+", "_", text)
     return text
 
 # [비밀번호 잠금 기능 시작] ---------------------------------------------
@@ -608,13 +611,14 @@ elif app_mode == "📊 2. 쿼터 자동 할당 솔루션 (Turbo)":
             except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
 
 # ==============================================================================
-# APP MODE 3: SPSS 변수명 정제 (수정됨: 2번째 열에서 라벨 추출)
+# APP MODE 3: SPSS 변수명 정제 (수정됨: 2번째 열에서 라벨 추출 + 복수응답 처리 강화)
 # ==============================================================================
 elif app_mode == "🛠️ 3. SPSS 변수명 정제":
     st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
     st.markdown("""
     **Raw 데이터**와 **Code북**을 비교하여 SPSS 변수명 변경 신텍스를 생성합니다.
     * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(귀하의 연령은?)**
+    * **기능 개선:** Q5_1 ~ Q5_8 같은 복수응답 문항 자동 인식, Q1-1 하이픈 오류 해결
     """)
     
     # 1. 파일 업로드
@@ -649,75 +653,75 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     
                     # --- [Step 1] Code북 순회 (무조건 1, 2열 사용) ---
                     for idx, row in df_code.iterrows():
-                        # 데이터가 너무 적어서 2열이 없으면 건너뜀 (에러 방지)
                         if len(row) < 2: continue
-                        
-                        # iloc[0]: 1번째 열 (변수명)
-                        # iloc[1]: 2번째 열 (라벨) -> 여기가 수정된 부분입니다!
                         if pd.isna(row.iloc[0]): continue
                         
-                        col_a_val = clean_text(row.iloc[0]) # 변수명
-                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨 (수정됨: index 2 -> 1)
+                        col_a_val = clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q5
+                        col_c_val = clean_text(row.iloc[1]) # 질문 라벨
                         
                         if not col_a_val: continue
                         
-                        # [스마트 매칭 로직]
-                        match_raw_col = None
-                        
+                        # [스마트 매칭 로직 개선]
+                        # 1. 정확히 일치하는 경우 (예: Q1 -> q1)
                         if col_a_val.lower() in raw_cols_map:
-                            match_raw_col = raw_cols_map[col_a_val.lower()]
-                        elif f"{col_a_val.lower()}_1" in raw_cols_map:
-                            match_raw_col = raw_cols_map[f"{col_a_val.lower()}_1"]
-                            
-                        if match_raw_col:
-                            # 변수명 추출
-                            base_name = extract_base_name(col_c_val)
-                            if not base_name: base_name = col_a_val
-                            
-                            base_name = sanitize_var_name(base_name)
+                            raw_original = raw_cols_map[col_a_val.lower()]
+                            new_var_name = sanitize_var_name(col_a_val) # Code명 그대로 사용
                             
                             temp_vars.append({
-                                "raw_col": match_raw_col,
-                                "code_var": col_a_val,
-                                "label": col_c_val,
-                                "base_name": base_name
+                                "Raw 변수명": raw_original,
+                                "Code 변수명": col_a_val,
+                                "질문 내용": col_c_val,
+                                "변경할 변수명": new_var_name,
+                                "상태": "매칭 성공"
                             })
-                    
-                    # --- [Step 2] 중복 카운트 및 순차 번호 부여 ---
-                    freq_map = {}
-                    for item in temp_vars:
-                        bn = item['base_name'].lower()
-                        freq_map[bn] = freq_map.get(bn, 0) + 1
-                    
-                    counter_map = {}
+
+                        # 2. 복수응답/세트 문항 탐색 (예: Q5 -> q5_1, q5_2...)
+                        # Code변수명 + "_" 로 시작하는 모든 Raw 컬럼을 찾음
+                        prefix = col_a_val.lower() + "_"
+                        found_multiples = []
+                        for rc_lower, rc_original in raw_cols_map.items():
+                            if rc_lower.startswith(prefix):
+                                found_multiples.append((rc_lower, rc_original))
+                        
+                        # 찾은 복수응답 컬럼들 추가
+                        for _, rc_original in found_multiples:
+                            # 접미사 추출 (예: q5_1 -> _1)
+                            # 대소문자 무시하고 raw 컬럼명에서 code 변수명 길이만큼 자름
+                            suffix = rc_original[len(col_a_val):] 
+                            # 만약 suffix가 _로 시작하지 않으면 강제로 붙여줌 (안전장치)
+                            if not suffix.startswith('_') and not suffix.startswith('-'):
+                                suffix = "_" + suffix
+
+                            # 새 변수명 생성: Code변수명 + Raw접미사 (예: Q5 + _1 -> Q5_1)
+                            # sanitize를 통해 특수문자 정리
+                            new_name = sanitize_var_name(col_a_val + suffix)
+                            
+                            temp_vars.append({
+                                "Raw 변수명": rc_original,
+                                "Code 변수명": col_a_val, # 원본 Code명 유지
+                                "질문 내용": col_c_val, # 라벨 공유
+                                "변경할 변수명": new_name,
+                                "상태": "매칭 성공 (세트)"
+                            })
+
+                    # 리스트를 DataFrame으로 변환
                     final_data = []
+                    seen_raw = set()
                     
+                    # 중복 제거 (혹시 로직상 겹친 경우)
                     for item in temp_vars:
-                        bn = item['base_name'].lower()
-                        
-                        if freq_map[bn] > 1:
-                            counter_map[bn] = counter_map.get(bn, 0) + 1
-                            new_var_name = f"{item['base_name']}_{counter_map[bn]}"
-                        else:
-                            new_var_name = item['base_name']
-                        
-                        final_data.append({
-                            "Raw 변수명": item['raw_col'],
-                            "Code 변수명": item['code_var'],
-                            "질문 내용 (추출 전)": item['label'],
-                            "변경할 변수명": new_var_name,
-                            "상태": "매칭 성공"
-                        })
-                        
-                    # --- [Step 3] 매칭 실패 항목 찾기 ---
-                    matched_raw_cols = set([x['Raw 변수명'] for x in final_data])
+                        if item['Raw 변수명'] not in seen_raw:
+                            final_data.append(item)
+                            seen_raw.add(item['Raw 변수명'])
+
+                    # --- [Step 2] 매칭 실패 항목 찾기 ---
                     for raw_col in df_raw.columns:
                         raw_col_str = str(raw_col).strip()
-                        if raw_col_str not in matched_raw_cols:
+                        if raw_col_str not in seen_raw:
                             final_data.append({
                                 "Raw 변수명": raw_col_str,
                                 "Code 변수명": "-",
-                                "질문 내용 (추출 전)": "-",
+                                "질문 내용": "-",
                                 "변경할 변수명": "", 
                                 "상태": "매칭 실패 (확인 필요)"
                             })
@@ -728,7 +732,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                     
         except Exception as e:
             st.error(f"오류가 발생했습니다: {e}")
-            st.write("💡 **팁:** Code북 시트에 최소 2개의 열(변수명, 라벨)이 있는지 확인해주세요.")
+            st.code(traceback.format_exc())
 
     # 2. 결과 확인 및 수정 에디터
     if 'spss_result_df' in st.session_state:
@@ -742,7 +746,7 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
                 "상태": st.column_config.TextColumn("상태", disabled=True),
                 "Raw 변수명": st.column_config.TextColumn(disabled=True),
                 "Code 변수명": st.column_config.TextColumn(disabled=True),
-                "질문 내용 (추출 전)": st.column_config.TextColumn(disabled=True),
+                "질문 내용": st.column_config.TextColumn(disabled=True),
             },
             use_container_width=True,
             height=600,
@@ -760,4 +764,39 @@ elif app_mode == "🛠️ 3. SPSS 변수명 정제":
             if st.button("📥 SPSS Syntax 생성 (.sps)", key="gen_syntax_btn"):
                 sps_lines = []
                 sps_lines.append(f"* Auto Generated Syntax for {st.session_state['spss_file_name']}.")
-                sps
+                sps_lines.append(f"GET FILE='{st.session_state['spss_file_name']}.sav'.")
+                sps_lines.append("RENAME VARIABLES")
+                
+                count = 0
+                for _, row in edited_df.iterrows():
+                    old_v = str(row['Raw 변수명']).strip()
+                    new_v = str(row['변경할 변수명']).strip()
+                    
+                    if old_v and new_v and (old_v.lower() != new_v.lower()):
+                        sps_lines.append(f"  ({old_v} = {new_v})")
+                        count += 1
+                        
+                sps_lines.append(".")
+                sps_lines.append("EXECUTE.")
+                sps_lines.append(f"SAVE OUTFILE='{st.session_state['spss_file_name']}_Renamed.sav'.")
+                sps_lines.append("EXECUTE.")
+                
+                final_sps = "\n".join(sps_lines)
+                
+                st.download_button(
+                    label="📄 Syntax 파일 다운로드",
+                    data=final_sps,
+                    file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
+                    mime="text/plain"
+                )
+                st.success(f"총 {count}개의 변수 변환 구문이 생성되었습니다.")
+
+        with c2:
+            csv_buffer = io.BytesIO()
+            edited_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📄 매핑 테이블(CSV) 다운로드",
+                data=csv_buffer,
+                file_name=f"{st.session_state['spss_file_name']}_Mapping.csv",
+                mime="text/csv"
+            )
