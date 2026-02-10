@@ -8,7 +8,7 @@ import textwrap
 import collections
 from collections import Counter
 
-# 워드/엑셀 관련 라이브러리 (requirements.txt 필수)
+# 워드/엑셀 관련 라이브러리 (requirements.txt 필수: python-docx, openpyxl)
 try:
     from docx import Document
     from docx.document import Document as _Document
@@ -25,7 +25,7 @@ except ImportError:
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils
 
-# 2. 페이지 기본 설정 (무조건 맨 위에)
+# 2. 페이지 기본 설정
 st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 
 # 3. 비밀번호 잠금
@@ -247,6 +247,59 @@ def collapse_consecutive_duplicates(item_list):
         if item != collapsed[-1]:
             collapsed.append(item)
     return collapsed
+
+# [NEW] Constant Sum (고정 합계) 테이블 감지 함수
+def extract_constant_sum_table(table, current_var):
+    # 1. 2열짜리 표인지 확인 (항목 | 입력값)
+    if len(table.columns) != 2:
+        return None
+    
+    rows = table.rows
+    if len(rows) < 2: return None
+
+    # 2. 질문 텍스트나 표 내용에서 '합계 100%' 힌트 찾기
+    q_text = current_var.get("질문 내용", "")
+    is_sum_100 = ("100" in q_text and "%" in q_text) or "합계" in q_text or "비중" in q_text or "배분" in q_text
+    
+    # 3. 우측 열이 입력칸인지 확인 (%, _, 입력, 빈칸 등)
+    # 표의 첫 줄과 마지막 줄의 오른쪽 칸을 샘플링해서 확인
+    right_col_sample = [rows[0].cells[1].text, rows[-1].cells[1].text]
+    is_input_col = any(x in sample for sample in right_col_sample for x in ["%", "_", "입력", "(", ")"])
+    
+    # 강력한 조건: 질문에 100%가 있거나, 우측 열에 %가 보이거나
+    if not (is_sum_100 or is_input_col):
+        return None
+
+    # 4. 추출 시작 (헤더가 없다고 가정하고 0번 행부터 돕니다)
+    extracted_entries = []
+    
+    for i, row in enumerate(rows):
+        cells = row.cells
+        label_cell = cells[0].text.strip() # 왼쪽: 보기 내용 (예: 맛, 가격)
+        input_cell = cells[1].text.strip() # 오른쪽: 입력 칸 (예: ___%)
+        
+        # 빈 줄이면 패스
+        if not label_cell: continue
+        
+        # 합계 줄(Total)은 보통 변수로 안 만드므로 제외
+        if "합계" in label_cell or "Total" in label_cell or "TOTAL" in label_cell:
+            continue
+
+        # 변수 생성
+        sub_var_name = f"{current_var['변수명']}_{i+1}"
+        # 라벨 생성: [부모질문] 보기내용 (단위)
+        final_label = f"[{current_var['변수명']}] {label_cell}"
+        if "%" in input_cell or "퍼센트" in q_text:
+            final_label += " (%)"
+            
+        extracted_entries.append({
+            "변수명": sub_var_name,
+            "질문 내용": final_label,
+            "보기 값": "(숫자입력)", # 오픈엔드 처리
+            "유형": "Open"
+        })
+            
+    return extracted_entries
 
 def extract_double_scale_table(table, current_var):
     rows = table.rows
@@ -722,6 +775,15 @@ def parse_word_to_df(docx_file):
             rows = block.rows
             if len(rows) < 1: continue
             
+            # [NEW] Constant Sum (합계 100% 표) 우선 감지
+            # 헤더가 없어도 데이터를 읽어야 하므로 가장 먼저 체크합니다.
+            if current_entry and not is_parent_added:
+                const_sum_entries = extract_constant_sum_table(block, current_entry)
+                if const_sum_entries:
+                    extracted_data.extend(const_sum_entries)
+                    is_parent_added = True
+                    continue
+
             if current_entry and not is_parent_added:
                 double_entries = extract_double_scale_table(block, current_entry)
                 if double_entries:
@@ -1028,7 +1090,7 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 st.markdown("""
 **[기능 설명]**
 * **Save with KEEP:** SPSS 신택스 생성 시, '사용여부'가 O/R인 변수들만 `/KEEP=` 명령어로 길게 나열하여 저장하도록 변경했습니다.
-* **완벽 통합:** 기존의 모든 기능(순위형, 표 파싱, PROG 삭제, 하이픈 처리 등)이 포함된 최종 완성본입니다.
+* **완벽 통합:** 기존의 모든 기능(순위형, 표 파싱, PROG 삭제, 하이픈 처리 등)에 **고정 합계(Constant Sum) 테이블 감지** 기능이 추가되었습니다.
 """)
 
 tab1, tab2 = st.tabs(["1단계: 워드 ➡️ 엑셀 생성", "2단계: 엑셀 ➡️ SPSS 생성"])
