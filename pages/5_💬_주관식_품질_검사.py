@@ -14,110 +14,175 @@ st.set_page_config(page_title="주관식 품질 검사", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("💬 주관식 응답 품질 검사기")
+st.title("💬 주관식 응답 품질 검사기 (Multi-Sheet & Multi-Column)")
 st.markdown("""
-주관식(Open-ended) 문항에서 **무성의한 응답(욕설, 자음남발, 무의미한 반복, 거절 등)**을 자동으로 탐지합니다.
+* **다중 시트 지원:** 엑셀 파일에 여러 시트가 있다면 자동으로 **하나로 합쳐서** 불러옵니다.
+* **다중 컬럼 검사:** 여러 개의 주관식 문항을 **한 번에 선택**해서 일괄 검사합니다.
 """)
 
-# 데이터 업로드
-data_file = st.file_uploader("데이터 업로드", type=['csv', 'xlsx', 'xls'])
+# ==============================================================================
+# 1. 데이터 로드 (모든 시트 통합 기능 추가)
+# ==============================================================================
+data_file = st.file_uploader("데이터 파일 업로드 (CSV, Excel, XLS)", type=['csv', 'xlsx', 'xls'])
+
+@st.cache_data(ttl=3600)
+def load_data_all_sheets(file):
+    """엑셀의 모든 시트를 읽어서 하나로 합치는 함수"""
+    filename = file.name.lower()
+    
+    try:
+        if filename.endswith('.csv'):
+            return utils.load_df(file) # CSV는 기존 방식대로
+            
+        elif filename.endswith('.xlsx') or filename.endswith('.xls'):
+            # 엔진 설정
+            engine = 'xlrd' if filename.endswith('.xls') else 'openpyxl'
+            
+            # sheet_name=None이면 모든 시트를 dict 형태로 읽음 {'시트명': df, ...}
+            sheets_dict = pd.read_excel(file, sheet_name=None, engine=engine)
+            
+            # 모든 시트 데이터프레임 리스트
+            all_dfs = []
+            for sheet_name, sheet_df in sheets_dict.items():
+                # 시트 구분을 위해 'Sheet_Name' 컬럼 추가 (선택사항)
+                sheet_df['_Origin_Sheet'] = sheet_name
+                all_dfs.append(sheet_df)
+            
+            # 하나로 병합 (컬럼이 달라도 합집합으로 합침)
+            merged_df = pd.concat(all_dfs, ignore_index=True)
+            return merged_df
+            
+    except Exception as e:
+        st.error(f"파일 로드 중 오류 발생: {e}")
+        return None
+    return None
 
 if data_file:
-    df = utils.load_df(data_file)
-    st.info(f"데이터 로드 완료: 총 {len(df)}명")
+    df = load_data_all_sheets(data_file)
     
-    st.markdown("---")
-    
-    # 1. 검사할 컬럼 선택
-    text_col = st.selectbox("검사할 주관식 문항(Column) 선택", df.columns)
-    
-    # 2. 검사 옵션 설정
-    st.subheader("⚙️ 검사 기준 설정")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        min_len = st.number_input("최소 글자 수 (이것보다 짧으면 의심)", 1, 10, 2)
-    with c2:
-        check_korean_g = st.checkbox("자음/모음 남발 (예: ㅋㅋㅋ, ㅠㅠ)", value=True)
-    with c3:
-        check_repeat = st.checkbox("동일 문자 반복 (예: aaaa, ...)", value=True)
-    
-    # 불성실 키워드 사전
-    default_bad_words = "없음, 모름, 몰라, 몰라요, 그냥, 굿, good, no, nothing, ., .., -, ?, !!"
-    bad_words_input = st.text_area("🚫 거절/회피 단어 리스트 (쉼표로 구분)", value=default_bad_words)
-    bad_words = [w.strip() for w in bad_words_input.split(",") if w.strip()]
-
-    # 3. 분석 로직
-    if st.button("🔍 주관식 분석 시작", type="primary"):
-        # 원본 보존
-        df_res = df.copy()
-        target_series = df_res[text_col].astype(str).fillna("")
+    if df is not None:
+        st.success(f"데이터 로드 완료: 총 {len(df)}명 (모든 시트 통합됨)")
         
-        # 의심 사유를 담을 리스트
-        reasons = []
-        is_bad = []
+        with st.expander("데이터 미리보기"):
+            st.dataframe(df.head())
         
-        for text in target_series:
-            detected = []
-            clean_text = text.strip()
-            
-            # (1) 길이 체크
-            if len(clean_text) < min_len:
-                detected.append("길이 미달")
-            
-            # (2) 거절/회피 단어 체크
-            if clean_text in bad_words:
-                detected.append("회피 단어")
-            
-            # (3) 자음/모음 남발 (정규식)
-            if check_korean_g:
-                # 자음(ㄱ-ㅎ) 혹은 모음(ㅏ-ㅣ)만으로 구성된 경우
-                if re.fullmatch(r"[ㄱ-ㅎㅏ-ㅣ\s]+", clean_text):
-                    detected.append("자음/모음 남발")
-            
-            # (4) 동일 문자 반복 (3회 이상)
-            if check_repeat:
-                # 어떤 문자든 3번 이상 연속 (aaa, ..., 111)
-                if re.search(r"(.)\1\1", clean_text):
-                    detected.append("문자 반복")
-            
-            # (5) 특수문자만 있는 경우
-            if re.fullmatch(r"[^가-힣a-zA-Z0-9]+", clean_text):
-                detected.append("특수문자/숫자만 있음")
+        st.markdown("---")
+        
+        # 2. 검사할 컬럼 다중 선택
+        # 숫자형이나 날짜형 컬럼은 제외하고 문자열 컬럼 위주로 추천할 수도 있지만, 
+        # 사용자가 직접 고르는 게 가장 정확함.
+        target_cols = st.multiselect("검사할 주관식 문항들 (다중 선택 가능)", df.columns)
+        
+        # 3. 검사 옵션 설정
+        st.subheader("⚙️ 검사 기준 설정")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            min_len = st.number_input("최소 글자 수 (이것보다 짧으면 의심)", 1, 10, 2)
+        with c2:
+            check_korean_g = st.checkbox("자음/모음 남발 (예: ㅋㅋㅋ, ㅠㅠ)", value=True)
+        with c3:
+            check_repeat = st.checkbox("동일 문자 반복 (예: aaaa, ...)", value=True)
+        
+        # 불성실 키워드 사전
+        default_bad_words = "없음, 모름, 몰라, 몰라요, 그냥, 굿, good, no, nothing, ., .., -, ?, !!"
+        bad_words_input = st.text_area("🚫 거절/회피 단어 리스트 (쉼표로 구분)", value=default_bad_words)
+        bad_words = [w.strip() for w in bad_words_input.split(",") if w.strip()]
 
-            if detected:
-                is_bad.append(True)
-                reasons.append(", ".join(detected))
+        # 4. 분석 로직 (다중 컬럼 반복)
+        if st.button("🔍 일괄 분석 시작", type="primary"):
+            if not target_cols:
+                st.warning("분석할 컬럼을 하나 이상 선택해주세요.")
+                st.stop()
+
+            # 결과 수집용 리스트
+            all_bad_records = []
+            
+            # 진행률 표시
+            progress_bar = st.progress(0)
+            
+            for idx, col in enumerate(target_cols):
+                # 컬럼별 진행률 업데이트
+                progress_bar.progress((idx + 1) / len(target_cols), text=f"검사 중: {col}")
+                
+                # 해당 컬럼 데이터 추출
+                target_series = df[col].astype(str).fillna("")
+                
+                # 행 단위 검사
+                for row_idx, text in target_series.items():
+                    detected = []
+                    clean_text = text.strip()
+                    
+                    # (1) 빈 값은 패스 (또는 '미응답'으로 잡을 수도 있음)
+                    if not clean_text or clean_text == "nan":
+                        continue
+
+                    # (2) 길이 체크
+                    if len(clean_text) < min_len:
+                        detected.append("길이 미달")
+                    
+                    # (3) 거절/회피 단어 체크
+                    if clean_text in bad_words:
+                        detected.append("회피 단어")
+                    
+                    # (4) 자음/모음 남발
+                    if check_korean_g:
+                        if re.fullmatch(r"[ㄱ-ㅎㅏ-ㅣ\s]+", clean_text):
+                            detected.append("자음/모음 남발")
+                    
+                    # (5) 동일 문자 반복
+                    if check_repeat:
+                        if re.search(r"(.)\1\1", clean_text):
+                            detected.append("문자 반복")
+                    
+                    # (6) 특수문자만 있는 경우
+                    if re.fullmatch(r"[^가-힣a-zA-Z0-9]+", clean_text):
+                        detected.append("특수문자/숫자만 있음")
+
+                    # 문제가 발견되면 기록
+                    if detected:
+                        # 원본 데이터의 해당 행 전체를 가져오고 싶다면:
+                        # row_data = df.loc[row_idx].to_dict()
+                        # 하지만 너무 무거우니 ID나 핵심 정보만 가져오는 게 좋음
+                        
+                        record = {
+                            'Index': row_idx,
+                            '대상_문항': col,
+                            '응답_내용': text,
+                            '의심_사유': ", ".join(detected),
+                            'Origin_Sheet': df.loc[row_idx, '_Origin_Sheet'] if '_Origin_Sheet' in df.columns else 'Single'
+                        }
+                        
+                        # 식별 변수(ID)가 있다면 같이 넣어주기 (첫 번째 컬럼 등)
+                        # 여기서는 모든 컬럼을 다 넣지는 않고 인덱스로 식별
+                        all_bad_records.append(record)
+
+            progress_bar.empty()
+
+            # 5. 결과 리포트
+            st.divider()
+            
+            if all_bad_records:
+                bad_df = pd.DataFrame(all_bad_records)
+                
+                st.error(f"🚨 총 {len(bad_df)}건의 불성실 의심 응답이 발견되었습니다!")
+                
+                # 문항별 발생 건수 차트
+                st.caption("문항별 의심 응답 건수")
+                st.bar_chart(bad_df['대상_문항'].value_counts())
+                
+                # 데이터프레임 표시
+                st.dataframe(bad_df, use_container_width=True)
+                
+                # 다운로드
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    bad_df.to_excel(writer, index=False)
+                
+                st.download_button(
+                    "📥 불성실 리스트 통합 다운로드 (xlsx)",
+                    output.getvalue(),
+                    "Bad_OpenEnds_All.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             else:
-                is_bad.append(False)
-                reasons.append("통과")
-        
-        # 결과 컬럼 추가
-        df_res['진단_결과'] = reasons
-        
-        # 4. 결과 보여주기
-        bad_df = df_res[is_bad].copy()
-        
-        st.divider()
-        if len(bad_df) > 0:
-            st.error(f"🚨 총 {len(df)}명 중 {len(bad_df)}명의 불성실 의심 응답이 발견되었습니다!")
-            
-            # 비율 보여주기
-            st.progress(len(bad_df) / len(df), text=f"불성실 비율: {(len(bad_df)/len(df))*100:.1f}%")
-            
-            # 미리보기 (중요 컬럼만)
-            st.dataframe(bad_df[[text_col, '진단_결과']], use_container_width=True)
-            
-            # 다운로드
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                bad_df.to_excel(writer, index=False)
-            
-            st.download_button(
-                "📥 불성실 의심 리스트 다운로드",
-                output.getvalue(),
-                f"Bad_OpenEnds_{text_col}.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-
-            st.success("✅ 불성실한 응답 패턴이 발견되지 않았습니다.")
+                st.success("✅ 선택한 모든 문항에서 불성실 응답 패턴이 발견되지 않았습니다.")
