@@ -194,45 +194,47 @@ if 'spss_result_df' in st.session_state:
     c1, c2, c3 = st.columns(3) # 컬럼 3개로 변경
     
     with c1:
-        if st.button("📥 SPSS Syntax 생성 (.sps)", key="gen_syntax_btn"):
-            sps_lines = []
-            sps_lines.append(f"* Auto Generated Syntax for {st.session_state['spss_file_name']}.")
-            sps_lines.append(f"GET FILE='{st.session_state['spss_file_name']}.sav'.")
-            sps_lines.append("RENAME VARIABLES")
+        # [수정] Syntax 생성 및 다운로드를 한 번에 처리
+        # 현재 에디터 상태(edited_df)를 기반으로 Syntax 생성
+        sps_lines = []
+        # [수정] 파일 경로에 쌍따옴표(") 적용
+        sps_lines.append(f'* Auto Generated Syntax for {st.session_state["spss_file_name"]}.')
+        sps_lines.append(f'GET FILE="{st.session_state["spss_file_name"]}.sav".')
+        sps_lines.append("RENAME VARIABLES")
+        
+        count = 0
+        for _, row in edited_df.iterrows():
+            old_v = str(row['Raw 변수명']).strip()
+            new_v = str(row['변경할 변수명']).strip()
             
-            count = 0
-            for _, row in edited_df.iterrows():
-                old_v = str(row['Raw 변수명']).strip()
-                new_v = str(row['변경할 변수명']).strip()
+            if old_v and new_v and (old_v.lower() != new_v.lower()):
+                sps_lines.append(f"  ({old_v} = {new_v})")
+                count += 1
                 
-                if old_v and new_v and (old_v.lower() != new_v.lower()):
-                    sps_lines.append(f"  ({old_v} = {new_v})")
-                    count += 1
-                    
-            sps_lines.append(".")
-            sps_lines.append("EXECUTE.")
-            sps_lines.append(f"SAVE OUTFILE='{st.session_state['spss_file_name']}_Renamed.sav'.")
-            sps_lines.append("EXECUTE.")
-            
-            final_sps = "\n".join(sps_lines)
-            
-            # [수정] 한글 깨짐 방지를 위해 cp949 인코딩 적용
-            # cp949가 지원하지 않는 문자가 있을 경우를 대비해 errors='replace' 옵션 고려 가능하지만,
-            # 변수명은 보통 영문/숫자/한글이므로 cp949로 충분합니다.
-            try:
-                final_sps_bytes = final_sps.encode('cp949')
-            except UnicodeEncodeError:
-                # cp949로 변환 안 되는 특수문자가 있는 경우 utf-8-sig로 폴백 (혹은 에러 처리)
-                final_sps_bytes = final_sps.encode('utf-8-sig')
-                st.warning("경고: 변수명에 한글 표준(CP949)으로 저장할 수 없는 특수문자가 포함되어 있어 UTF-8로 저장되었습니다. SPSS 버전에 따라 글자가 깨질 수 있습니다.")
+        sps_lines.append(".")
+        sps_lines.append("EXECUTE.")
+        # [수정] 파일 경로에 쌍따옴표(") 적용
+        sps_lines.append(f'SAVE OUTFILE="{st.session_state["spss_file_name"]}_Renamed.sav".')
+        sps_lines.append("EXECUTE.")
+        
+        final_sps = "\n".join(sps_lines)
+        
+        # [수정] 한글 깨짐 방지를 위해 cp949 인코딩 적용
+        try:
+            final_sps_bytes = final_sps.encode('cp949')
+        except UnicodeEncodeError:
+            final_sps_bytes = final_sps.encode('utf-8-sig')
+            st.warning("⚠️ 특수문자 포함으로 인해 UTF-8로 저장되었습니다.")
 
-            st.download_button(
-                label="📄 Syntax 파일 다운로드",
-                data=final_sps_bytes,
-                file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
-                mime="text/plain"
-            )
-            st.success(f"총 {count}개의 변수 변환 구문이 생성되었습니다.")
+        st.download_button(
+            label="📄 Syntax 생성 및 다운로드 (.sps)",
+            data=final_sps_bytes,
+            file_name=f"{st.session_state['spss_file_name']}_Rename.sps",
+            mime="text/plain",
+            type="primary"
+        )
+        if count > 0:
+            st.caption(f"✅ 총 {count}개의 변환 구문이 포함됩니다.")
 
     with c2:
         # [수정] 매핑 테이블을 엑셀로 변경
