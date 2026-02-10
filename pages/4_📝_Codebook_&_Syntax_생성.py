@@ -81,49 +81,65 @@ def extract_options_from_line(text):
             results.append(item)
     return results
 
-# [A2, A4 대응] 시간/분 입력형 테이블 분리 함수
+# [A2, A4 대응] 시간/분 입력형 테이블 분리 함수 (조건 완화됨)
 def extract_time_split_table(table, current_var):
     rows = table.rows
     if len(rows) < 1: return None
     
-    # 표 안에 "시간"과 "분"이 모두 포함되어 있는지 확인
-    is_time_table = False
+    # 표 전체 텍스트에서 "시간"과 "분"이 동시에 존재하는지 확인
+    # "입력", "범위" 같은 단어 조건은 제거하여 인식률 높임
+    full_text = ""
     for row in rows:
-        txt = " ".join([c.text for c in row.cells])
-        if "시간" in txt and "분" in txt and ("입력" in txt or "범위" in txt):
-            is_time_table = True
-            break
-            
-    if not is_time_table: return None
+        full_text += " ".join([c.text for c in row.cells])
+    
+    # 시간 관련 키워드 확인 (단순 '시간' 단어 외에 '시' 단위도 체크 가능하게 확장 가능)
+    has_time = "시간" in full_text
+    has_minute = "분" in full_text
+    
+    if not (has_time and has_minute):
+        return None
     
     extracted = []
     for i, row in enumerate(rows):
-        # 행 라벨 추출 (보통 첫 번째 칸)
+        # 행 라벨 추출 (첫 번째 비어있지 않은 셀)
         if not row.cells: continue
-        row_label = row.cells[0].text.strip()
         
-        # 라벨이 비어있으면 패스
-        if not row_label: continue
+        row_label = ""
+        for cell in row.cells:
+            txt = cell.text.strip()
+            if txt:
+                row_label = txt
+                break
         
-        # 시간 변수 생성
+        # 라벨이 비어있거나, 라벨 자체가 시간/분 입력칸이면 패스 (헤더일 가능성)
+        if not row_label or ("시간" in row_label and "분" in row_label): 
+            # 단, 행이 1개뿐인 표라면 이것 자체가 질문일 수 있음. 
+            # 하지만 A2, A4는 행이 여러개이므로 헤더로 간주하고 패스
+            continue
+            
+        # 변수 생성 (라벨 정제)
+        # 라벨에 "※" 같은 설명이 붙어있으면 제거
+        clean_label = re.sub(r"※.*", "", row_label).strip()
+        
+        # 시간 변수
         extracted.append({
             "변수명": f"{current_var['변수명']}_{i+1}_H",
-            "질문 내용": f"[{current_var['변수명']}] {row_label} (시간)",
+            "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)",
             "보기 값": "(숫자입력)",
             "유형": "Open"
         })
         
-        # 분 변수 생성
+        # 분 변수
         extracted.append({
             "변수명": f"{current_var['변수명']}_{i+1}_M",
-            "질문 내용": f"[{current_var['변수명']}] {row_label} (분)",
+            "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)",
             "보기 값": "(숫자입력)",
             "유형": "Open"
         })
         
     return extracted
 
-# [A1 대응] 헤더 없는 단순 입력형 테이블 (조건 강화됨)
+# [A1 대응] 헤더 없는 단순 입력형 테이블
 def extract_plain_input_table(table, current_var):
     rows = table.rows
     if len(rows) < 1: return None
@@ -145,7 +161,9 @@ def extract_plain_input_table(table, current_var):
     for row in rows:
         row_text = " ".join([c.text for c in row.cells])
         if option_pattern.search(row_text): return None
-        if "시간" in row_text and "분" in row_text: return None # 시간표는 extract_time_split_table이 처리
+        
+        # [중요] 시간표는 extract_time_split_table이 처리해야 하므로 여기서 낚아채면 안됨
+        if "시간" in row_text and "분" in row_text: return None 
             
         if any(k in row_text for k in input_keywords) or "(" in row_text:
             match_count += 1
@@ -621,7 +639,7 @@ def parse_word_to_df(docx_file):
                         if "보기_list" in current_entry and not current_entry["보기_list"]: current_entry["질문 내용"] += " " + text
 
         elif isinstance(block, Table):
-            rows = block.rows
+            rows = table.rows
             if len(rows) < 1: continue
 
             # [순서 1] SQ6 대응
@@ -648,7 +666,7 @@ def parse_word_to_df(docx_file):
                     is_parent_added = True
                     continue
 
-            # [순서 4] A2/A4 대응 (Time Split)
+            # [순서 4] A2/A4 대응 (Time Split) - 조건을 완화하여 확실히 잡음
             if current_entry and not is_parent_added:
                 time_split_entries = extract_time_split_table(block, current_entry)
                 if time_split_entries:
@@ -682,6 +700,7 @@ def parse_word_to_df(docx_file):
                 if options_str: ranking_options_buffer.append(options_str)
                 continue 
 
+            # [A4 대응] Multi-column Input
             if current_entry:
                 multi_col_entries = extract_multi_column_input_table(block, current_entry, force_row_count=pending_max_n_count)
                 if multi_col_entries: extracted_data.extend(multi_col_entries); is_parent_added = True; pending_max_n_count = None; continue
