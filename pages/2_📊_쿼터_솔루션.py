@@ -5,6 +5,7 @@ import collections
 import numpy as np
 import altair as alt
 from joblib import Parallel, delayed, cpu_count
+import traceback
 import sys
 import os
 
@@ -130,7 +131,7 @@ if data_file:
     st.subheader("3. 실행 옵션")
     c1, c2 = st.columns(2)
     with c1:
-        c_no = st.selectbox("ID 컬럼", df_survey.columns)
+        c_no = st.selectbox("ID 컬럼 (결과 확인용)", df_survey.columns)
         tol = st.number_input("허용 오차", 0, 100, 0)
     with c2:
         iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
@@ -221,7 +222,6 @@ if data_file:
                         for k in ex_keys_maps[j][idx]: final_exs[j][k] += 1
 
             recs = []
-            # 부족분 분석 (엑셀용)
             if is_fail:
                 if use_main:
                     for k, tgt in main_map.items():
@@ -244,29 +244,22 @@ if data_file:
                                 display_item = " / ".join(k) if isinstance(k, tuple) else k
                                 recs.append({'순서': j+1, '구분': cfg['name'], '항목': display_item, '목표': tgt, '현재': act, '부족': diff, '진단': reason, '전체보유': raw_avail})
 
-            # [중요 변경] 엑셀 데이터 생성 시 정렬 기준 변경
+            # 엑셀 데이터 생성
             df_survey['Chk'] = "제외"
             df_survey.loc[clean_fin_idxs, 'Chk'] = "통과"
             
-            # 시트1: Result_All (전체 데이터)
             df_all = df_survey.sort_values(by=c_no, ascending=True)
-            
-            # 시트2: Result_Pass (통과 데이터만)
             df_pass = df_survey[df_survey['Chk'] == "통과"].sort_values(c_no, ascending=True)
             
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine='xlsxwriter') as w:
-                # 전체 데이터 (섞여있음)
                 df_all.to_excel(w, index=False, sheet_name='Result_All')
-                # 통과 데이터 (깔끔함)
                 df_pass.to_excel(w, index=False, sheet_name='Result_Pass')
-                
                 if recs: 
                     df_excel = pd.DataFrame(recs)
                     df_excel['sort_val'] = df_excel['항목'].apply(lambda x: tuple(utils.natural_key(x)))
                     df_excel = df_excel.sort_values(by=['순서', 'sort_val'], ascending=[True, True])
                     df_excel.drop(columns=['순서', 'sort_val']).to_excel(w, index=False, sheet_name='Shortage_Analysis')
-                
                 if use_main:
                         pd.DataFrame([{'G':str(k), 'T':v, 'A':final_m[k]} for k,v in main_map.items()]).to_excel(w, sheet_name='Main_Status')
 
@@ -279,16 +272,34 @@ if data_file:
                         pd.DataFrame(data_e).sort_values('Value', key=lambda c: c.map(utils.natural_key)).to_excel(w, sheet_name=cfg['name'], index=False)
             
             # -------------------------------------------------------------
-            # 다운로드 버튼 및 검증 메시지
+            # 결과 표시 섹션
             # -------------------------------------------------------------
+            st.divider()
+            
+            # [NEW] 제외된 ID 복사 기능 (세로 목록)
+            all_idxs = set(df_survey.index)
+            pass_idxs = set(clean_fin_idxs)
+            exclude_idxs = list(all_idxs - pass_idxs)
+            
+            if exclude_idxs:
+                st.subheader("📋 제외된 응답자 ID (복사 붙여넣기용)")
+                excluded_ids = df_survey.loc[exclude_idxs, c_no].tolist()
+                
+                # 쉼표 대신 줄바꿈(\n)으로 연결하여 세로 목록 생성
+                id_text_vertical = "\n".join(map(str, excluded_ids))
+                
+                st.info(f"총 **{len(excluded_ids)}명**이 제외되었습니다. 오른쪽 위의 📄 아이콘을 누르면 세로 목록이 복사됩니다.")
+                st.code(id_text_vertical, language="text")
+            else:
+                st.success("🎉 제외된 인원이 없습니다. (모두 통과)")
+
             st.divider()
             st.subheader("📊 할당 결과 시각화")
             
             total_rows = len(df_survey)
             pass_rows = len(df_pass)
             exclude_rows = total_rows - pass_rows
-            st.info(f"💾 **데이터 저장 완료**: 총 **{total_rows:,}명** (통과 {pass_rows:,}명 + 제외 {exclude_rows:,}명)이 엑셀에 모두 저장되었습니다.")
-
+            
             btn_label = "📥 결과 파일 다운로드 (Result.xlsx)" if not is_fail else "⚠️ 실패한 결과라도 다운로드"
             st.download_button(btn_label, out.getvalue(), "result.xlsx", type="primary", use_container_width=True)
             
@@ -305,8 +316,7 @@ if data_file:
             else:
                 st.success("🎉 목표 인원을 모두 달성했습니다!")
             
-            st.markdown("### 🔍 쿼터별 상세 현황")
-            
+            # 차트
             active_ex_cfgs = [(j, cfg) for j, cfg in enumerate(ex_configs) if cfg['cols']]
             v_tabs = st.tabs(["메인 쿼터"] + [cfg['name'] for _, cfg in active_ex_cfgs])
             
