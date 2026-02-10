@@ -2,39 +2,41 @@ import streamlit as st
 import pandas as pd
 import sys
 import os
+import re
+import io
+import textwrap
+import collections
+from collections import Counter
+
+# 워드/엑셀 관련 라이브러리 (requirements.txt 필수)
+try:
+    from docx import Document
+    from docx.document import Document as _Document
+    from docx.oxml.text.paragraph import CT_P
+    from docx.oxml.table import CT_Tbl
+    from docx.table import _Cell, Table
+    from docx.text.paragraph import Paragraph
+    from openpyxl.styles import Font, PatternFill, Alignment
+except ImportError:
+    st.error("필수 라이브러리가 설치되지 않았습니다. requirements.txt에 'python-docx'와 'openpyxl'을 추가하세요.")
+    st.stop()
 
 # 1. 상위 폴더의 utils.py를 불러오기 위한 경로 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils
 
-# 2. 페이지 기본 설정
+# 2. 페이지 기본 설정 (무조건 맨 위에)
 st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 
-# 3. 비밀번호 잠금 (이게 없으면 이 페이지만 뚫립니다!)
+# 3. 비밀번호 잠금
 if not utils.check_password():
     st.stop()
 
 # 4. 제목
 st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성")
 
-# --- 👇 여기에 짜놓으신 코드를 붙여넣으세요 👇 ---
-
-import streamlit as st
-import pandas as pd
-from docx import Document
-from docx.document import Document as _Document
-from docx.oxml.text.paragraph import CT_P
-from docx.oxml.table import CT_Tbl
-from docx.table import _Cell, Table
-from docx.text.paragraph import Paragraph
-import re
-import io
-import textwrap
-from openpyxl.styles import Font, PatternFill, Alignment
-from collections import Counter
-
 # ==============================================================================
-# [Part 1] 워드 파싱 및 유틸리티
+# [Part 1] 워드 파싱 및 유틸리티 함수 정의
 # ==============================================================================
 def iter_block_items(parent):
     if isinstance(parent, _Document):
@@ -50,10 +52,8 @@ def iter_block_items(parent):
         elif isinstance(child, CT_Tbl):
             yield Table(child, parent)
 
-# [New v100] Helper to remove empty parentheses like "( )", "(   )"
 def clean_empty_parentheses(text):
     if not text: return text
-    # Remove parens containing only whitespace
     return re.sub(r"\(\s*\)", "", text).strip()
 
 def clean_header_text(text):
@@ -77,7 +77,6 @@ def extract_options_from_line(text):
         start = matches[i].start()
         end = matches[i+1].start() if i + 1 < len(matches) else len(text)
         item = text[start:end].strip()
-        # [v100] Clean empty parens from option text
         item = clean_empty_parentheses(item)
         if item:
             results.append(item)
@@ -488,7 +487,6 @@ def check_and_split_max_n_text(entry):
             
     return new_entries
 
-# Option Table Detection
 def is_option_description_table(table):
     if len(table.rows) < 1: return False
     pattern = re.compile(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]")
@@ -500,7 +498,6 @@ def is_option_description_table(table):
             match_count += 1
     return (match_count / len(table.rows)) >= 0.5
 
-# [Fix v93] Add Hyphen, [Fix v100] Clean parens
 def extract_single_choice_options(table):
     options = []
     for row in table.rows:
@@ -517,16 +514,13 @@ def extract_single_choice_options(table):
             if len(cells_text) > 1: label_parts.extend(cells_text[1:])
             
             final_label = " - ".join(label_parts)
-            final_label = clean_empty_parentheses(final_label) # v100
+            final_label = clean_empty_parentheses(final_label) 
             options.append(f"{code}={final_label}")
         else:
             row_text = " - ".join(cells_text)
-            row_text = clean_empty_parentheses(row_text) # v100
+            row_text = clean_empty_parentheses(row_text) 
             options.append(row_text)
     return "\n".join(options)
-
-def extract_options_from_desc_table(table):
-    return extract_single_choice_options(table)
 
 def extract_options_from_table(table):
     options = []
@@ -534,7 +528,6 @@ def extract_options_from_table(table):
     for row in table.rows:
         for cell in row.cells:
             text = cell.text.strip()
-            # [v100] Clean parens
             text = clean_empty_parentheses(text)
             if text:
                 options.append(f"{idx}={text}")
@@ -569,7 +562,6 @@ def parse_word_to_df(docx_file):
     def flush_entry(entry):
         nonlocal is_parent_added, pending_max_n_count
         
-        # [v100] Clean empty parens in question text when flushing
         if "질문 내용" in entry:
             entry["질문 내용"] = clean_empty_parentheses(entry["질문 내용"])
 
@@ -615,7 +607,6 @@ def parse_word_to_df(docx_file):
                 opt_match = re.match(r"^\s*(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt)
                 if opt_match:
                     code, label = opt_match.groups()
-                    # [v100] Clean label
                     label = clean_empty_parentheses(label)
                     full_options_str_list.append(f"{code}={label}")
             full_options_str = "\n".join(full_options_str_list)
@@ -625,7 +616,7 @@ def parse_word_to_df(docx_file):
                 opt_match = re.match(r"^\s*(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt)
                 if opt_match:
                     code, label = opt_match.groups()
-                    label = clean_empty_parentheses(label) # v100
+                    label = clean_empty_parentheses(label) 
                     results.append({
                         "변수명": f"{entry['변수명']}_{code}", 
                         "질문 내용": f"{entry['질문 내용']} ({label})", 
@@ -732,7 +723,6 @@ def parse_word_to_df(docx_file):
             if len(rows) < 1: continue
             
             if current_entry and not is_parent_added:
-                # [v100] Priority 1: Double Scale (Highest)
                 double_entries = extract_double_scale_table(block, current_entry)
                 if double_entries:
                     extracted_data.extend(double_entries)
@@ -740,7 +730,6 @@ def parse_word_to_df(docx_file):
                     continue
 
             if current_entry and not is_parent_added:
-                # Priority 2: Option Table (Single/Multi)
                 q_type = current_entry.get("유형")
                 if any(k in current_entry["질문 내용"] for k in multi_keywords): q_type = "Multi"
                 
@@ -870,13 +859,9 @@ def parse_word_to_df(docx_file):
             
     return pd.DataFrame(extracted_data)
 
-# ... (Part 2 & 3: to_excel & generate_spss remains unchanged) ...
-# ==============================================================================
-# [Part 2] 엑셀 코드북 생성 (Same as v77)
-# ==============================================================================
 def to_excel_with_usage_flag(df):
     rows = []
-    code_start_pattern = re.compile(r"^(\d+|[①-⑩]|[ⓐ-ⓩ]|[a-zA-Z]|[가-하])[\.\)\s=]\s*(.*)")
+    code_start_pattern = re.compile(r"^(\d+|[①-⑩]|[a-zA-Z]|[가-하])[\.\)\s=]\s*(.*)")
     for idx, row in df.iterrows():
         var_name = row['변수명']
         raw_q = str(row['질문 내용'])
@@ -929,9 +914,6 @@ def to_excel_with_usage_flag(df):
         worksheet.column_dimensions['A'].width = 8; worksheet.column_dimensions['B'].width = 15; worksheet.column_dimensions['C'].width = 20; worksheet.column_dimensions['D'].width = 50; worksheet.column_dimensions['E'].width = 40
     return output.getvalue()
 
-# ==============================================================================
-# [Part 3] SPSS 신택스 생성 (Same as v77)
-# ==============================================================================
 def compress_var_list(var_list):
     if not var_list: return ""
     compressed = []; current_chunk = []; pattern = re.compile(r"^(.*?)(\d+)$")
@@ -1043,10 +1025,8 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 # Streamlit UI
 # ==============================================================================
-st.set_page_config(page_title="설문지 데이터 처리 마스터 (v100 Final)", layout="wide")
-st.title("📑 설문지 데이터 처리 마스터")
 st.markdown("""
-**[최종 업데이트 v100]**
+**[기능 설명]**
 * **Save with KEEP:** SPSS 신택스 생성 시, '사용여부'가 O/R인 변수들만 `/KEEP=` 명령어로 길게 나열하여 저장하도록 변경했습니다.
 * **완벽 통합:** 기존의 모든 기능(순위형, 표 파싱, PROG 삭제, 하이픈 처리 등)이 포함된 최종 완성본입니다.
 """)
