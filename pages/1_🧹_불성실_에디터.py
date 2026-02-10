@@ -65,21 +65,62 @@ if data_file:
                 except: pass
 
     df_cln = df_raw.copy(); bad_ids = set()
+    
+    # [NEW] 검사 옵션 선택 기능 추가
+    st.markdown("---")
+    st.subheader("🔍 검사 옵션")
+    check_method = st.radio(
+        "어떤 불성실 패턴을 찾을까요?",
+        ["1️⃣ 한 줄 찍기 (1,1,1,1...)", "2️⃣ 계단/지그재그 (1,2,3,2,1...)"],
+        index=0,
+        horizontal=True
+    )
+    
     for i, g in enumerate(st.session_state.ed_grps):
         k=f"ed_ms_{i}"; 
         if k not in st.session_state: st.session_state[k]=g['cols']
-        sel = st.multiselect(f"그룹 {i+1}", df_raw.columns, key=k)
+        sel = st.multiselect(f"그룹 {i+1} 변수 확인", df_raw.columns, key=k)
         st.session_state.ed_grps[i]['cols']=sel
+        
         if sel:
             try:
-                std = df_raw[sel].apply(pd.to_numeric, errors='coerce').std(axis=1)
-                bad = std[std==0].index.tolist()
-                if bad: st.error(f"{len(bad)}명 불성실"); bad_ids.update(bad)
-            except: pass
+                # 데이터 숫자로 변환
+                temp_df = df_raw[sel].apply(pd.to_numeric, errors='coerce')
+                
+                bad_indices = []
+                
+                if "한 줄 찍기" in check_method:
+                    # 기존 로직: 표준편차 0
+                    std = temp_df.std(axis=1)
+                    bad_indices = std[std==0].index.tolist()
+                    
+                else: # 계단/지그재그 (1,2,3,2,1)
+                    # 신규 로직: 앞뒤 차이의 절댓값이 모두 1인지 확인
+                    # diff(axis=1)은 앞 열과의 차이를 구함
+                    diffs = temp_df.diff(axis=1).iloc[:, 1:] # 첫 열은 NaN이므로 제외
+                    abs_diffs = diffs.abs()
+                    
+                    # 모든 칸의 차이가 정확히 1인 행만 찾음 (all)
+                    # (실수 오차 방지를 위해 isclose 대신 간단히 eq(1) 사용)
+                    is_zigzag = abs_diffs.eq(1).all(axis=1)
+                    bad_indices = is_zigzag[is_zigzag].index.tolist()
+
+                if bad_indices:
+                    st.error(f"🚨 그룹 {i+1}: {len(bad_indices)}명 불성실 의심")
+                    bad_ids.update(bad_indices)
+                else:
+                    st.success(f"✅ 그룹 {i+1}: 해당 패턴 없음")
+                    
+            except Exception as e: 
+                st.warning(f"계산 불가 (숫자형 데이터인지 확인 필요): {e}")
     
+    st.markdown("---")
     if bad_ids:
-        if st.button("제거 후 다운로드"):
+        st.write(f"🛑 **총 제거 대상:** {len(bad_ids)}명")
+        if st.button("🗑️ 불성실 응답자 제거 후 다운로드", type="primary"):
             final = df_cln.drop(index=list(bad_ids))
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine='xlsxwriter') as w: final.to_excel(w, index=False)
-            st.download_button("다운로드", out.getvalue(), "cleaned.xlsx")
+            st.download_button("📥 정제된 파일 다운로드", out.getvalue(), "cleaned_data.xlsx")
+    else:
+        st.info("검출된 불성실 응답자가 없습니다.")
