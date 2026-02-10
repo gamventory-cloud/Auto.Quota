@@ -6,6 +6,7 @@ import traceback
 import sys
 import os
 
+# (주의) utils 모듈이 같은 폴더나 상위 폴더에 있어야 합니다.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils
 
@@ -215,8 +216,15 @@ if 'spss_result_df' in st.session_state:
             
             final_sps = "\n".join(sps_lines)
             
-            # [수정] UTF-8 BOM 인코딩 적용
-            final_sps_bytes = final_sps.encode('utf-8-sig')
+            # [수정] 한글 깨짐 방지를 위해 cp949 인코딩 적용
+            # cp949가 지원하지 않는 문자가 있을 경우를 대비해 errors='replace' 옵션 고려 가능하지만,
+            # 변수명은 보통 영문/숫자/한글이므로 cp949로 충분합니다.
+            try:
+                final_sps_bytes = final_sps.encode('cp949')
+            except UnicodeEncodeError:
+                # cp949로 변환 안 되는 특수문자가 있는 경우 utf-8-sig로 폴백 (혹은 에러 처리)
+                final_sps_bytes = final_sps.encode('utf-8-sig')
+                st.warning("경고: 변수명에 한글 표준(CP949)으로 저장할 수 없는 특수문자가 포함되어 있어 UTF-8로 저장되었습니다. SPSS 버전에 따라 글자가 깨질 수 있습니다.")
 
             st.download_button(
                 label="📄 Syntax 파일 다운로드",
