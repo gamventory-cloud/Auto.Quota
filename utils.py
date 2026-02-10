@@ -91,7 +91,7 @@ def check_password():
     if not st.session_state["password_correct"]:
         st.title("🔒 접속 제한")
         st.text_input("비밀번호를 입력하세요", type="password", on_change=password_entered, key="password")
-        st.error("지인들만 사용 가능한 비공개 프로그램입니다.")
+        st.error("비공개 프로그램입니다.")
         return False
     else:
         return True
@@ -139,4 +139,5 @@ def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys
             local_best_idxs = list(curr_idx)
             if local_best_cnt >= soft_target: break
                 
+
     return local_best_cnt, local_best_idxs
