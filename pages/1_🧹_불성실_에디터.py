@@ -14,7 +14,7 @@ if not utils.check_password():
     st.stop()
 
 st.title("🧹 불성실 응답자 제거 에디터")
-data_file = st.file_uploader("데이터 업로드", type=['csv', 'xlsx'])
+data_file = st.file_uploader("데이터 업로드", type=['csv', 'xlsx', 'xls'])
 
 if data_file:
     df_raw = utils.load_df(data_file)
@@ -137,3 +137,4 @@ if data_file:
             
     else:
         st.info("검출된 불성실 응답자가 없습니다.")
+
