@@ -32,7 +32,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (A1 & SQ6 패치)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (최종 안정화)")
 
 # ==============================================================================
 # [Part 1] 워드 파싱 및 유틸리티 함수 정의
@@ -81,35 +81,41 @@ def extract_options_from_line(text):
             results.append(item)
     return results
 
-# [NEW] A1 문항 같은 "헤더 없는 입력형 테이블" 감지
+# [A1 대응] 헤더 없는 단순 입력형 테이블 (조건 강화됨)
 def extract_plain_input_table(table, current_var):
     rows = table.rows
     if len(rows) < 1: return None
     
-    # 1. 객관식 보기(1) 2)...) 패턴이 아니어야 함
+    # 조건 1: 열(Column) 개수가 2개 이하여야 함 (SQ6, A4 같은 복잡한 표 제외)
+    # 테이블의 첫 행의 셀 개수로 판단
+    if len(rows[0].cells) > 2: return None
+
+    # 조건 2: 첫 셀이 객관식 보기(1) 2)...) 패턴이 아니어야 함
     first_cell = rows[0].cells[0].text.strip()
     if re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", first_cell): return None
 
-    # 2. "입력", "범위", 단위(cm, kg) 등이 포함되어 있는지 확인
+    # 조건 3: "입력", "범위", 단위(cm, kg) 등이 포함되어 있어야 함
     input_keywords = ["입력", "범위", "cm", "kg", "시간", "분", "명", "개", "회"]
     match_count = 0
     
+    # 조건 4: 셀 안에 "1) 남자" 같은 선택지가 있으면 안 됨 (SQ6 방지)
+    option_pattern = re.compile(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]")
+
     for row in rows:
         row_text = " ".join([c.text for c in row.cells])
+        # 선택지 패턴이 발견되면 즉시 중단 (이건 plain table이 아님)
+        if option_pattern.search(row_text):
+            return None
+            
         if any(k in row_text for k in input_keywords) or "(" in row_text:
             match_count += 1
             
-    # 표의 행 중 절반 이상이 입력 패턴이어야 함
     if match_count < len(rows) * 0.5:
         return None
         
     extracted = []
     for i, row in enumerate(rows):
-        # 셀 텍스트를 모두 합쳐서 하나의 라벨로 만듦
         row_text = " ".join([c.text.strip() for c in row.cells if c.text.strip()])
-        
-        # 라벨 정제: "키 : ( 입력범위 ... )cm" -> "키"
-        # 괄호 안의 내용은 제거하거나 남겨둘 수 있음. 여기서는 깔끔하게 제거 시도.
         clean_label = re.sub(r"\(\s*입력.*?\)", "", row_text)
         clean_label = clean_label.replace(":", "").strip()
         
@@ -122,7 +128,7 @@ def extract_plain_input_table(table, current_var):
         
     return extracted
 
-# [NEW] SQ6 자녀 상세 정보(성별+생년월일 혼합) 테이블 감지 함수
+# [SQ6 대응] 자녀 상세 정보(성별+생년월일 혼합) 테이블 감지 함수
 def extract_child_demographics_table(table, current_var):
     if len(table.rows) < 2: return None
     headers = [c.text.strip() for c in table.rows[0].cells]
@@ -160,7 +166,7 @@ def extract_child_demographics_table(table, current_var):
         if has_month: extracted_entries.append({ "변수명": f"{current_var['변수명']}_{i+1}_3", "질문 내용": f"[{current_var['변수명']}] {row_label} - 생월 (월)", "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted_entries
 
-# [NEW] Constant Sum (고정 합계) 테이블 감지 함수
+# [Constant Sum 대응] 고정 합계 테이블 감지 함수
 def extract_constant_sum_table(table, current_var):
     if len(table.columns) != 2: return None
     rows = table.rows
@@ -578,15 +584,9 @@ def parse_word_to_df(docx_file):
             rows = block.rows
             if len(rows) < 1: continue
 
-            # [NEW] A1 같은 "헤더 없는 입력형" 테이블 우선 감지 (최상위 배치)
-            if current_entry and not is_parent_added:
-                plain_input_entries = extract_plain_input_table(block, current_entry)
-                if plain_input_entries:
-                    extracted_data.extend(plain_input_entries)
-                    is_parent_added = True
-                    continue
-
-            # [NEW] SQ6 자녀 정보 테이블
+            # [순서 변경] 1. 특수 테이블들 (SQ6, 합계100%, 더블스케일) 먼저 체크
+            
+            # [SQ6 대응] 자녀 정보 테이블
             if current_entry and not is_parent_added:
                 child_entries = extract_child_demographics_table(block, current_entry)
                 if child_entries:
@@ -594,14 +594,15 @@ def parse_word_to_df(docx_file):
                     is_parent_added = True
                     continue
 
-            # [NEW] Constant Sum (합계 100% 표)
+            # [Constant Sum] 합계 100%
             if current_entry and not is_parent_added:
                 const_sum_entries = extract_constant_sum_table(block, current_entry)
                 if const_sum_entries:
                     extracted_data.extend(const_sum_entries)
                     is_parent_added = True
                     continue
-
+            
+            # [Double Scale] 양쪽 척도
             if current_entry and not is_parent_added:
                 double_entries = extract_double_scale_table(block, current_entry)
                 if double_entries:
@@ -609,6 +610,7 @@ def parse_word_to_df(docx_file):
                     is_parent_added = True
                     continue
 
+            # [일반 객관식]
             if current_entry and not is_parent_added:
                 q_type = current_entry.get("유형")
                 if any(k in current_entry["질문 내용"] for k in multi_keywords): q_type = "Multi"
@@ -634,6 +636,7 @@ def parse_word_to_df(docx_file):
                 if options_str: ranking_options_buffer.append(options_str)
                 continue 
 
+            # [A4 대응] Multi-column Input
             if current_entry:
                 multi_col_entries = extract_multi_column_input_table(block, current_entry, force_row_count=pending_max_n_count)
                 if multi_col_entries: extracted_data.extend(multi_col_entries); is_parent_added = True; pending_max_n_count = None; continue
@@ -642,6 +645,14 @@ def parse_word_to_df(docx_file):
                 if current_entry.get("유형") in ["Single", "Multi"]:
                     if is_option_description_table(block):
                         opt_str = extract_single_choice_options(block); current_entry["보기 값"] = opt_str; extracted_data.append(current_entry); is_parent_added = True; continue
+
+            # [순서 변경] 맨 마지막: A1 같은 "헤더 없는 단순 입력형" 테이블 (조건 까다로움)
+            if current_entry and not is_parent_added:
+                plain_input_entries = extract_plain_input_table(block, current_entry)
+                if plain_input_entries:
+                    extracted_data.extend(plain_input_entries)
+                    is_parent_added = True
+                    continue
 
             is_input_style = is_input_table(block)
             if is_input_style:
