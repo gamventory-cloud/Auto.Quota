@@ -6,3 +6,4 @@ chardet
 altair
 joblib
 python-docx
+xlrd
