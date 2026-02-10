@@ -20,7 +20,7 @@ st.markdown("""
 """)
 
 # 데이터 업로드
-data_file = st.file_uploader("데이터 파일 업로드", type=['csv', 'xlsx'])
+data_file = st.file_uploader("데이터 업로드", type=['csv', 'xlsx', 'xls'])
 
 if data_file:
     df = utils.load_df(data_file)
@@ -119,4 +119,5 @@ if data_file:
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
+
             st.success("✅ 불성실한 응답 패턴이 발견되지 않았습니다.")
