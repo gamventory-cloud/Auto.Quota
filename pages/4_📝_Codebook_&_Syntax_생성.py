@@ -32,7 +32,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (최종 수정)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Final Fix)")
 
 # ==============================================================================
 # [Part 1] 워드 파싱 및 유틸리티 함수 정의
@@ -81,40 +81,57 @@ def extract_options_from_line(text):
             results.append(item)
     return results
 
-# [A2, A4 대응] 시간/분 입력형 테이블 분리 함수
+# [A2, A4 대응] 시간/분 입력형 테이블 (헤더 없는 경우 포함)
 def extract_time_split_table(table, current_var):
     rows = table.rows
     if len(rows) < 1: return None
     
     # 표 전체 텍스트에서 "시간"과 "분"이 동시에 존재하는지 확인
+    # 그리고 이것이 단순 텍스트가 아니라 "입력" 양식인지 확인
     full_text = ""
     for row in rows:
         full_text += " ".join([c.text for c in row.cells])
     
-    # 시간, 분 키워드가 둘 다 있어야 함
+    # 조건: 시간/분 키워드가 있고, 입력 양식(괄호, 입력 등)이 보여야 함
     if not ("시간" in full_text and "분" in full_text):
+        return None
+    
+    # 입력 양식인지 확인 (단순히 설명문에 '시간'이 들어간 경우 배제)
+    if not ("입력" in full_text or "범위" in full_text or "(" in full_text):
         return None
     
     extracted = []
     for i, row in enumerate(rows):
-        # 행 라벨 추출 (첫 번째 비어있지 않은 셀)
-        if not row.cells: continue
+        cells = row.cells
+        if not cells: continue
         
+        # 행 전체 텍스트
+        row_full_text = " ".join([c.text for c in cells])
+        
+        # 라벨 추출 (첫 번째 비어있지 않은 셀)
         row_label = ""
-        for cell in row.cells:
+        for cell in cells:
             txt = cell.text.strip()
             if txt:
                 row_label = txt
                 break
         
-        # 라벨이 비어있거나, 라벨 자체가 시간/분 설명이면 패스
         if not row_label: continue
-        # "주중...시간...분" 처럼 라벨 안에 시간단위가 섞여있으면 헤더일 가능성 높음
-        if "시간" in row_label and "분" in row_label and ("입력" in row_label or "범위" in row_label):
+        
+        # [핵심 수정] 이 행이 '데이터'인지 '헤더'인지 판단
+        # 데이터 행의 특징: "입력", "범위", "(" 등이 포함되어 있음
+        # 헤더 행의 특징: "구분", "시간", "분" 같은 단어만 있고 입력 양식이 없음
+        
+        is_data_row = ("입력" in row_full_text or "범위" in row_full_text or "(" in row_full_text)
+        
+        # 만약 "시간"과 "분"이라는 글자가 라벨 자체에 포함되어 있고, 입력 양식이 없다면 헤더로 간주하고 패스
+        if not is_data_row and "시간" in row_label and "분" in row_label:
             continue
             
-        # 설명문구(※) 제거
+        # A2, A4는 모든 행이 데이터 행임 (주중, 주말 등)
+        # 라벨 정제 (설명 문구 제거)
         clean_label = re.sub(r"※.*", "", row_label).strip()
+        clean_label = clean_label.replace(":", "").strip()
         
         # 시간 변수
         extracted.append({
@@ -142,19 +159,19 @@ def extract_plain_input_table(table, current_var):
     # 조건 1: 열(Column) 개수가 2개 이하여야 함
     if len(rows[0].cells) > 2: return None
 
-    # 조건 2: 첫 셀이 객관식 보기 패턴이면 안됨
+    # 조건 2: 첫 셀이 객관식 보기(1) 2)...) 패턴이 아니어야 함
     first_cell = rows[0].cells[0].text.strip()
     if re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", first_cell): return None
 
-    # 조건 3: "입력", "범위" 등이 포함되어 있어야 함
+    # 조건 3: "입력", "범위", 단위(cm, kg) 등이 포함되어 있어야 함
     input_keywords = ["입력", "범위", "cm", "kg", "명", "개", "회"]
     match_count = 0
     
+    # 조건 4: 셀 안에 선택지나 시간/분이 있으면 안 됨 (A2, A4, SQ6 방지)
     option_pattern = re.compile(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]")
 
     for row in rows:
         row_text = " ".join([c.text for c in row.cells])
-        # 선택지나 시간표는 제외
         if option_pattern.search(row_text): return None
         if "시간" in row_text and "분" in row_text: return None 
             
