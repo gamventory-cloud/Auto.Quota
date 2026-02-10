@@ -276,24 +276,6 @@ if data_file:
             # -------------------------------------------------------------
             st.divider()
             
-            # [NEW] 제외된 ID 복사 기능 (세로 목록)
-            all_idxs = set(df_survey.index)
-            pass_idxs = set(clean_fin_idxs)
-            exclude_idxs = list(all_idxs - pass_idxs)
-            
-            if exclude_idxs:
-                st.subheader("📋 제외된 응답자 ID (복사 붙여넣기용)")
-                excluded_ids = df_survey.loc[exclude_idxs, c_no].tolist()
-                
-                # 쉼표 대신 줄바꿈(\n)으로 연결하여 세로 목록 생성
-                id_text_vertical = "\n".join(map(str, excluded_ids))
-                
-                st.info(f"총 **{len(excluded_ids)}명**이 제외되었습니다. 오른쪽 위의 📄 아이콘을 누르면 세로 목록이 복사됩니다.")
-                st.code(id_text_vertical, language="text")
-            else:
-                st.success("🎉 제외된 인원이 없습니다. (모두 통과)")
-
-            st.divider()
             st.subheader("📊 할당 결과 시각화")
             
             total_rows = len(df_survey)
@@ -377,5 +359,23 @@ if data_file:
                 df_recs['sort_val'] = df_recs['항목'].apply(lambda x: tuple(utils.natural_key(x)))
                 df_recs = df_recs.sort_values(by=['순서', 'sort_val'], ascending=[True, True])
                 st.dataframe(df_recs.drop(columns=['순서', 'sort_val']), use_container_width=True, hide_index=True)
+
+            # [Moved to Bottom] 제외된 ID 복사 기능 (세로 목록)
+            st.divider()
+            all_idxs = set(df_survey.index)
+            pass_idxs = set(clean_fin_idxs)
+            exclude_idxs = list(all_idxs - pass_idxs)
+            
+            if exclude_idxs:
+                st.subheader("📋 제외된 응답자 ID (복사 붙여넣기용)")
+                excluded_ids = df_survey.loc[exclude_idxs, c_no].tolist()
+                
+                # 쉼표 대신 줄바꿈(\n)으로 연결하여 세로 목록 생성
+                id_text_vertical = "\n".join(map(str, excluded_ids))
+                
+                st.info(f"총 **{len(excluded_ids)}명**이 제외되었습니다. 오른쪽 위의 📄 아이콘을 누르면 세로 목록이 복사됩니다.")
+                st.code(id_text_vertical, language="text")
+            else:
+                st.success("🎉 제외된 인원이 없습니다. (모두 통과)")
 
         except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
