@@ -1,0 +1,7 @@
+streamlit
+pandas
+openpyxl
+XlsxWriter
+chardet
+altair
+joblib
