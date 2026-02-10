@@ -32,7 +32,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ6 자녀정보 패치)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (A1 & SQ6 패치)")
 
 # ==============================================================================
 # [Part 1] 워드 파싱 및 유틸리티 함수 정의
@@ -81,90 +81,83 @@ def extract_options_from_line(text):
             results.append(item)
     return results
 
-# [NEW] SQ6 같은 자녀 상세 정보(성별+생년월일 혼합) 테이블 감지 함수
+# [NEW] A1 문항 같은 "헤더 없는 입력형 테이블" 감지
+def extract_plain_input_table(table, current_var):
+    rows = table.rows
+    if len(rows) < 1: return None
+    
+    # 1. 객관식 보기(1) 2)...) 패턴이 아니어야 함
+    first_cell = rows[0].cells[0].text.strip()
+    if re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", first_cell): return None
+
+    # 2. "입력", "범위", 단위(cm, kg) 등이 포함되어 있는지 확인
+    input_keywords = ["입력", "범위", "cm", "kg", "시간", "분", "명", "개", "회"]
+    match_count = 0
+    
+    for row in rows:
+        row_text = " ".join([c.text for c in row.cells])
+        if any(k in row_text for k in input_keywords) or "(" in row_text:
+            match_count += 1
+            
+    # 표의 행 중 절반 이상이 입력 패턴이어야 함
+    if match_count < len(rows) * 0.5:
+        return None
+        
+    extracted = []
+    for i, row in enumerate(rows):
+        # 셀 텍스트를 모두 합쳐서 하나의 라벨로 만듦
+        row_text = " ".join([c.text.strip() for c in row.cells if c.text.strip()])
+        
+        # 라벨 정제: "키 : ( 입력범위 ... )cm" -> "키"
+        # 괄호 안의 내용은 제거하거나 남겨둘 수 있음. 여기서는 깔끔하게 제거 시도.
+        clean_label = re.sub(r"\(\s*입력.*?\)", "", row_text)
+        clean_label = clean_label.replace(":", "").strip()
+        
+        extracted.append({
+            "변수명": f"{current_var['변수명']}_{i+1}",
+            "질문 내용": f"[{current_var['변수명']}] {clean_label}",
+            "보기 값": "(숫자입력)",
+            "유형": "Open"
+        })
+        
+    return extracted
+
+# [NEW] SQ6 자녀 상세 정보(성별+생년월일 혼합) 테이블 감지 함수
 def extract_child_demographics_table(table, current_var):
-    # 최소 2줄 이상이어야 함 (헤더 + 데이터)
     if len(table.rows) < 2: return None
-    
-    # 헤더 분석
     headers = [c.text.strip() for c in table.rows[0].cells]
-    
-    # 조건: 헤더에 '성별'과 '생년'/'생일' 관련 단어가 동시에 있어야 함
     has_gender = any("성별" in h for h in headers)
     has_birth = any("생년" in h or "생일" in h or "생월" in h for h in headers)
-    
-    if not (has_gender and has_birth):
-        return None
+    if not (has_gender and has_birth): return None
 
-    # 컬럼 인덱스 찾기
-    gender_col_idx = -1
-    birth_col_idx = -1
-    
+    gender_col_idx = -1; birth_col_idx = -1
     for idx, h in enumerate(headers):
         if "성별" in h: gender_col_idx = idx
         if "생년" in h or "생일" in h or "생월" in h: birth_col_idx = idx
-            
-    if gender_col_idx == -1 or birth_col_idx == -1:
-        return None
+    if gender_col_idx == -1 or birth_col_idx == -1: return None
 
     extracted_entries = []
-    
-    # 데이터 행 순회
-    for i, row in enumerate(table.rows[1:]): # 헤더 제외
+    for i, row in enumerate(table.rows[1:]):
         cells = row.cells
-        # 셀 개수가 부족하면 패스
         if len(cells) <= max(gender_col_idx, birth_col_idx): continue
-        
-        row_label = cells[0].text.strip() # 예: 첫째 자녀, 둘째 자녀
-        gender_text = cells[gender_col_idx].text.strip() # 예: 1) 남자 2) 여자
-        birth_text = cells[birth_col_idx].text.strip() # 예: ( )년 ( )월
-        
-        if not row_label: continue # 라벨 없으면 패스
+        row_label = cells[0].text.strip()
+        gender_text = cells[gender_col_idx].text.strip()
+        birth_text = cells[birth_col_idx].text.strip()
+        if not row_label: continue 
 
-        # 1. 성별 변수 추출
-        gender_opts = extract_options_from_line(gender_text)
-        gender_vals_str = ""
-        
+        gender_opts = extract_options_from_line(gender_text); gender_vals_str = ""
         if gender_opts:
-            # "1) 남자" -> "1=남자" 형태로 변환
             g_lines = []
             for opt in gender_opts:
                 m = re.match(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt)
-                if m:
-                    code, val = m.groups()
-                    g_lines.append(f"{code}={val.strip()}")
-                else:
-                    g_lines.append(opt)
+                if m: code, val = m.groups(); g_lines.append(f"{code}={val.strip()}")
+                else: g_lines.append(opt)
             gender_vals_str = "\n".join(g_lines)
             
-        extracted_entries.append({
-            "변수명": f"{current_var['변수명']}_{i+1}_1", # SQ6_1_1
-            "질문 내용": f"[{current_var['변수명']}] {row_label} - 성별",
-            "보기 값": gender_vals_str,
-            "유형": "Single"
-        })
-        
-        # 2. 생년월일 변수 추출 (년/월 분리)
-        # ( )년 ( )월 패턴이 있는지 확인
-        has_year = "년" in birth_text
-        has_month = "월" in birth_text
-        
-        if has_year:
-            extracted_entries.append({
-                "변수명": f"{current_var['변수명']}_{i+1}_2", # SQ6_1_2
-                "질문 내용": f"[{current_var['변수명']}] {row_label} - 생년 (년)",
-                "보기 값": "(숫자입력)",
-                "유형": "Open"
-            })
-        
-        if has_month:
-            extracted_entries.append({
-                "변수명": f"{current_var['변수명']}_{i+1}_3", # SQ6_1_3
-                "질문 내용": f"[{current_var['변수명']}] {row_label} - 생월 (월)",
-                "보기 값": "(숫자입력)",
-                "유형": "Open"
-            })
-            
+        extracted_entries.append({ "변수명": f"{current_var['변수명']}_{i+1}_1", "질문 내용": f"[{current_var['변수명']}] {row_label} - 성별", "보기 값": gender_vals_str, "유형": "Single" })
+        has_year = "년" in birth_text; has_month = "월" in birth_text
+        if has_year: extracted_entries.append({ "변수명": f"{current_var['변수명']}_{i+1}_2", "질문 내용": f"[{current_var['변수명']}] {row_label} - 생년 (년)", "보기 값": "(숫자입력)", "유형": "Open" })
+        if has_month: extracted_entries.append({ "변수명": f"{current_var['변수명']}_{i+1}_3", "질문 내용": f"[{current_var['변수명']}] {row_label} - 생월 (월)", "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted_entries
 
 # [NEW] Constant Sum (고정 합계) 테이블 감지 함수
@@ -186,20 +179,13 @@ def extract_constant_sum_table(table, current_var):
         cells = row.cells
         label_cell = cells[0].text.strip()
         input_cell = cells[1].text.strip()
-        
         if not label_cell: continue
         if "합계" in label_cell or "Total" in label_cell or "TOTAL" in label_cell: continue
 
         sub_var_name = f"{current_var['변수명']}_{i+1}"
         final_label = f"[{current_var['변수명']}] {label_cell}"
         if "%" in input_cell or "퍼센트" in q_text: final_label += " (%)"
-            
-        extracted_entries.append({
-            "변수명": sub_var_name,
-            "질문 내용": final_label,
-            "보기 값": "(숫자입력)",
-            "유형": "Open"
-        })
+        extracted_entries.append({ "변수명": sub_var_name, "질문 내용": final_label, "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted_entries
 
 def is_multiple_choice(entry):
@@ -592,7 +578,15 @@ def parse_word_to_df(docx_file):
             rows = block.rows
             if len(rows) < 1: continue
 
-            # [NEW] SQ6 자녀 정보 테이블 우선 감지
+            # [NEW] A1 같은 "헤더 없는 입력형" 테이블 우선 감지 (최상위 배치)
+            if current_entry and not is_parent_added:
+                plain_input_entries = extract_plain_input_table(block, current_entry)
+                if plain_input_entries:
+                    extracted_data.extend(plain_input_entries)
+                    is_parent_added = True
+                    continue
+
+            # [NEW] SQ6 자녀 정보 테이블
             if current_entry and not is_parent_added:
                 child_entries = extract_child_demographics_table(block, current_entry)
                 if child_entries:
@@ -600,7 +594,7 @@ def parse_word_to_df(docx_file):
                     is_parent_added = True
                     continue
 
-            # [NEW] Constant Sum (합계 100% 표) 우선 감지
+            # [NEW] Constant Sum (합계 100% 표)
             if current_entry and not is_parent_added:
                 const_sum_entries = extract_constant_sum_table(block, current_entry)
                 if const_sum_entries:
@@ -854,9 +848,9 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
+* **NEW (A1 대응):** 키, 몸무게처럼 헤더 없이 입력 칸만 있는 표를 자동으로 주관식 변수(Open)로 처리합니다.
 * **NEW (SQ6 대응):** 한 표 안에 '성별'과 '생년월일'이 섞여 있는 복합형 자녀 정보 테이블을 자동으로 감지하여 분리합니다.
 * **Save with KEEP:** SPSS 신택스 생성 시, '사용여부'가 O/R인 변수들만 `/KEEP=` 명령어로 길게 나열하여 저장하도록 변경했습니다.
-* **완벽 통합:** 기존의 모든 기능(순위형, 표 파싱, PROG 삭제, 하이픈 처리 등)에 **고정 합계(Constant Sum) 테이블 감지** 기능이 추가되었습니다.
 """)
 
 tab1, tab2 = st.tabs(["1단계: 워드 ➡️ 엑셀 생성", "2단계: 엑셀 ➡️ SPSS 생성"])
