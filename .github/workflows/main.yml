@@ -1,0 +1,15 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    # 5일마다 한 번씩 한국 시간 기준 새벽에 실행 (UTC 기준 00:00)
+    - cron: '0 0 */1 * *'
+  workflow_dispatch: # 수동으로도 실행할 수 있게 설정
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Visit Streamlit App
+        run: |
+          curl -I https://autoquota-rn3evzg5ldxuq6fcupivi5.streamlit.app/
