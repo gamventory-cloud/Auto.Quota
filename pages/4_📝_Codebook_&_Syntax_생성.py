@@ -32,7 +32,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (A2/A4/SQ10 해결)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (척도문항 오인식 방지)")
 
 # ==============================================================================
 # [Part 0] 문항 요약 함수 (Regex Rule-based)
@@ -123,9 +123,10 @@ def analyze_table_structure(table):
     rows = table.rows
     if len(rows) < 1: return "UNKNOWN"
     all_text = ""; first_row_text = ""; second_row_text = ""; has_input_pattern = False
+    
+    # [수정] 입력 키워드에 구체적인 패턴 추가
     input_keywords = ["입력", "범위", "cm", "kg", "명", "개", "회", "( )", "()"]
     
-    # 텍스트 수집 및 패턴 감지
     row0_digits = 0; row0_len = 0
     row1_digits = 0; row1_len = 0
     
@@ -143,15 +144,15 @@ def analyze_table_structure(table):
             
         if any(k in row_txt for k in input_keywords): has_input_pattern = True
 
-    # 1. 시간 분할 (세로형 - A2, A4) [최우선 순위]
-    # 가로형 입력보다 먼저 체크해야 납치되지 않음
-    if "시간" in all_text and "분" in all_text: return "TIME_SPLIT"
+    # 1. 시간 분할 (세로형 - A2, A4)
+    # [핵심 수정] 시간/분만 있으면 안되고, 반드시 '입력 패턴(has_input_pattern)'이 있어야 함!
+    if "시간" in all_text and "분" in all_text and has_input_pattern:
+        return "TIME_SPLIT"
 
     # 2. 자녀 정보 (SQ6)
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
     # 3. 가로형 척도 (HORIZONTAL_SCALE) - B2, A10-1
-    # 조건: 2행 테이블, 한 줄은 텍스트, 한 줄은 숫자(코드), 입력패턴 없음
     if len(rows) == 2 and not has_input_pattern:
         row0_is_numeric = row0_len > 0 and (row0_digits / row0_len) > 0.5
         row1_is_numeric = row1_len > 0 and (row1_digits / row1_len) > 0.5
@@ -159,7 +160,6 @@ def analyze_table_structure(table):
             return "HORIZONTAL_SCALE"
 
     # 4. 가로형 입력 (HORIZONTAL_INPUT) - B3, B4
-    # 조건: 2행 이상, 첫행 헤더, 둘째행 데이터(입력패턴O)
     is_row1_input = any(k in second_row_text for k in input_keywords)
     if len(rows) >= 2 and len(table.columns) >= 2 and is_row1_input:
         return "HORIZONTAL_INPUT"
@@ -178,21 +178,19 @@ def analyze_table_structure(table):
 # [Extractors]
 # ------------------------------------------------------------------------------
 def extract_time_split_table(table, current_var):
-    # A2, A4 대응 (시간/분 강제 추출)
     extracted = []
     for i, row in enumerate(table.rows):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
         if not cells_text: continue
         row_full_text = " ".join(cells_text)
         
-        # 헤더 행 스킵 (시간/분이 써있지만 입력양식이 없는 경우)
+        # 헤더 행 스킵
         is_header_row = ("시간" in row_full_text and "분" in row_full_text and "입력" not in row_full_text and "범위" not in row_full_text and "(" not in row_full_text)
         if is_header_row: continue
         
         row_label = cells_text[0]
         clean_label = re.sub(r"※.*", "", row_label).strip().replace(":", "").strip()
         
-        # 라벨이 너무 길거나 비어있으면 스킵
         if len(clean_label) > 40 or not clean_label: continue
         
         extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
@@ -200,7 +198,6 @@ def extract_time_split_table(table, current_var):
     return extracted
 
 def extract_horizontal_scale_table(table, current_var):
-    # B2, A10-1 대응
     rows = table.rows
     headers = [c.text.strip() for c in rows[0].cells]
     values = [c.text.strip() for c in rows[1].cells]
@@ -220,7 +217,6 @@ def extract_horizontal_scale_table(table, current_var):
     return None
 
 def extract_horizontal_input_table(table, current_var):
-    # B3, B4 대응
     rows = table.rows
     if len(rows) < 2: return None
     extracted = []
