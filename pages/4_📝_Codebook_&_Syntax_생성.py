@@ -33,13 +33,14 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (섹션 인식)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (표 내부 섹션 인식)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
 # ==============================================================================
 
 def iter_block_items(parent):
+    """문서 순회 함수"""
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
     elif isinstance(parent, _Cell):
@@ -87,6 +88,7 @@ def extract_options_from_line(text):
     return results
 
 def summarize_label_regex(text):
+    """문항 요약 (Beta) 기능"""
     if not text: return ""
     text = re.sub(r"\(PROG.*?\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[PROG.*?\]", "", text, flags=re.IGNORECASE)
@@ -112,11 +114,30 @@ def summarize_label_regex(text):
     text = text.strip(); text = re.sub(r"\?+$", "", text); text = re.sub(r"\.$", "", text)
     return text.strip()
 
+def check_section_header(text, current_prefix):
+    """
+    텍스트를 분석하여 섹션(Part A, SQ, DQ 등)이 변경되었는지 확인하고
+    변경된 Prefix를 반환합니다.
+    """
+    clean_text = text.strip()
+    new_prefix = current_prefix
+
+    if re.search(r"Screening", clean_text, re.IGNORECASE) or "스크리닝" in clean_text:
+        new_prefix = "SQ"
+    elif re.search(r"Part\s*([A-Z])", clean_text, re.IGNORECASE):
+        match = re.search(r"Part\s*([A-Z])", clean_text, re.IGNORECASE)
+        new_prefix = match.group(1).upper()
+    elif re.search(r"^DQ", clean_text, re.IGNORECASE) or "인구 통계" in clean_text:
+        new_prefix = "DQ"
+    
+    return new_prefix
+
 # ==============================================================================
 # [Part 3] 테이블 추출기 (Extractors)
 # ==============================================================================
 
 def check_mixed_text_input(entry):
+    # A7 등 텍스트 내 복수 입력 감지
     if entry["유형"] != "Single" and entry["유형"] != "Open": return [entry]
     full_text = entry["질문 내용"]
     if "보기_list" in entry: full_text += " " + " ".join(entry["보기_list"])
@@ -132,6 +153,7 @@ def check_mixed_text_input(entry):
     return new_entries
 
 def extract_embedded_open_entry(entry):
+    # SQ5 등 보기 내 입력 감지
     if entry["유형"] not in ["Single", "Multi"]: return []
     vals_str = entry.get("보기 값", "")
     if not vals_str: return []
@@ -548,6 +570,7 @@ def analyze_table_structure(table):
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
     # 3. 시간 분할 (세로형 - A2, A4)
+    # [수정] 열 개수 조건 추가 (5점 척도 등은 제외)
     if "시간" in all_text and "분" in all_text and has_input_pattern:
         if len(table.columns) <= 4:
             return "TIME_SPLIT"
@@ -588,7 +611,7 @@ def parse_word_to_df(docx_file):
     is_parent_added = False 
     
     # [NEW] 섹션 인식 변수
-    current_prefix = "Q" # 기본값
+    current_prefix = "Q"
     prefix_counters = collections.defaultdict(int)
     
     # [NEW] 워드 자동번호 인식용 카운터
@@ -668,34 +691,37 @@ def parse_word_to_df(docx_file):
             return split_entries
 
     for block in iter_block_items(doc):
+        # [NEW] 표(Table) 내부의 섹션 헤더도 감지!
+        if isinstance(block, Table):
+            if len(block.rows) > 0 and len(block.rows[0].cells) > 0:
+                first_cell_text = block.rows[0].cells[0].text
+                current_prefix = check_section_header(first_cell_text, current_prefix)
+        
         if isinstance(block, Paragraph):
             text = block.text.strip()
             
-            # [NEW] 섹션 헤더 감지 (Part A, Screening 등)
-            if re.match(r"^Screening", text, re.IGNORECASE) or "스크리닝" in text:
-                current_prefix = "SQ"
-            elif re.match(r"^Part\s*([A-Z])", text, re.IGNORECASE):
-                match = re.match(r"^Part\s*([A-Z])", text, re.IGNORECASE)
-                current_prefix = match.group(1).upper()
-            elif re.match(r"^DQ", text, re.IGNORECASE) or "통계" in text:
-                current_prefix = "DQ"
+            # [NEW] 섹션 헤더 감지 (Paragraph)
+            current_prefix = check_section_header(text, current_prefix)
 
             # [NEW] 워드 자동번호 인식 및 텍스트 병합
             if block._p.pPr is not None and block._p.pPr.numPr is not None:
                 try:
                     num_id = block._p.pPr.numPr.numId.val
                     ilvl = block._p.pPr.numPr.ilvl.val if block._p.pPr.numPr.ilvl is not None else 0
+                    
                     auto_num_counters[(num_id, ilvl)] += 1
+                    num_val = auto_num_counters[(num_id, ilvl)]
                     
                     if not re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", text):
                         # 문항 번호가 없으면 섹션 기반 번호 부여 (SQ1, A1...)
-                        prefix_counters[current_prefix] += 1
-                        num_val = prefix_counters[current_prefix]
-                        
-                        # 질문인지 보기인지 대략적 판단
+                        # 단, 질문 패턴일 때만 부여 (보기에는 번호 매기지 않음)
                         if "?" in text or "다." in text or "시오" in text or len(text) > 40:
-                            text = f"{current_prefix}{num_val}. {text}"
+                             # 질문 번호 카운트 증가
+                            prefix_counters[current_prefix] += 1
+                            q_num = prefix_counters[current_prefix]
+                            text = f"{current_prefix}{q_num}. {text}"
                         else:
+                            # 보기 번호 (1) ...)
                             text = f"{num_val}) {text}"
                 except:
                     pass
