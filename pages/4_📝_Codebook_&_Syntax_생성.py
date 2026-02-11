@@ -32,7 +32,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (가로형 표 지원)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (척도/입력표 구분 강화)")
 
 # ==============================================================================
 # [Part 0] 문항 요약 함수 (Regex Rule-based)
@@ -125,25 +125,44 @@ def analyze_table_structure(table):
     all_text = ""; first_row_text = ""; second_row_text = ""; has_input_pattern = False
     input_keywords = ["입력", "범위", "cm", "kg", "명", "개", "회", "( )", "()"]
     
+    # 텍스트 수집 및 패턴 감지
+    row0_digits = 0; row0_len = 0
+    row1_digits = 0; row1_len = 0
+    
     for i, row in enumerate(rows):
         row_txt = " ".join([c.text.strip() for c in row.cells])
         all_text += row_txt + " "; 
-        if i == 0: first_row_text = row_txt
-        if i == 1: second_row_text = row_txt
+        if i == 0: 
+            first_row_text = row_txt
+            row0_len = len(row.cells)
+            row0_digits = sum(1 for c in row.cells if c.text.strip().isdigit())
+        if i == 1: 
+            second_row_text = row_txt
+            row1_len = len(row.cells)
+            row1_digits = sum(1 for c in row.cells if c.text.strip().isdigit())
+            
         if any(k in row_txt for k in input_keywords): has_input_pattern = True
 
     # 1. 자녀 정보 (SQ6)
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
-    # [NEW] 가로형 입력 표 (B3, B4)
-    # 조건: 2행, 1행은 헤더(입력패턴X), 2행은 데이터(입력패턴O), 열 개수 >= 2
-    is_row0_input = any(k in first_row_text for k in input_keywords)
+    # [NEW] 가로형 척도 (HORIZONTAL_SCALE) - B2, A10-1
+    # 조건: 2행 테이블, 한 줄은 텍스트, 한 줄은 숫자(코드), 입력패턴 없음
+    if len(rows) == 2 and not has_input_pattern:
+        # 1행이 숫자고 0행이 텍스트거나, 0행이 숫자고 1행이 텍스트인 경우
+        row0_is_numeric = row0_len > 0 and (row0_digits / row0_len) > 0.5
+        row1_is_numeric = row1_len > 0 and (row1_digits / row1_len) > 0.5
+        
+        if (row0_is_numeric and not row1_is_numeric) or (not row0_is_numeric and row1_is_numeric):
+            return "HORIZONTAL_SCALE"
+
+    # 2. 가로형 입력 (HORIZONTAL_INPUT) - B3, B4
+    # 조건: 2행 이상, 첫행 헤더, 둘째행 데이터(입력패턴O)
     is_row1_input = any(k in second_row_text for k in input_keywords)
-    if len(rows) == 2 and len(table.columns) >= 2 and not is_row0_input and is_row1_input:
+    if len(rows) >= 2 and len(table.columns) >= 2 and is_row1_input:
         return "HORIZONTAL_INPUT"
 
-    # 3. 시간 분할 (A2, A4 - 세로형)
-    # 가로형 시간표는 HORIZONTAL_INPUT에서 처리됨
+    # 3. 시간 분할 (세로형) - A2, A4
     if "시간" in all_text and "분" in all_text: return "TIME_SPLIT"
     
     # 4. 고정 합계
@@ -155,6 +174,39 @@ def analyze_table_structure(table):
     if has_input_pattern and not is_option_table and len(table.columns) <= 2: return "PLAIN_INPUT"
     
     return "STANDARD"
+
+# ------------------------------------------------------------------------------
+# [Extractor] 가로형 척도 표 (B2, A10-1 대응)
+# ------------------------------------------------------------------------------
+def extract_horizontal_scale_table(table, current_var):
+    rows = table.rows
+    headers = [c.text.strip() for c in rows[0].cells]
+    values = [c.text.strip() for c in rows[1].cells]
+    
+    # 어느 행이 코드(숫자)이고 어느 행이 라벨(텍스트)인지 판별
+    row0_digits = sum(1 for x in headers if x.isdigit())
+    row1_digits = sum(1 for x in values if x.isdigit())
+    
+    scale_pairs = []
+    
+    if row1_digits > row0_digits:
+        # 0행: 라벨, 1행: 코드 (일반적)
+        codes = values; labels = headers
+    else:
+        # 0행: 코드, 1행: 라벨
+        codes = headers; labels = values
+        
+    for i in range(min(len(codes), len(labels))):
+        c = codes[i]; l = labels[i]
+        if c and l:
+            scale_pairs.append(f"{c}={l}")
+            
+    if scale_pairs:
+        # 현재 변수의 보기 값을 업데이트하고 그대로 반환
+        current_var["보기 값"] = "\n".join(scale_pairs)
+        return [current_var]
+        
+    return None
 
 # ------------------------------------------------------------------------------
 # [Extractor] 가로형 입력 표 (B3, B4 대응)
@@ -172,36 +224,17 @@ def extract_horizontal_input_table(table, current_var):
         value_text = values[i].text.strip()
         
         if not header_text: continue
-        
-        # 헤더 정제
         clean_label = clean_empty_parentheses(header_text)
         
-        # 값에 '시간'과 '분'이 모두 있으면 분리 (B4)
         if "시간" in value_text and "분" in value_text and ("입력" in value_text or "(" in value_text):
-             extracted.append({
-                "변수명": f"{current_var['변수명']}_{i+1}_H",
-                "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)",
-                "보기 값": "(숫자입력)",
-                "유형": "Open"
-            })
-             extracted.append({
-                "변수명": f"{current_var['변수명']}_{i+1}_M",
-                "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)",
-                "보기 값": "(숫자입력)",
-                "유형": "Open"
-            })
+             extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
+             extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
         else:
-            # 일반 입력 (B3)
-            extracted.append({
-                "변수명": f"{current_var['변수명']}_{i+1}",
-                "질문 내용": f"[{current_var['변수명']}] {clean_label}",
-                "보기 값": "(숫자입력)",
-                "유형": "Open"
-            })
+            extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}", "질문 내용": f"[{current_var['변수명']}] {clean_label}", "보기 값": "(숫자입력)", "유형": "Open" })
             
     return extracted
 
-# ... (기존 Extractor들) ...
+# ... (기존 Extractor들 유지) ...
 def extract_child_demographics_table(table, current_var):
     headers = [c.text.strip() for c in table.rows[0].cells]
     gender_col_idx = -1; birth_col_idx = -1
@@ -251,6 +284,7 @@ def extract_plain_input_table(table, current_var):
         if not cells_text: continue
         row_full_text = " ".join(cells_text)
         if re.search(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]", row_full_text): continue
+        if "시간" in row_full_text and "분" in row_full_text: continue 
         clean_label = re.sub(r"\(\s*입력.*?\)", "", row_full_text).replace(":", "").strip()
         clean_label = re.sub(r"[a-zA-Z]+$", "", clean_label).strip()
         if not clean_label: continue
@@ -662,8 +696,13 @@ def parse_word_to_df(docx_file):
                 if current_entry and not is_parent_added:
                     new_entries = extract_child_demographics_table(block, current_entry)
             
+            elif table_type == "HORIZONTAL_SCALE":
+                # [NEW] 가로형 척도 표 (B2, A10-1)
+                if current_entry and not is_parent_added:
+                    new_entries = extract_horizontal_scale_table(block, current_entry)
+
             elif table_type == "HORIZONTAL_INPUT":
-                # [NEW] 가로형 입력 표 (B3, B4)
+                # 가로형 입력 표 (B3, B4)
                 if current_entry and not is_parent_added:
                     new_entries = extract_horizontal_input_table(block, current_entry)
 
@@ -914,7 +953,7 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
-* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력]** 등의 유형을 자동으로 판단합니다.
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도]** 등의 유형을 자동으로 판단합니다.
 * **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
 * **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
 """)
