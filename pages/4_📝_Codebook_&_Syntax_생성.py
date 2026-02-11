@@ -33,16 +33,13 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (워드 번호 완벽 대응)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (섹션 인식)")
 
 # ==============================================================================
-# [Part 1] 핵심 파싱 함수 (가장 먼저 정의 - NameError 방지)
+# [Part 1] 핵심 파싱 함수
 # ==============================================================================
 
 def iter_block_items(parent):
-    """
-    워드 문서의 흐름(Paragraph와 Table)을 순서대로 순회하기 위한 핵심 함수입니다.
-    """
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
     elif isinstance(parent, _Cell):
@@ -90,7 +87,6 @@ def extract_options_from_line(text):
     return results
 
 def summarize_label_regex(text):
-    """문항 요약 (Beta) 기능"""
     if not text: return ""
     text = re.sub(r"\(PROG.*?\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[PROG.*?\]", "", text, flags=re.IGNORECASE)
@@ -121,7 +117,6 @@ def summarize_label_regex(text):
 # ==============================================================================
 
 def check_mixed_text_input(entry):
-    # A7 등 텍스트 내 복수 입력 감지
     if entry["유형"] != "Single" and entry["유형"] != "Open": return [entry]
     full_text = entry["질문 내용"]
     if "보기_list" in entry: full_text += " " + " ".join(entry["보기_list"])
@@ -137,24 +132,16 @@ def check_mixed_text_input(entry):
     return new_entries
 
 def extract_embedded_open_entry(entry):
-    # SQ5 등 보기 내 입력 감지 (강화됨)
     if entry["유형"] not in ["Single", "Multi"]: return []
-    
     vals_str = entry.get("보기 값", "")
     if not vals_str: return []
-    
     new_entries = []
     lines = vals_str.split('\n')
-    
-    # 괄호 정규화
     normalized_lines = [line.replace("（", "(").replace("）", ")").replace("[", "(").replace("]", ")") for line in lines]
-    
     for line in normalized_lines:
         if "=" not in line: continue
         parts = line.split("=", 1)
-        code = parts[0].strip()
-        label = parts[1].strip()
-        
+        code = parts[0].strip(); label = parts[1].strip()
         if "(" in label and ")" in label:
             paren_content_match = re.search(r"\(([^)]+)\)", label)
             if paren_content_match:
@@ -165,14 +152,12 @@ def extract_embedded_open_entry(entry):
                     if suffix_match:
                         suffix = suffix_match.group(0).replace(")", "").strip()
                         if suffix: unit = f" ({suffix})"
-                    
                     new_entries.append({
                         "변수명": f"{entry['변수명']}_{code}",
                         "질문 내용": f"[{entry['변수명']}] {code}번 선택 시 구체적 내용{unit}",
                         "보기 값": "(숫자입력)" if "범위" in content or "수" in content or "명" in suffix else "(주관식)",
                         "유형": "Open"
                     })
-            
     return new_entries
 
 def extract_child_demographics_table(table, current_var):
@@ -563,7 +548,6 @@ def analyze_table_structure(table):
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
     # 3. 시간 분할 (세로형 - A2, A4)
-    # [수정] 열 개수 조건 추가 (5점 척도 등은 제외)
     if "시간" in all_text and "분" in all_text and has_input_pattern:
         if len(table.columns) <= 4:
             return "TIME_SPLIT"
@@ -602,6 +586,10 @@ def parse_word_to_df(docx_file):
     multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "중복가능", "모두 체크", "모두 응답"]
     current_entry = None
     is_parent_added = False 
+    
+    # [NEW] 섹션 인식 변수
+    current_prefix = "Q" # 기본값
+    prefix_counters = collections.defaultdict(int)
     
     # [NEW] 워드 자동번호 인식용 카운터
     auto_num_counters = collections.defaultdict(int)
@@ -681,23 +669,32 @@ def parse_word_to_df(docx_file):
 
     for block in iter_block_items(doc):
         if isinstance(block, Paragraph):
-            # [NEW] 워드 자동번호 인식 및 텍스트 병합
             text = block.text.strip()
             
-            # 워드 자동번호(Numbering) 속성 확인
+            # [NEW] 섹션 헤더 감지 (Part A, Screening 등)
+            if re.match(r"^Screening", text, re.IGNORECASE) or "스크리닝" in text:
+                current_prefix = "SQ"
+            elif re.match(r"^Part\s*([A-Z])", text, re.IGNORECASE):
+                match = re.match(r"^Part\s*([A-Z])", text, re.IGNORECASE)
+                current_prefix = match.group(1).upper()
+            elif re.match(r"^DQ", text, re.IGNORECASE) or "통계" in text:
+                current_prefix = "DQ"
+
+            # [NEW] 워드 자동번호 인식 및 텍스트 병합
             if block._p.pPr is not None and block._p.pPr.numPr is not None:
                 try:
                     num_id = block._p.pPr.numPr.numId.val
                     ilvl = block._p.pPr.numPr.ilvl.val if block._p.pPr.numPr.ilvl is not None else 0
-                    
                     auto_num_counters[(num_id, ilvl)] += 1
-                    num_val = auto_num_counters[(num_id, ilvl)]
                     
                     if not re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", text):
-                        # [NEW] 스마트 번호 부여 (질문 vs 보기)
-                        # 물음표가 있거나 긴 문장은 질문(Q1.)으로, 짧은 건 보기(1))로 처리
+                        # 문항 번호가 없으면 섹션 기반 번호 부여 (SQ1, A1...)
+                        prefix_counters[current_prefix] += 1
+                        num_val = prefix_counters[current_prefix]
+                        
+                        # 질문인지 보기인지 대략적 판단
                         if "?" in text or "다." in text or "시오" in text or len(text) > 40:
-                            text = f"Q{num_val}. {text}"
+                            text = f"{current_prefix}{num_val}. {text}"
                         else:
                             text = f"{num_val}) {text}"
                 except:
