@@ -32,17 +32,14 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Final Complete)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Final Fix 2)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수 (가장 먼저 정의)
 # ==============================================================================
 
 def iter_block_items(parent):
-    """
-    워드 문서의 흐름(Paragraph와 Table)을 순서대로 순회하기 위한 핵심 함수입니다.
-    이 함수가 없으면 문서의 순서를 파악할 수 없습니다.
-    """
+    """문서 순회 함수"""
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
     elif isinstance(parent, _Cell):
@@ -137,27 +134,48 @@ def check_mixed_text_input(entry):
     return new_entries
 
 def extract_embedded_open_entry(entry):
-    # SQ5 등 보기 내 입력 감지
+    # [NEW] SQ5 등 보기 내 입력 감지 (강화됨)
     if entry["유형"] not in ["Single", "Multi"]: return []
+    
     vals_str = entry.get("보기 값", "")
     if not vals_str: return []
+    
     new_entries = []
     lines = vals_str.split('\n')
-    for line in lines:
+    
+    # 괄호 정규화 (전각 -> 반각)
+    normalized_lines = [line.replace("（", "(").replace("）", ")").replace("[", "(").replace("]", ")") for line in lines]
+    
+    for line in normalized_lines:
         if "=" not in line: continue
-        code, label = line.split("=", 1)
-        if any(k in label for k in ["입력", "기입", "범위"]) and "(" in label:
-            clean_label_match = re.search(r"\(([^)]*(?:입력|기입|범위)[^)]*)\)(.*)", label)
-            unit = ""
-            if clean_label_match:
-                suffix = clean_label_match.group(2).strip()
-                if suffix: unit = f" ({suffix})"
-            new_entries.append({
-                "변수명": f"{entry['변수명']}_{code.strip()}",
-                "질문 내용": f"[{entry['변수명']}] {code.strip()}번 선택 시 구체적 내용{unit}",
-                "보기 값": "(숫자입력)" if "범위" in label or "수" in label else "(주관식)",
-                "유형": "Open"
-            })
+        parts = line.split("=", 1)
+        code = parts[0].strip()
+        label = parts[1].strip()
+        
+        # 보기 라벨 안에 입력 관련 키워드가 괄호 안에 있는지 확인
+        # 예: 1) 있음 ( 입력범위 : 1~10 )명 -> ( 입력범위 : 1~10 ) 감지
+        if "(" in label and ")" in label:
+            # 괄호 안의 내용 추출
+            paren_content_match = re.search(r"\(([^)]+)\)", label)
+            if paren_content_match:
+                content = paren_content_match.group(1)
+                # 괄호 안에 '입력', '기입', '범위', '구체적' 등의 단어가 있는지 확인
+                if any(k in content for k in ["입력", "기입", "범위", "구체적", "작성"]):
+                    # 단위 추출 (괄호 뒤에 붙은 글자)
+                    unit = ""
+                    suffix_match = re.search(r"\)[^)]*$", label)
+                    if suffix_match:
+                        suffix = suffix_match.group(0).replace(")", "").strip()
+                        if suffix: unit = f" ({suffix})"
+                    
+                    # 새끼 문항 생성
+                    new_entries.append({
+                        "변수명": f"{entry['변수명']}_{code}",
+                        "질문 내용": f"[{entry['변수명']}] {code}번 선택 시 구체적 내용{unit}",
+                        "보기 값": "(숫자입력)" if "범위" in content or "수" in content or "명" in suffix else "(주관식)",
+                        "유형": "Open"
+                    })
+            
     return new_entries
 
 def extract_child_demographics_table(table, current_var):
@@ -195,11 +213,14 @@ def extract_time_split_table(table, current_var):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
         if not cells_text: continue
         row_full_text = " ".join(cells_text)
+        
         is_header_row = ("시간" in row_full_text and "분" in row_full_text and "입력" not in row_full_text and "범위" not in row_full_text and "(" not in row_full_text)
         if is_header_row: continue
+        
         row_label = cells_text[0]
         clean_label = re.sub(r"※.*", "", row_label).strip().replace(":", "").strip()
         if len(clean_label) > 40 or not clean_label: continue
+        
         extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
         extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted
@@ -553,7 +574,10 @@ def analyze_table_structure(table):
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
     # 3. 시간 분할 (세로형 - A2, A4)
-    if "시간" in all_text and "분" in all_text and has_input_pattern: return "TIME_SPLIT"
+    # [수정] 열 개수 조건 추가 (5점 척도 등은 제외)
+    if "시간" in all_text and "분" in all_text and has_input_pattern:
+        if len(table.columns) <= 4:
+            return "TIME_SPLIT"
 
     # 4. 가로형 척도 (B2, A10-1)
     if len(rows) == 2 and not has_input_pattern:
@@ -656,7 +680,7 @@ def parse_word_to_df(docx_file):
             if len(split_entries) == 1: split_entries = check_and_split_money(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_percent(split_entries[0])
             
-            # 3. 보기 내 입력(Open) 변수 추가 (SQ5 대응)
+            # 3. [NEW] 보기 내 입력(Open) 변수 추가 (SQ5 대응)
             embedded_opens = extract_embedded_open_entry(split_entries[0])
             if embedded_opens:
                 split_entries.extend(embedded_opens)
