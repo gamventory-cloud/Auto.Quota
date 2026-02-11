@@ -33,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (복수응답 완벽 지원)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ10/10-1 해결)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
@@ -172,7 +172,7 @@ def extract_embedded_open_entry(entry):
                     })
     return new_entries
 
-# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1 등) - 복수응답 처리 강화
+# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1, SQ10-1 등)
 def extract_mapped_option_table(table, extracted_data, variable_map, current_entry):
     rows = table.rows
     if len(rows) < 2: return None
@@ -187,11 +187,11 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
             break
     if option_col_idx == -1: return None
     
-    # 복수응답 키워드 (이미 지나간 변수 재검증용)
+    # 복수응답 키워드
     multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "모두 체크"]
 
     # 타겟 변수 찾기
-    target_vars = {} # {col_idx: 'VAR_NAME'}
+    target_vars = {} 
     existing_vars = list(variable_map.keys())
     current_var_name = current_entry["변수명"] if current_entry else None
     if current_var_name: existing_vars.append(current_var_name)
@@ -207,14 +207,13 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
     if not target_vars: return None
     
     # 각 변수별 보기 리스트 수집
-    var_options_map = {v: [] for v in target_vars.values()} # {var: [("1", "사과"), ...]}
+    var_options_map = {v: [] for v in target_vars.values()} 
     
     for row in rows[1:]:
         if len(row.cells) <= option_col_idx: continue
         opt_text = row.cells[option_col_idx].text.strip()
         if not opt_text: continue
         
-        # 보기 텍스트 정제
         code = ""; val = ""
         match = re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt_text)
         if match:
@@ -234,28 +233,22 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
     updates = 0
     
     # 1. extracted_data (과거 변수) 업데이트
-    # 리스트를 수정해야 하므로 역순으로 처리하거나, variable_map 업데이트 필요
-    # 여기서는 간단히 해당 인덱스의 아이템을 교체하거나 확장
-    
-    # 재정렬을 위해 처리할 변수들을 인덱스 순으로 정렬
     vars_to_process = [v for v in var_options_map.keys() if v in variable_map]
-    vars_to_process.sort(key=lambda x: variable_map[x], reverse=True) # 뒤에서부터 처리해야 인덱스 꼬임 방지
+    vars_to_process.sort(key=lambda x: variable_map[x], reverse=True) 
     
     for var_name in vars_to_process:
-        opts_tuples = var_options_map[var_name] # list of (code, label)
+        opts_tuples = var_options_map[var_name] 
         if not opts_tuples: continue
         
         idx = variable_map[var_name]
         original_item = extracted_data[idx]
         
-        # 복수응답 여부 확인 (제목에 키워드가 있는지)
         is_multi = any(k in original_item["질문 내용"] for k in multi_keywords)
         
         if is_multi:
-            # 단일 항목을 여러 항목으로 폭파(Explode)
+            # Multi: 폭파
             new_items = []
             full_opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
-            
             for c, l in opts_tuples:
                 new_items.append({
                     "변수명": f"{var_name}_{c}",
@@ -263,20 +256,12 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
                     "보기 값": full_opts_str,
                     "유형": "Multi"
                 })
-            
-            # 기존 항목 삭제 후 새 항목들 삽입
             del extracted_data[idx]
             for item in reversed(new_items):
                 extracted_data.insert(idx, item)
-            
-            # variable_map 재구축 필요 (인덱스가 밀렸으므로)
-            # 성능상 비효율적일 수 있으나 정확성을 위해 전체 재매핑 권장
-            # 여기서는 간단히 pass (다음 루프에 영향 줄 수 있음 주의)
-            # 일단 뒤에서부터 처리하므로 앞쪽 인덱스는 영향 안 받음.
             updates += 1
-            
         else:
-            # 단일응답이면 보기 값만 업데이트
+            # Single: 값 업데이트
             opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
             extracted_data[idx]["보기 값"] = opts_str
             updates += 1
@@ -285,16 +270,17 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
     if current_entry and current_entry["변수명"] in var_options_map:
         opts_tuples = var_options_map[current_entry["변수명"]]
         if opts_tuples:
-            # current_entry는 flush 전이므로 보기_list에 넣어두면 flush_entry가 알아서 처리함
             if "보기_list" not in current_entry: current_entry["보기_list"] = []
+            # 여기서 보기 값을 텍스트로 미리 만들어 둡니다. (flush_entry에서 Ranking_Sel 처리를 위해)
+            opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
+            current_entry["보기 값"] = opts_str
             
-            # 포맷: "1) 사과" 형태로 변환하여 넣음
+            # 보기_list도 업데이트
             for c, l in opts_tuples:
                 current_entry["보기_list"].append(f"{c}) {l}")
             
             updates += 1
                 
-    # 전체 variable_map 갱신 (인덱스 변화 반영)
     if updates > 0:
         new_map = {}
         for i, item in enumerate(extracted_data):
@@ -788,7 +774,7 @@ def parse_word_to_df(docx_file):
     # [NEW] 워드 자동번호 인식용 카운터
     auto_num_counters = collections.defaultdict(int)
     
-    variable_map = {} # 변수 위치 추적 맵
+    variable_map = {} 
     
     pending_ranking_count = None
     ranking_options_buffer = []
@@ -799,6 +785,7 @@ def parse_word_to_df(docx_file):
     def flush_entry(entry):
         nonlocal is_parent_added, pending_max_n_count
         if "질문 내용" in entry: entry["질문 내용"] = clean_empty_parentheses(entry["질문 내용"])
+        
         if pending_ranking_count is not None and ranking_options_buffer:
             final_opts_str = "\n".join(ranking_options_buffer)
             results = []
@@ -806,24 +793,40 @@ def parse_word_to_df(docx_file):
                 results.append({ "변수명": f"{entry['변수명']}_{i}", "질문 내용": f"{entry['질문 내용']} ({i}순위)", "보기 값": final_opts_str, "유형": "Ranking_Sel" })
             return results
         if pending_max_n_count is not None:
-            has_manufacturer = "제조사" in entry["질문 내용"]; has_brand = "브랜드" in entry["질문 내용"]
+            # [FIX] 보기가 있는 경우(Mapped Table 등에서 유입), Open이 아니라 Selection으로 처리
+            has_options = bool(entry.get("보기 값") or entry.get("보기_list"))
+            opts_str = entry.get("보기 값", "")
+            if not opts_str and entry.get("보기_list"):
+                opts_str = "\n".join(entry["보기_list"])
+
             new_entries = []
             for i in range(1, pending_max_n_count + 1):
-                if has_manufacturer and has_brand:
-                    v1 = entry.copy(); v1["변수명"] = f"{entry['변수명']}_{i}_1"; v1["질문 내용"] = f"[{entry['변수명']}] {i}순위 - 제조사"; v1["유형"] = "Open"
-                    if "보기_list" in v1: del v1["보기_list"]
-                    v2 = entry.copy(); v2["변수명"] = f"{entry['변수명']}_{i}_2"; v2["질문 내용"] = f"[{entry['변수명']}] {i}순위 - 브랜드"; v2["유형"] = "Open"
-                    if "보기_list" in v2: del v2["보기_list"]
-                    new_entries.append(v1); new_entries.append(v2)
-                else:
-                    v = entry.copy(); v["변수명"] = f"{entry['변수명']}_{i}"; v["질문 내용"] = f"[{entry['변수명']}] {i}순위"; v["유형"] = "Open"
+                if has_options:
+                    # 보기가 있으면 Ranking_Sel로 변경
+                    v = entry.copy()
+                    v["변수명"] = f"{entry['변수명']}_{i}"
+                    v["질문 내용"] = f"[{entry['변수명']}] {i}순위"
+                    v["보기 값"] = opts_str
+                    v["유형"] = "Ranking_Sel"
                     if "보기_list" in v: del v["보기_list"]
                     new_entries.append(v)
+                else:
+                    # 기존 주관식 처리
+                    has_manufacturer = "제조사" in entry["질문 내용"]; has_brand = "브랜드" in entry["질문 내용"]
+                    if has_manufacturer and has_brand:
+                        v1 = entry.copy(); v1["변수명"] = f"{entry['변수명']}_{i}_1"; v1["질문 내용"] = f"[{entry['변수명']}] {i}순위 - 제조사"; v1["유형"] = "Open"
+                        if "보기_list" in v1: del v1["보기_list"]
+                        v2 = entry.copy(); v2["변수명"] = f"{entry['변수명']}_{i}_2"; v2["질문 내용"] = f"[{entry['변수명']}] {i}순위 - 브랜드"; v2["유형"] = "Open"
+                        if "보기_list" in v2: del v2["보기_list"]
+                        new_entries.append(v1); new_entries.append(v2)
+                    else:
+                        v = entry.copy(); v["변수명"] = f"{entry['변수명']}_{i}"; v["질문 내용"] = f"[{entry['변수명']}] {i}순위"; v["유형"] = "Open"
+                        if "보기_list" in v: del v["보기_list"]
+                        new_entries.append(v)
             pending_max_n_count = None
             return new_entries
         raw_options = entry.get("보기_list", [])
         
-        # Multi-check Logic
         is_multi = any(k in entry["질문 내용"] for k in multi_keywords)
         if "D6_2" in entry["변수명"].replace("-", "_"): is_multi = True
         
@@ -846,17 +849,14 @@ def parse_word_to_df(docx_file):
             entry["보기 값"] = "\n".join(raw_options)
             if "보기_list" in entry: del entry["보기_list"]
             
-            # 1. 텍스트 복합 입력 (A7)
             mixed_input = check_mixed_text_input(entry)
             if len(mixed_input) > 1: return mixed_input
             
-            # 2. 일반 분할 (날짜, 돈 등)
             split_entries = check_and_split_time(entry)
             if len(split_entries) == 1: split_entries = check_and_split_date(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_money(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_percent(split_entries[0])
             
-            # 3. 보기 내 입력(Open) 변수 추가 (SQ5 대응)
             embedded_opens = extract_embedded_open_entry(split_entries[0])
             if embedded_opens:
                 split_entries.extend(embedded_opens)
