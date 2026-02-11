@@ -33,14 +33,13 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (표 내부 섹션 인식)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ6/SQ8 해결)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
 # ==============================================================================
 
 def iter_block_items(parent):
-    """문서 순회 함수"""
     if isinstance(parent, _Document):
         parent_elm = parent.element.body
     elif isinstance(parent, _Cell):
@@ -88,7 +87,6 @@ def extract_options_from_line(text):
     return results
 
 def summarize_label_regex(text):
-    """문항 요약 (Beta) 기능"""
     if not text: return ""
     text = re.sub(r"\(PROG.*?\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[PROG.*?\]", "", text, flags=re.IGNORECASE)
@@ -115,13 +113,8 @@ def summarize_label_regex(text):
     return text.strip()
 
 def check_section_header(text, current_prefix):
-    """
-    텍스트를 분석하여 섹션(Part A, SQ, DQ 등)이 변경되었는지 확인하고
-    변경된 Prefix를 반환합니다.
-    """
     clean_text = text.strip()
     new_prefix = current_prefix
-
     if re.search(r"Screening", clean_text, re.IGNORECASE) or "스크리닝" in clean_text:
         new_prefix = "SQ"
     elif re.search(r"Part\s*([A-Z])", clean_text, re.IGNORECASE):
@@ -129,7 +122,6 @@ def check_section_header(text, current_prefix):
         new_prefix = match.group(1).upper()
     elif re.search(r"^DQ", clean_text, re.IGNORECASE) or "인구 통계" in clean_text:
         new_prefix = "DQ"
-    
     return new_prefix
 
 # ==============================================================================
@@ -137,7 +129,6 @@ def check_section_header(text, current_prefix):
 # ==============================================================================
 
 def check_mixed_text_input(entry):
-    # A7 등 텍스트 내 복수 입력 감지
     if entry["유형"] != "Single" and entry["유형"] != "Open": return [entry]
     full_text = entry["질문 내용"]
     if "보기_list" in entry: full_text += " " + " ".join(entry["보기_list"])
@@ -153,7 +144,6 @@ def check_mixed_text_input(entry):
     return new_entries
 
 def extract_embedded_open_entry(entry):
-    # SQ5 등 보기 내 입력 감지
     if entry["유형"] not in ["Single", "Multi"]: return []
     vals_str = entry.get("보기 값", "")
     if not vals_str: return []
@@ -181,6 +171,90 @@ def extract_embedded_open_entry(entry):
                         "유형": "Open"
                     })
     return new_entries
+
+# [NEW] SQ8: 보기 열이 따로 있는 테이블 (카테고리/보기 형태)
+def extract_option_list_table(table):
+    rows = table.rows
+    if len(rows) < 2: return None
+    
+    # "보기"라는 단어가 포함된 열 인덱스 찾기
+    header_cells = rows[0].cells
+    option_col_idx = -1
+    for i, cell in enumerate(header_cells):
+        if "보기" in cell.text:
+            option_col_idx = i
+            break
+    
+    if option_col_idx == -1: return None
+    
+    extracted_options = []
+    for row in rows[1:]:
+        if len(row.cells) <= option_col_idx: continue
+        opt_text = row.cells[option_col_idx].text.strip()
+        if not opt_text: continue
+        
+        # 보기 텍스트 정제 (1) 사과 -> 1=사과)
+        match = re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt_text)
+        if match:
+            code = match.group(1)
+            val = match.group(2).strip()
+            extracted_options.append(f"{code}={val}")
+        else:
+            # 번호가 없으면 그대로 (또는 이전 코드 + 1 로직 필요하지만 일단 패스)
+            pass
+            
+    return "\n".join(extracted_options)
+
+# [NEW] SQ6: 단위가 포함된 입력 테이블 (명, 세, 개 등)
+def extract_unit_input_table(table, current_var):
+    extracted = []
+    unit_keywords = ["명", "세", "개", "원", "년", "월"]
+    
+    # 단위가 있는 열 찾기 (마지막 열일 확률 높음)
+    unit_col_idx = -1
+    for i, cell in enumerate(table.rows[0].cells): # 첫 행이나
+        if any(u in cell.text for u in unit_keywords):
+            unit_col_idx = i
+            break
+    if unit_col_idx == -1 and len(table.rows) > 1: # 마지막 행 확인
+         for i, cell in enumerate(table.rows[-1].cells):
+            if any(u in cell.text for u in unit_keywords):
+                unit_col_idx = i
+                break
+                
+    # 라벨 열 찾기 (단위 열 제외하고 가장 긴 텍스트가 있는 열)
+    label_col_idx = 0
+    if len(table.columns) > 1:
+        # 대충 1번째 열이 라벨이라고 가정 (0번째는 번호일 수 있음)
+        if unit_col_idx == 1: label_col_idx = 0
+        else: label_col_idx = 1
+        
+    for i, row in enumerate(table.rows):
+        cells = row.cells
+        if len(cells) <= label_col_idx: continue
+        
+        row_label = cells[label_col_idx].text.strip()
+        # 숫자로만 된 라벨(순번)은 건너뛰고 다음 열 확인
+        if row_label.isdigit() and len(cells) > label_col_idx + 1:
+             row_label = cells[label_col_idx + 1].text.strip()
+             
+        if not row_label or "입력" in row_label: continue
+        
+        # 단위 추출
+        unit = ""
+        if unit_col_idx != -1 and len(cells) > unit_col_idx:
+            unit_text = cells[unit_col_idx].text.strip()
+            if unit_text in unit_keywords:
+                unit = f" ({unit_text})"
+        
+        extracted.append({
+            "변수명": f"{current_var['변수명']}_{i+1}",
+            "질문 내용": f"[{current_var['변수명']}] {row_label}{unit}",
+            "보기 값": "(숫자입력)",
+            "유형": "Open"
+        })
+        
+    return extracted
 
 def extract_child_demographics_table(table, current_var):
     headers = [c.text.strip() for c in table.rows[0].cells]
@@ -548,6 +622,19 @@ def analyze_table_structure(table):
     row0_digits = 0; row0_len = 0
     row1_digits = 0; row1_len = 0
     
+    # [NEW] 보기 목록형 테이블 감지 (SQ8)
+    if "보기" in [c.text.strip() for c in rows[0].cells]:
+        return "OPTION_LIST"
+    
+    # [NEW] 단위 입력형 테이블 감지 (SQ6)
+    unit_keywords = ["명", "세", "개", "원", "년"]
+    has_unit_col = False
+    for row in rows:
+        if any(cell.text.strip() in unit_keywords for cell in row.cells):
+            has_unit_col = True
+            break
+    if has_unit_col: return "UNIT_INPUT"
+
     for i, row in enumerate(rows):
         row_txt = " ".join([c.text.strip() for c in row.cells])
         all_text += row_txt + " "; 
@@ -566,11 +653,10 @@ def analyze_table_structure(table):
     if len(table.columns) >= 4 and row0_digits >= 3 and not has_input_pattern:
         return "STANDARD"
 
-    # 2. 자녀 정보 (SQ6)
+    # 2. 자녀 정보 (SQ6) - 사실상 UNIT_INPUT에 포함되지만 별도 로직 유지
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
     # 3. 시간 분할 (세로형 - A2, A4)
-    # [수정] 열 개수 조건 추가 (5점 척도 등은 제외)
     if "시간" in all_text and "분" in all_text and has_input_pattern:
         if len(table.columns) <= 4:
             return "TIME_SPLIT"
@@ -714,14 +800,11 @@ def parse_word_to_df(docx_file):
                     
                     if not re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", text):
                         # 문항 번호가 없으면 섹션 기반 번호 부여 (SQ1, A1...)
-                        # 단, 질문 패턴일 때만 부여 (보기에는 번호 매기지 않음)
                         if "?" in text or "다." in text or "시오" in text or len(text) > 40:
-                             # 질문 번호 카운트 증가
                             prefix_counters[current_prefix] += 1
                             q_num = prefix_counters[current_prefix]
                             text = f"{current_prefix}{q_num}. {text}"
                         else:
-                            # 보기 번호 (1) ...)
                             text = f"{num_val}) {text}"
                 except:
                     pass
@@ -799,7 +882,24 @@ def parse_word_to_df(docx_file):
             
             new_entries = []
             
-            if table_type == "CHILD_DEMO":
+            if table_type == "OPTION_LIST":
+                # [NEW] SQ8 보기 목록 추출
+                opt_str = extract_option_list_table(block)
+                if current_entry and opt_str:
+                    current_entry["보기 값"] = opt_str
+                    # 이미 flush된 이전 문항(SQ8)의 보기 업데이트가 필요한 경우, 
+                    # extracted_data의 마지막 항목을 수정
+                    if not is_parent_added and extracted_data:
+                        last_item = extracted_data[-1]
+                        if last_item["변수명"] == current_entry["변수명"]:
+                            last_item["보기 값"] = opt_str
+            
+            elif table_type == "UNIT_INPUT":
+                # [NEW] SQ6 단위 입력
+                if current_entry and not is_parent_added:
+                    new_entries = extract_unit_input_table(block, current_entry)
+
+            elif table_type == "CHILD_DEMO":
                 if current_entry and not is_parent_added:
                     new_entries = extract_child_demographics_table(block, current_entry)
             
@@ -1058,7 +1158,7 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
-* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도]** 등의 유형을 자동으로 판단합니다.
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도], [단위 입력], [보기 목록]** 등의 유형을 자동으로 판단합니다.
 * **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
 * **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
 """)
