@@ -33,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (척도/옵션 강화)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Final Fixed)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
@@ -176,8 +176,8 @@ def extract_embedded_open_entry(entry):
 def extract_mapped_option_table(table, extracted_data, variable_map, current_entry):
     rows = table.rows
     if len(rows) < 2: return None
-    
     header_cells = [c.text.strip() for c in rows[0].cells]
+    
     option_col_idx = -1
     for i, h in enumerate(header_cells):
         if "보기" in h: option_col_idx = i; break
@@ -210,6 +210,7 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
         if len(row.cells) <= option_col_idx: continue
         opt_text = row.cells[option_col_idx].text.strip()
         if not opt_text: continue
+        
         code = ""; val = ""
         match = re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt_text)
         if match: code = match.group(1); val = match.group(2).strip()
@@ -223,7 +224,6 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
                     if final_code: var_options_map[var_name].append((final_code, val))
 
     updates = 0
-    # 1. extracted_data 업데이트
     vars_to_process = [v for v in var_options_map.keys() if v in variable_map]
     vars_to_process.sort(key=lambda x: variable_map[x], reverse=True) 
     
@@ -247,7 +247,6 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
             extracted_data[idx]["보기 값"] = opts_str
             updates += 1
 
-    # 2. current_entry 업데이트
     if current_entry and current_entry["변수명"] in var_options_map:
         opts_tuples = var_options_map[current_entry["변수명"]]
         if opts_tuples:
@@ -261,7 +260,6 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
         new_map = {}
         for i, item in enumerate(extracted_data): new_map[item['변수명']] = i
         variable_map.clear(); variable_map.update(new_map)
-
     return updates > 0
 
 def extract_unit_input_table(table, current_var):
@@ -332,18 +330,17 @@ def extract_time_split_table(table, current_var):
         extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted
 
-# [FIX] 수평형 척도 표 처리 (B1-1 등) - 숫자 행 감지 강화
+# [FIX] 수평형 척도 표 처리 (B1-1 등) - 숫자 행 감지 강화 & 라벨 매핑 개선
 def extract_horizontal_scale_table(table, current_var):
     rows = table.rows
     if len(rows) < 2: return None
     
-    # 숫자(1,2,3...)로만 구성된 행 찾기
     numeric_row_idx = -1
     label_row_idx = -1
     
     for i, row in enumerate(rows):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
-        # 숫자가 3개 이상 연속으로 나오는지 확인
+        if not cells_text: continue
         numeric_count = sum(1 for t in cells_text if t.isdigit())
         if len(cells_text) > 0 and (numeric_count / len(cells_text)) > 0.7:
             numeric_row_idx = i
@@ -352,7 +349,6 @@ def extract_horizontal_scale_table(table, current_var):
             
     if numeric_row_idx == -1: return None
     
-    # 코드는 숫자 행에서, 라벨은 다른 행에서 가져옴
     codes = [c.text.strip() for c in rows[numeric_row_idx].cells if c.text.strip().isdigit()]
     labels = []
     if label_row_idx != -1:
@@ -360,37 +356,22 @@ def extract_horizontal_scale_table(table, current_var):
     
     scale_pairs = []
     
-    # 매핑 로직: 라벨 개수와 코드 개수가 다를 수 있음 (merged cells)
-    # 양극단(1, 7)과 중간(4) 정도만 매핑
-    if labels and codes:
-        min_code = codes[0]
-        max_code = codes[-1]
-        
-        # 라벨이 2개면 양극단 (전혀~, 매우~)
-        if len(labels) == 2:
-            scale_pairs.append(f"{min_code}={labels[0]}")
-            scale_pairs.append(f"{max_code}={labels[1]}")
-        # 라벨이 3개면 양극단 + 중간 (보통)
-        elif len(labels) == 3:
-            mid_idx = len(codes) // 2
-            scale_pairs.append(f"{min_code}={labels[0]}")
-            scale_pairs.append(f"{codes[mid_idx]}={labels[1]}")
-            scale_pairs.append(f"{max_code}={labels[2]}")
-        # 그 외에는 순서대로 매핑 시도
-        else:
-            for i in range(min(len(codes), len(labels))):
-                scale_pairs.append(f"{codes[i]}={labels[i]}")
-            # 남은 코드들은 그냥 숫자만
-            
-    # 매핑 실패 시 그냥 1~7 점 생성
-    if not scale_pairs and codes:
-        for c in codes:
-             scale_pairs.append(f"{c}={c}점")
+    # 모든 코드를 살리되, 라벨이 부족하면 양극단 매핑
+    if codes:
+        if len(labels) == 2: # 양극단
+            scale_pairs.append(f"{codes[0]}={labels[0]}")
+            for c in codes[1:-1]: scale_pairs.append(f"{c}={c}점")
+            scale_pairs.append(f"{codes[-1]}={labels[1]}")
+        elif len(labels) == len(codes): # 1:1 매핑
+             for i in range(len(codes)): scale_pairs.append(f"{codes[i]}={labels[i]}")
+        else: # 매핑 애매하면 그냥 순서대로 넣고 나머진 점수
+             for i, c in enumerate(codes):
+                 if i < len(labels): scale_pairs.append(f"{c}={labels[i]}")
+                 else: scale_pairs.append(f"{c}={c}점")
 
     if scale_pairs:
         current_var["보기 값"] = "\n".join(scale_pairs)
         return [current_var]
-        
     return None
 
 def extract_horizontal_input_table(table, current_var):
@@ -714,13 +695,12 @@ def analyze_table_structure(table):
     if has_unit_col: return "UNIT_INPUT"
     
     # [FIX] 수평 척도형 테이블 감지 로직 강화 (B1-1)
-    # 숫자로만 이루어진 행(1~7)이 있는지 스캔
     has_numeric_row = False
     for row in rows:
         cells = [c.text.strip() for c in row.cells if c.text.strip()]
         if len(cells) >= 5: # 최소 5점 척도 이상
             digit_count = sum(1 for c in cells if c.isdigit())
-            if digit_count / len(cells) > 0.8: # 80% 이상이 숫자면
+            if digit_count / len(cells) > 0.8: 
                 has_numeric_row = True
                 break
     if has_numeric_row: return "HORIZONTAL_SCALE"
@@ -751,7 +731,7 @@ def analyze_table_structure(table):
         if len(table.columns) <= 4:
             return "TIME_SPLIT"
 
-    # 4. 가로형 척도 (B2, A10-1) - 위에서 감지 못한 경우 보완
+    # 4. 가로형 척도 (B2, A10-1)
     if len(rows) == 2 and not has_input_pattern:
         row0_is_numeric = row0_len > 0 and (row0_digits / row0_len) > 0.5
         row1_is_numeric = row1_len > 0 and (row1_digits / row1_len) > 0.5
@@ -966,10 +946,7 @@ def parse_word_to_df(docx_file):
                     # [FIX] S5 등 옵션 강제 인식
                     # 숫자로 시작하는 문단은 무조건 보기로 간주 (1) S 2WD 같은 경우)
                     opts_in_line = extract_options_from_line(text)
-                    
-                    # Regex가 못 잡은 1) ... 패턴을 강제로 잡기
-                    if not opts_in_line and re.match(r"^\d+\)", text):
-                         opts_in_line = [text]
+                    if not opts_in_line and re.match(r"^\d+\)", text): opts_in_line = [text]
 
                     if opts_in_line:
                         if pending_ranking_count:
@@ -996,7 +973,6 @@ def parse_word_to_df(docx_file):
             new_entries = []
             
             if table_type == "MAPPED_OPTION":
-                # [NEW] 변수 매핑 테이블 (SQ8, SQ8-1 등) + current_entry 지원
                 is_updated = extract_mapped_option_table(block, extracted_data, variable_map, current_entry)
             
             elif table_type == "UNIT_INPUT":
@@ -1254,3 +1230,100 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
     syntax_lines.append(""); syntax_lines.append("*_ SAVE - Values _."); syntax_lines.append("SAVE TRANSLATE OUTFILE='(RAW) Project_DATA.xlsx' /TYPE=XLS /VERSION=12 /MAP /REPLACE /FIELDNAMES /CELLS=VALUES.")
     syntax_lines.append(""); syntax_lines.append("*_ SAVE - Labels _."); syntax_lines.append("SAVE TRANSLATE OUTFILE='(LABEL) Project_DATA.xlsx' /TYPE=XLS /VERSION=12 /MAP /REPLACE /FIELDNAMES /CELLS=LABELS.")
     return "\n".join(syntax_lines)
+
+# ==============================================================================
+# Streamlit UI
+# ==============================================================================
+st.markdown("""
+**[기능 설명]**
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도]** 등의 유형을 자동으로 판단합니다.
+* **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
+* **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
+""")
+
+tab1, tab2 = st.tabs(["1단계: 워드 ➡️ 엑셀 생성", "2단계: 엑셀 ➡️ SPSS 생성"])
+
+with tab1:
+    st.header("1. 워드 파일 파싱")
+    uploaded_word = st.file_uploader("설문지(.docx) 업로드", type=["docx"], key="word_uploader")
+    if uploaded_word:
+        if st.button("분석 시작", key="btn_analyze"):
+            with st.spinner("문서 구조 정밀 분석 중..."):
+                try: 
+                    df_raw = parse_word_to_df(uploaded_word)
+                    st.session_state['df_raw'] = df_raw
+                    st.success(f"분석 완료! {len(df_raw)}개 항목 추출됨")
+                except Exception as e: 
+                    st.error(f"오류 발생: {e}")
+                    
+    if 'df_raw' in st.session_state:
+        st.subheader("📊 분석 결과 미리보기")
+        st.dataframe(st.session_state['df_raw'], use_container_width=True, height=400)
+        
+        # 요약 옵션
+        st.markdown("---")
+        use_summary = st.checkbox("✂️ 긴 질문 내용을 간략하게 요약하기 (Beta)", 
+                                  help="질문 끝의 '~입니까?', '귀하의' 같은 불필요한 문구를 자동으로 제거합니다.")
+        
+        st.info("아래 엑셀 파일을 다운로드하여 내용을 수정하세요.")
+        
+        if use_summary:
+            df_to_download = st.session_state['df_raw'].copy()
+            df_to_download['질문 내용'] = df_to_download['질문 내용'].apply(summarize_label_regex)
+            excel_data = to_excel_with_usage_flag(df_to_download)
+        else:
+            excel_data = to_excel_with_usage_flag(st.session_state['df_raw'])
+            
+        st.download_button(
+            label="📥 편집용 코드북 다운로드 (Codebook.xlsx)",
+            data=excel_data,
+            file_name="Codebook_Draft.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
+
+with tab2:
+    st.header("2. SPSS 신택스 생성")
+    uploaded_excel = st.file_uploader("수정된 코드북(.xlsx) 업로드", type=["xlsx"], key="excel_uploader")
+    if uploaded_excel:
+        try:
+            df_edited = pd.read_excel(uploaded_excel)
+            if '사용여부' not in df_edited.columns: 
+                st.error("⚠️ 1단계에서 생성된 엑셀 파일을 사용해주세요.")
+            else:
+                st.success("파일 로드 성공!")
+                df_filtered = df_edited[df_edited['사용여부'].isin(['O', 'R'])].copy()
+                st.write(f"총 {len(df_edited)}개 중 {len(df_filtered)}개 문항 선택됨")
+                
+                col1, col2 = st.columns(2)
+                
+                # Option 1: UTF-8
+                with col1:
+                    spss_utf8 = generate_spss_final(df_edited, encoding_type='utf-8')
+                    st.download_button(
+                        label="💾 (추천) SPSS 신택스 다운로드 (UTF-8)",
+                        data=spss_utf8.encode('utf-8-sig'), 
+                        file_name="Syntax_UTF8.sps",
+                        mime="text/plain",
+                        type="primary",
+                        use_container_width=True
+                    )
+                    st.caption("최신 버전 SPSS 사용 시 권장")
+
+                # Option 2: CP949
+                with col2:
+                    spss_cp949 = generate_spss_final(df_edited, encoding_type='cp949')
+                    st.download_button(
+                        label="💾 (구버전) SPSS 신택스 다운로드 (CP949)",
+                        data=spss_cp949.encode('cp949', errors='ignore'), 
+                        file_name="Syntax_CP949.sps",
+                        mime="text/plain",
+                        type="secondary",
+                        use_container_width=True
+                    )
+                    st.caption("SPSS에서 한글이 깨질 때 사용")
+                
+                with st.expander("신택스 내용 미리보기 (UTF-8 기준)"):
+                    st.code(spss_utf8, language="spss")
+        except Exception as e: 
+            st.error(f"파일 처리 중 오류: {e}")
