@@ -33,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ6/SQ8 해결)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ8 해결)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
@@ -172,80 +172,108 @@ def extract_embedded_open_entry(entry):
                     })
     return new_entries
 
-# [NEW] SQ8: 보기 열이 따로 있는 테이블 (카테고리/보기 형태)
-def extract_option_list_table(table):
+# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1 등) - 여러 변수의 보기가 한 테이블에 정의된 경우
+def extract_mapped_option_table(table, extracted_data, variable_map):
     rows = table.rows
     if len(rows) < 2: return None
     
-    # "보기"라는 단어가 포함된 열 인덱스 찾기
-    header_cells = rows[0].cells
+    header_cells = [c.text.strip() for c in rows[0].cells]
+    
+    # "보기" 열 인덱스 찾기
     option_col_idx = -1
-    for i, cell in enumerate(header_cells):
-        if "보기" in cell.text:
+    for i, h in enumerate(header_cells):
+        if "보기" in h:
             option_col_idx = i
             break
     
     if option_col_idx == -1: return None
     
-    extracted_options = []
+    # 변수 매핑 찾기 (헤더에 변수명이 있는지 확인)
+    # 예: SQ8., SQ8-1.
+    target_vars = {} # {col_idx: 'VAR_NAME'}
+    
+    for i, h in enumerate(header_cells):
+        if i == option_col_idx: continue
+        # 헤더 정제 (SQ8. -> SQ8)
+        clean_h = re.sub(r"[.\s]", "", h).replace("-", "_")
+        
+        # extracted_data에 있는 변수인지 확인
+        # 현재 코드북에 존재하는 변수명(접미사 제외)과 매칭 시도
+        for var_name in variable_map.keys():
+            # 정확히 일치하거나, 헤더가 변수명을 포함하는 경우
+            if clean_h == var_name or (len(clean_h) > 2 and clean_h in var_name):
+                target_vars[i] = var_name
+                break
+                
+    if not target_vars: return None
+    
+    # 각 변수별 보기 리스트 수집
+    var_options = {v: [] for v in target_vars.values()}
+    
     for row in rows[1:]:
         if len(row.cells) <= option_col_idx: continue
         opt_text = row.cells[option_col_idx].text.strip()
         if not opt_text: continue
         
         # 보기 텍스트 정제 (1) 사과 -> 1=사과)
+        code = ""; val = ""
         match = re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt_text)
         if match:
             code = match.group(1)
             val = match.group(2).strip()
-            extracted_options.append(f"{code}={val}")
         else:
-            # 번호가 없으면 그대로 (또는 이전 코드 + 1 로직 필요하지만 일단 패스)
-            pass
+            val = opt_text
             
-    return "\n".join(extracted_options)
+        # 각 타겟 변수 열 확인
+        for col_idx, var_name in target_vars.items():
+            if len(row.cells) > col_idx:
+                check_val = row.cells[col_idx].text.strip()
+                # 값이 있거나, code와 일치하는 숫자가 있으면 해당 변수의 보기로 추가
+                if check_val:
+                    # check_val이 숫자면 그 코드를 쓰고, 아니면 원래 코드 사용
+                    final_code = check_val if check_val.isdigit() else code
+                    if final_code:
+                        var_options[var_name].append(f"{final_code}={val}")
 
-# [NEW] SQ6: 단위가 포함된 입력 테이블 (명, 세, 개 등)
+    # 추출된 보기를 extracted_data에 반영
+    updates = 0
+    for var_name, opts in var_options.items():
+        if opts and var_name in variable_map:
+            idx = variable_map[var_name]
+            if idx < len(extracted_data):
+                extracted_data[idx]["보기 값"] = "\n".join(opts)
+                updates += 1
+                
+    return updates > 0 # 업데이트가 일어났으면 True
+
+# SQ6 단위 입력 테이블
 def extract_unit_input_table(table, current_var):
     extracted = []
     unit_keywords = ["명", "세", "개", "원", "년", "월"]
     
-    # 단위가 있는 열 찾기 (마지막 열일 확률 높음)
     unit_col_idx = -1
-    for i, cell in enumerate(table.rows[0].cells): # 첫 행이나
-        if any(u in cell.text for u in unit_keywords):
-            unit_col_idx = i
-            break
-    if unit_col_idx == -1 and len(table.rows) > 1: # 마지막 행 확인
+    for i, cell in enumerate(table.rows[0].cells):
+        if any(u in cell.text for u in unit_keywords): unit_col_idx = i; break
+    if unit_col_idx == -1 and len(table.rows) > 1:
          for i, cell in enumerate(table.rows[-1].cells):
-            if any(u in cell.text for u in unit_keywords):
-                unit_col_idx = i
-                break
+            if any(u in cell.text for u in unit_keywords): unit_col_idx = i; break
                 
-    # 라벨 열 찾기 (단위 열 제외하고 가장 긴 텍스트가 있는 열)
     label_col_idx = 0
     if len(table.columns) > 1:
-        # 대충 1번째 열이 라벨이라고 가정 (0번째는 번호일 수 있음)
         if unit_col_idx == 1: label_col_idx = 0
         else: label_col_idx = 1
         
     for i, row in enumerate(table.rows):
         cells = row.cells
         if len(cells) <= label_col_idx: continue
-        
         row_label = cells[label_col_idx].text.strip()
-        # 숫자로만 된 라벨(순번)은 건너뛰고 다음 열 확인
-        if row_label.isdigit() and len(cells) > label_col_idx + 1:
-             row_label = cells[label_col_idx + 1].text.strip()
-             
+        if row_label.isdigit() and len(cells) > label_col_idx + 1: row_label = cells[label_col_idx + 1].text.strip()
         if not row_label or "입력" in row_label: continue
         
-        # 단위 추출
         unit = ""
         if unit_col_idx != -1 and len(cells) > unit_col_idx:
             unit_text = cells[unit_col_idx].text.strip()
-            if unit_text in unit_keywords:
-                unit = f" ({unit_text})"
+            if unit_text in unit_keywords: unit = f" ({unit_text})"
         
         extracted.append({
             "변수명": f"{current_var['변수명']}_{i+1}",
@@ -253,7 +281,6 @@ def extract_unit_input_table(table, current_var):
             "보기 값": "(숫자입력)",
             "유형": "Open"
         })
-        
     return extracted
 
 def extract_child_demographics_table(table, current_var):
@@ -624,7 +651,7 @@ def analyze_table_structure(table):
     
     # [NEW] 보기 목록형 테이블 감지 (SQ8)
     if "보기" in [c.text.strip() for c in rows[0].cells]:
-        return "OPTION_LIST"
+        return "MAPPED_OPTION" # Changed from OPTION_LIST to trigger new logic
     
     # [NEW] 단위 입력형 테이블 감지 (SQ6)
     unit_keywords = ["명", "세", "개", "원", "년"]
@@ -653,7 +680,7 @@ def analyze_table_structure(table):
     if len(table.columns) >= 4 and row0_digits >= 3 and not has_input_pattern:
         return "STANDARD"
 
-    # 2. 자녀 정보 (SQ6) - 사실상 UNIT_INPUT에 포함되지만 별도 로직 유지
+    # 2. 자녀 정보 (SQ6)
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
     # 3. 시간 분할 (세로형 - A2, A4)
@@ -691,17 +718,16 @@ def parse_word_to_df(docx_file):
     doc = Document(docx_file)
     extracted_data = []
     var_pattern = re.compile(r"^([a-zA-Z가-힣0-9\-\_]+)(?:[\.\s]|\s+)(.*)")
-    # [SQ10 해결] 띄어쓰기 포함된 키워드 추가
     multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "중복가능", "모두 체크", "모두 응답"]
     current_entry = None
     is_parent_added = False 
     
-    # [NEW] 섹션 인식 변수
     current_prefix = "Q"
     prefix_counters = collections.defaultdict(int)
-    
-    # [NEW] 워드 자동번호 인식용 카운터
     auto_num_counters = collections.defaultdict(int)
+    
+    # [NEW] 변수 위치 추적용 맵 (변수명 -> extracted_data 인덱스)
+    variable_map = {} 
     
     pending_ranking_count = None
     ranking_options_buffer = []
@@ -712,6 +738,10 @@ def parse_word_to_df(docx_file):
     def flush_entry(entry):
         nonlocal is_parent_added, pending_max_n_count
         if "질문 내용" in entry: entry["질문 내용"] = clean_empty_parentheses(entry["질문 내용"])
+        
+        # flush 시점에 variable_map 등록
+        # (단, Ranking이나 Max N 등으로 쪼개지는 경우는 제외하거나 별도 처리 필요하지만, 여기서는 기본 변수만 등록)
+        
         if pending_ranking_count is not None and ranking_options_buffer:
             final_opts_str = "\n".join(ranking_options_buffer)
             results = []
@@ -736,7 +766,6 @@ def parse_word_to_df(docx_file):
             return new_entries
         raw_options = entry.get("보기_list", [])
         
-        # Multi-check Logic
         is_multi = any(k in entry["질문 내용"] for k in multi_keywords)
         if "D6_2" in entry["변수명"].replace("-", "_"): is_multi = True
         
@@ -759,17 +788,14 @@ def parse_word_to_df(docx_file):
             entry["보기 값"] = "\n".join(raw_options)
             if "보기_list" in entry: del entry["보기_list"]
             
-            # 1. 텍스트 복합 입력 (A7)
             mixed_input = check_mixed_text_input(entry)
             if len(mixed_input) > 1: return mixed_input
             
-            # 2. 일반 분할 (날짜, 돈 등)
             split_entries = check_and_split_time(entry)
             if len(split_entries) == 1: split_entries = check_and_split_date(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_money(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_percent(split_entries[0])
             
-            # 3. 보기 내 입력(Open) 변수 추가 (SQ5 대응)
             embedded_opens = extract_embedded_open_entry(split_entries[0])
             if embedded_opens:
                 split_entries.extend(embedded_opens)
@@ -777,7 +803,7 @@ def parse_word_to_df(docx_file):
             return split_entries
 
     for block in iter_block_items(doc):
-        # [NEW] 표(Table) 내부의 섹션 헤더도 감지!
+        # 표 내부 섹션 헤더 감지
         if isinstance(block, Table):
             if len(block.rows) > 0 and len(block.rows[0].cells) > 0:
                 first_cell_text = block.rows[0].cells[0].text
@@ -785,21 +811,16 @@ def parse_word_to_df(docx_file):
         
         if isinstance(block, Paragraph):
             text = block.text.strip()
-            
-            # [NEW] 섹션 헤더 감지 (Paragraph)
             current_prefix = check_section_header(text, current_prefix)
 
-            # [NEW] 워드 자동번호 인식 및 텍스트 병합
             if block._p.pPr is not None and block._p.pPr.numPr is not None:
                 try:
                     num_id = block._p.pPr.numPr.numId.val
                     ilvl = block._p.pPr.numPr.ilvl.val if block._p.pPr.numPr.ilvl is not None else 0
-                    
                     auto_num_counters[(num_id, ilvl)] += 1
                     num_val = auto_num_counters[(num_id, ilvl)]
                     
                     if not re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", text):
-                        # 문항 번호가 없으면 섹션 기반 번호 부여 (SQ1, A1...)
                         if "?" in text or "다." in text or "시오" in text or len(text) > 40:
                             prefix_counters[current_prefix] += 1
                             q_num = prefix_counters[current_prefix]
@@ -834,7 +855,11 @@ def parse_word_to_df(docx_file):
             if is_new_q:
                 if current_entry and not is_parent_added:
                     flushed_data = flush_entry(current_entry)
-                    if flushed_data: extracted_data.extend(flushed_data)
+                    if flushed_data: 
+                        for item in flushed_data:
+                            variable_map[item['변수명']] = len(extracted_data)
+                            extracted_data.append(item)
+                            
                 var_name = match_var.group(1).replace("-", "_"); label = match_var.group(2)
                 inline_opts = extract_options_from_line(label)
                 if inline_opts:
@@ -882,20 +907,16 @@ def parse_word_to_df(docx_file):
             
             new_entries = []
             
-            if table_type == "OPTION_LIST":
-                # [NEW] SQ8 보기 목록 추출
-                opt_str = extract_option_list_table(block)
-                if current_entry and opt_str:
-                    current_entry["보기 값"] = opt_str
-                    # 이미 flush된 이전 문항(SQ8)의 보기 업데이트가 필요한 경우, 
-                    # extracted_data의 마지막 항목을 수정
-                    if not is_parent_added and extracted_data:
-                        last_item = extracted_data[-1]
-                        if last_item["변수명"] == current_entry["변수명"]:
-                            last_item["보기 값"] = opt_str
+            if table_type == "MAPPED_OPTION":
+                # [NEW] 변수 매핑 테이블 (SQ8, SQ8-1 등)
+                # 추출된 데이터를 직접 업데이트 (Retroactive)
+                is_updated = extract_mapped_option_table(block, extracted_data, variable_map)
+                if not is_updated and current_entry:
+                    # 매핑 실패 시 현재 문항에라도 보기를 넣음 (기존 로직 유지)
+                    # (단, MAPPED_OPTION이지만 매핑 실패한 경우 일반 OPTION_LIST처럼 처리할 수도 있음)
+                    pass
             
             elif table_type == "UNIT_INPUT":
-                # [NEW] SQ6 단위 입력
                 if current_entry and not is_parent_added:
                     new_entries = extract_unit_input_table(block, current_entry)
 
@@ -1004,12 +1025,17 @@ def parse_word_to_df(docx_file):
                                 new_entries = split
 
             if new_entries:
-                extracted_data.extend(new_entries)
+                for item in new_entries:
+                    variable_map[item['변수명']] = len(extracted_data)
+                    extracted_data.append(item)
                 is_parent_added = True
 
     if current_entry and not is_parent_added:
         flushed_data = flush_entry(current_entry)
-        if flushed_data: extracted_data.extend(flushed_data)
+        if flushed_data: 
+            for item in flushed_data:
+                variable_map[item['변수명']] = len(extracted_data)
+                extracted_data.append(item)
             
     return pd.DataFrame(extracted_data)
 
@@ -1158,7 +1184,7 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
-* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도], [단위 입력], [보기 목록]** 등의 유형을 자동으로 판단합니다.
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도], [단위 입력], [변수 매핑]** 등의 유형을 자동으로 판단합니다.
 * **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
 * **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
 """)
