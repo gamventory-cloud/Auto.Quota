@@ -33,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ8-1 해결)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (복수응답 완벽 지원)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
@@ -172,7 +172,7 @@ def extract_embedded_open_entry(entry):
                     })
     return new_entries
 
-# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1 등) - current_entry 매핑 기능 추가
+# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1 등) - 복수응답 처리 강화
 def extract_mapped_option_table(table, extracted_data, variable_map, current_entry):
     rows = table.rows
     if len(rows) < 2: return None
@@ -185,26 +185,20 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
         if "보기" in h:
             option_col_idx = i
             break
-    
     if option_col_idx == -1: return None
     
-    # 타겟 변수 찾기 (헤더 분석)
+    # 복수응답 키워드 (이미 지나간 변수 재검증용)
+    multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "모두 체크"]
+
+    # 타겟 변수 찾기
     target_vars = {} # {col_idx: 'VAR_NAME'}
-    
-    # 1. 이미 추출된 변수들 (variable_map)
     existing_vars = list(variable_map.keys())
-    
-    # 2. 현재 처리 중인 변수 (current_entry)
     current_var_name = current_entry["변수명"] if current_entry else None
-    if current_var_name:
-        existing_vars.append(current_var_name)
+    if current_var_name: existing_vars.append(current_var_name)
     
     for i, h in enumerate(header_cells):
         if i == option_col_idx: continue
-        # 헤더 정제 (SQ8-1. -> SQ8_1)
         clean_h = re.sub(r"[.\s]", "", h).replace("-", "_")
-        
-        # 헤더가 변수명과 일치하거나 포함되는지 확인
         for var_name in existing_vars:
             if clean_h == var_name or (len(clean_h) > 2 and clean_h in var_name):
                 target_vars[i] = var_name
@@ -213,7 +207,7 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
     if not target_vars: return None
     
     # 각 변수별 보기 리스트 수집
-    var_options = {v: [] for v in target_vars.values()}
+    var_options_map = {v: [] for v in target_vars.values()} # {var: [("1", "사과"), ...]}
     
     for row in rows[1:]:
         if len(row.cells) <= option_col_idx: continue
@@ -235,25 +229,79 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
                 if check_val:
                     final_code = check_val if check_val.isdigit() else code
                     if final_code:
-                        var_options[var_name].append(f"{final_code}={val}")
+                        var_options_map[var_name].append((final_code, val))
 
     updates = 0
     
     # 1. extracted_data (과거 변수) 업데이트
-    for var_name, opts in var_options.items():
-        if opts and var_name in variable_map:
-            idx = variable_map[var_name]
-            if idx < len(extracted_data):
-                extracted_data[idx]["보기 값"] = "\n".join(opts)
-                updates += 1
-                
-    # 2. current_entry (현재 변수) 업데이트 - 여기가 핵심!
-    if current_entry and current_entry["변수명"] in var_options:
-        opts = var_options[current_entry["변수명"]]
-        if opts:
-            current_entry["보기 값"] = "\n".join(opts)
+    # 리스트를 수정해야 하므로 역순으로 처리하거나, variable_map 업데이트 필요
+    # 여기서는 간단히 해당 인덱스의 아이템을 교체하거나 확장
+    
+    # 재정렬을 위해 처리할 변수들을 인덱스 순으로 정렬
+    vars_to_process = [v for v in var_options_map.keys() if v in variable_map]
+    vars_to_process.sort(key=lambda x: variable_map[x], reverse=True) # 뒤에서부터 처리해야 인덱스 꼬임 방지
+    
+    for var_name in vars_to_process:
+        opts_tuples = var_options_map[var_name] # list of (code, label)
+        if not opts_tuples: continue
+        
+        idx = variable_map[var_name]
+        original_item = extracted_data[idx]
+        
+        # 복수응답 여부 확인 (제목에 키워드가 있는지)
+        is_multi = any(k in original_item["질문 내용"] for k in multi_keywords)
+        
+        if is_multi:
+            # 단일 항목을 여러 항목으로 폭파(Explode)
+            new_items = []
+            full_opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
+            
+            for c, l in opts_tuples:
+                new_items.append({
+                    "변수명": f"{var_name}_{c}",
+                    "질문 내용": f"{original_item['질문 내용']} ({l})",
+                    "보기 값": full_opts_str,
+                    "유형": "Multi"
+                })
+            
+            # 기존 항목 삭제 후 새 항목들 삽입
+            del extracted_data[idx]
+            for item in reversed(new_items):
+                extracted_data.insert(idx, item)
+            
+            # variable_map 재구축 필요 (인덱스가 밀렸으므로)
+            # 성능상 비효율적일 수 있으나 정확성을 위해 전체 재매핑 권장
+            # 여기서는 간단히 pass (다음 루프에 영향 줄 수 있음 주의)
+            # 일단 뒤에서부터 처리하므로 앞쪽 인덱스는 영향 안 받음.
+            updates += 1
+            
+        else:
+            # 단일응답이면 보기 값만 업데이트
+            opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
+            extracted_data[idx]["보기 값"] = opts_str
+            updates += 1
+
+    # 2. current_entry (현재 변수) 업데이트
+    if current_entry and current_entry["변수명"] in var_options_map:
+        opts_tuples = var_options_map[current_entry["변수명"]]
+        if opts_tuples:
+            # current_entry는 flush 전이므로 보기_list에 넣어두면 flush_entry가 알아서 처리함
+            if "보기_list" not in current_entry: current_entry["보기_list"] = []
+            
+            # 포맷: "1) 사과" 형태로 변환하여 넣음
+            for c, l in opts_tuples:
+                current_entry["보기_list"].append(f"{c}) {l}")
+            
             updates += 1
                 
+    # 전체 variable_map 갱신 (인덱스 변화 반영)
+    if updates > 0:
+        new_map = {}
+        for i, item in enumerate(extracted_data):
+            new_map[item['변수명']] = i
+        variable_map.clear()
+        variable_map.update(new_map)
+
     return updates > 0
 
 # SQ6 단위 입력 테이블
@@ -728,14 +776,19 @@ def parse_word_to_df(docx_file):
     doc = Document(docx_file)
     extracted_data = []
     var_pattern = re.compile(r"^([a-zA-Z가-힣0-9\-\_]+)(?:[\.\s]|\s+)(.*)")
+    # [SQ10 해결] 띄어쓰기 포함된 키워드 추가
     multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "중복가능", "모두 체크", "모두 응답"]
     current_entry = None
     is_parent_added = False 
     
+    # [NEW] 섹션 인식 변수
     current_prefix = "Q"
     prefix_counters = collections.defaultdict(int)
+    
+    # [NEW] 워드 자동번호 인식용 카운터
     auto_num_counters = collections.defaultdict(int)
-    variable_map = {} 
+    
+    variable_map = {} # 변수 위치 추적 맵
     
     pending_ranking_count = None
     ranking_options_buffer = []
@@ -746,7 +799,6 @@ def parse_word_to_df(docx_file):
     def flush_entry(entry):
         nonlocal is_parent_added, pending_max_n_count
         if "질문 내용" in entry: entry["질문 내용"] = clean_empty_parentheses(entry["질문 내용"])
-        
         if pending_ranking_count is not None and ranking_options_buffer:
             final_opts_str = "\n".join(ranking_options_buffer)
             results = []
@@ -771,6 +823,7 @@ def parse_word_to_df(docx_file):
             return new_entries
         raw_options = entry.get("보기_list", [])
         
+        # Multi-check Logic
         is_multi = any(k in entry["질문 내용"] for k in multi_keywords)
         if "D6_2" in entry["변수명"].replace("-", "_"): is_multi = True
         
@@ -793,14 +846,17 @@ def parse_word_to_df(docx_file):
             entry["보기 값"] = "\n".join(raw_options)
             if "보기_list" in entry: del entry["보기_list"]
             
+            # 1. 텍스트 복합 입력 (A7)
             mixed_input = check_mixed_text_input(entry)
             if len(mixed_input) > 1: return mixed_input
             
+            # 2. 일반 분할 (날짜, 돈 등)
             split_entries = check_and_split_time(entry)
             if len(split_entries) == 1: split_entries = check_and_split_date(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_money(split_entries[0])
             if len(split_entries) == 1: split_entries = check_and_split_percent(split_entries[0])
             
+            # 3. 보기 내 입력(Open) 변수 추가 (SQ5 대응)
             embedded_opens = extract_embedded_open_entry(split_entries[0])
             if embedded_opens:
                 split_entries.extend(embedded_opens)
@@ -808,6 +864,7 @@ def parse_word_to_df(docx_file):
             return split_entries
 
     for block in iter_block_items(doc):
+        # 표 내부 섹션 헤더 감지
         if isinstance(block, Table):
             if len(block.rows) > 0 and len(block.rows[0].cells) > 0:
                 first_cell_text = block.rows[0].cells[0].text
@@ -1176,7 +1233,7 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
-* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도]** 등의 유형을 자동으로 판단합니다.
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도], [단위 입력], [변수 매핑]** 등의 유형을 자동으로 판단합니다.
 * **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
 * **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
 """)
