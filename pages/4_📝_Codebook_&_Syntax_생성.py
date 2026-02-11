@@ -32,7 +32,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (척도/입력표 구분 강화)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (A2/A4/SQ10 해결)")
 
 # ==============================================================================
 # [Part 0] 문항 요약 함수 (Regex Rule-based)
@@ -143,98 +143,101 @@ def analyze_table_structure(table):
             
         if any(k in row_txt for k in input_keywords): has_input_pattern = True
 
-    # 1. 자녀 정보 (SQ6)
+    # 1. 시간 분할 (세로형 - A2, A4) [최우선 순위]
+    # 가로형 입력보다 먼저 체크해야 납치되지 않음
+    if "시간" in all_text and "분" in all_text: return "TIME_SPLIT"
+
+    # 2. 자녀 정보 (SQ6)
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
-    # [NEW] 가로형 척도 (HORIZONTAL_SCALE) - B2, A10-1
+    # 3. 가로형 척도 (HORIZONTAL_SCALE) - B2, A10-1
     # 조건: 2행 테이블, 한 줄은 텍스트, 한 줄은 숫자(코드), 입력패턴 없음
     if len(rows) == 2 and not has_input_pattern:
-        # 1행이 숫자고 0행이 텍스트거나, 0행이 숫자고 1행이 텍스트인 경우
         row0_is_numeric = row0_len > 0 and (row0_digits / row0_len) > 0.5
         row1_is_numeric = row1_len > 0 and (row1_digits / row1_len) > 0.5
-        
         if (row0_is_numeric and not row1_is_numeric) or (not row0_is_numeric and row1_is_numeric):
             return "HORIZONTAL_SCALE"
 
-    # 2. 가로형 입력 (HORIZONTAL_INPUT) - B3, B4
+    # 4. 가로형 입력 (HORIZONTAL_INPUT) - B3, B4
     # 조건: 2행 이상, 첫행 헤더, 둘째행 데이터(입력패턴O)
     is_row1_input = any(k in second_row_text for k in input_keywords)
     if len(rows) >= 2 and len(table.columns) >= 2 and is_row1_input:
         return "HORIZONTAL_INPUT"
-
-    # 3. 시간 분할 (세로형) - A2, A4
-    if "시간" in all_text and "분" in all_text: return "TIME_SPLIT"
     
-    # 4. 고정 합계
+    # 5. 고정 합계
     if ("합계" in all_text or "Total" in all_text) and ("%" in all_text or "100" in all_text):
         if len(table.columns) == 2: return "CONSTANT_SUM"
         
-    # 5. 단순 입력 (A1)
+    # 6. 단순 입력 (A1)
     is_option_table = bool(re.search(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]", first_row_text))
     if has_input_pattern and not is_option_table and len(table.columns) <= 2: return "PLAIN_INPUT"
     
     return "STANDARD"
 
 # ------------------------------------------------------------------------------
-# [Extractor] 가로형 척도 표 (B2, A10-1 대응)
+# [Extractors]
 # ------------------------------------------------------------------------------
+def extract_time_split_table(table, current_var):
+    # A2, A4 대응 (시간/분 강제 추출)
+    extracted = []
+    for i, row in enumerate(table.rows):
+        cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
+        if not cells_text: continue
+        row_full_text = " ".join(cells_text)
+        
+        # 헤더 행 스킵 (시간/분이 써있지만 입력양식이 없는 경우)
+        is_header_row = ("시간" in row_full_text and "분" in row_full_text and "입력" not in row_full_text and "범위" not in row_full_text and "(" not in row_full_text)
+        if is_header_row: continue
+        
+        row_label = cells_text[0]
+        clean_label = re.sub(r"※.*", "", row_label).strip().replace(":", "").strip()
+        
+        # 라벨이 너무 길거나 비어있으면 스킵
+        if len(clean_label) > 40 or not clean_label: continue
+        
+        extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
+        extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
+    return extracted
+
 def extract_horizontal_scale_table(table, current_var):
+    # B2, A10-1 대응
     rows = table.rows
     headers = [c.text.strip() for c in rows[0].cells]
     values = [c.text.strip() for c in rows[1].cells]
-    
-    # 어느 행이 코드(숫자)이고 어느 행이 라벨(텍스트)인지 판별
     row0_digits = sum(1 for x in headers if x.isdigit())
     row1_digits = sum(1 for x in values if x.isdigit())
-    
     scale_pairs = []
-    
     if row1_digits > row0_digits:
-        # 0행: 라벨, 1행: 코드 (일반적)
         codes = values; labels = headers
     else:
-        # 0행: 코드, 1행: 라벨
         codes = headers; labels = values
-        
     for i in range(min(len(codes), len(labels))):
         c = codes[i]; l = labels[i]
-        if c and l:
-            scale_pairs.append(f"{c}={l}")
-            
+        if c and l: scale_pairs.append(f"{c}={l}")
     if scale_pairs:
-        # 현재 변수의 보기 값을 업데이트하고 그대로 반환
         current_var["보기 값"] = "\n".join(scale_pairs)
         return [current_var]
-        
     return None
 
-# ------------------------------------------------------------------------------
-# [Extractor] 가로형 입력 표 (B3, B4 대응)
-# ------------------------------------------------------------------------------
 def extract_horizontal_input_table(table, current_var):
+    # B3, B4 대응
     rows = table.rows
     if len(rows) < 2: return None
-    
     extracted = []
     headers = rows[0].cells
     values = rows[1].cells
-    
     for i in range(len(headers)):
         header_text = headers[i].text.strip()
         value_text = values[i].text.strip()
-        
         if not header_text: continue
         clean_label = clean_empty_parentheses(header_text)
-        
         if "시간" in value_text and "분" in value_text and ("입력" in value_text or "(" in value_text):
              extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
              extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
         else:
             extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}", "질문 내용": f"[{current_var['변수명']}] {clean_label}", "보기 값": "(숫자입력)", "유형": "Open" })
-            
     return extracted
 
-# ... (기존 Extractor들 유지) ...
 def extract_child_demographics_table(table, current_var):
     headers = [c.text.strip() for c in table.rows[0].cells]
     gender_col_idx = -1; birth_col_idx = -1
@@ -262,21 +265,6 @@ def extract_child_demographics_table(table, current_var):
         if has_month: extracted_entries.append({ "변수명": f"{current_var['변수명']}_{i+1}_3", "질문 내용": f"[{current_var['변수명']}] {row_label} - 생월 (월)", "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted_entries
 
-def extract_time_split_table(table, current_var):
-    extracted = []
-    for i, row in enumerate(table.rows):
-        cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
-        if not cells_text: continue
-        row_full_text = " ".join(cells_text)
-        is_header_row = ("시간" in row_full_text and "분" in row_full_text and "입력" not in row_full_text and "범위" not in row_full_text and "(" not in row_full_text)
-        if is_header_row: continue
-        row_label = cells_text[0]
-        clean_label = re.sub(r"※.*", "", row_label).strip().replace(":", "").strip()
-        if len(clean_label) > 30 or not clean_label: continue
-        extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
-        extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
-    return extracted
-
 def extract_plain_input_table(table, current_var):
     extracted = []
     for i, row in enumerate(table.rows):
@@ -284,7 +272,6 @@ def extract_plain_input_table(table, current_var):
         if not cells_text: continue
         row_full_text = " ".join(cells_text)
         if re.search(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]", row_full_text): continue
-        if "시간" in row_full_text and "분" in row_full_text: continue 
         clean_label = re.sub(r"\(\s*입력.*?\)", "", row_full_text).replace(":", "").strip()
         clean_label = re.sub(r"[a-zA-Z]+$", "", clean_label).strip()
         if not clean_label: continue
@@ -558,7 +545,8 @@ def parse_word_to_df(docx_file):
     doc = Document(docx_file)
     extracted_data = []
     var_pattern = re.compile(r"^([a-zA-Z가-힣0-9\-\_]+)(?:[\.\s]|\s+)(.*)")
-    multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라"]
+    # [SQ10 해결] 띄어쓰기 포함된 키워드 추가
+    multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "중복가능", "모두 체크", "모두 응답"]
     current_entry = None
     is_parent_added = False 
     
@@ -594,8 +582,11 @@ def parse_word_to_df(docx_file):
             pending_max_n_count = None
             return new_entries
         raw_options = entry.get("보기_list", [])
+        
+        # Multi-check Logic
         is_multi = any(k in entry["질문 내용"] for k in multi_keywords)
         if "D6_2" in entry["변수명"].replace("-", "_"): is_multi = True
+        
         if is_multi and raw_options:
             full_options_str_list = []
             for opt in raw_options:
@@ -615,10 +606,8 @@ def parse_word_to_df(docx_file):
             entry["보기 값"] = "\n".join(raw_options)
             if "보기_list" in entry: del entry["보기_list"]
             
-            # A7 복수 입력 텍스트 체크 (최우선)
             mixed_input = check_mixed_text_input(entry)
-            if len(mixed_input) > 1:
-                return mixed_input
+            if len(mixed_input) > 1: return mixed_input
                 
             split_entries = check_and_split_time(entry)
             if len(split_entries) == 1: split_entries = check_and_split_date(split_entries[0])
@@ -697,12 +686,10 @@ def parse_word_to_df(docx_file):
                     new_entries = extract_child_demographics_table(block, current_entry)
             
             elif table_type == "HORIZONTAL_SCALE":
-                # [NEW] 가로형 척도 표 (B2, A10-1)
                 if current_entry and not is_parent_added:
                     new_entries = extract_horizontal_scale_table(block, current_entry)
 
             elif table_type == "HORIZONTAL_INPUT":
-                # 가로형 입력 표 (B3, B4)
                 if current_entry and not is_parent_added:
                     new_entries = extract_horizontal_input_table(block, current_entry)
 
