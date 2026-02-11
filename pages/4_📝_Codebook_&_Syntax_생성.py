@@ -33,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ10/10-1 해결)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (SQ10-1 Max 2 완벽 해결)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
@@ -172,7 +172,7 @@ def extract_embedded_open_entry(entry):
                     })
     return new_entries
 
-# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1, SQ10-1 등)
+# [NEW] 변수 매핑 테이블 (SQ8, SQ8-1, SQ10-1 등) - 매칭 로직 강화
 def extract_mapped_option_table(table, extracted_data, variable_map, current_entry):
     rows = table.rows
     if len(rows) < 2: return None
@@ -190,17 +190,24 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
     # 복수응답 키워드
     multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "모두 체크"]
 
-    # 타겟 변수 찾기
+    # 타겟 변수 찾기 (특수문자 제거 후 비교)
     target_vars = {} 
     existing_vars = list(variable_map.keys())
     current_var_name = current_entry["변수명"] if current_entry else None
     if current_var_name: existing_vars.append(current_var_name)
     
+    def normalize_name(n): return re.sub(r"[^a-zA-Z0-9]", "", n).upper()
+
     for i, h in enumerate(header_cells):
         if i == option_col_idx: continue
-        clean_h = re.sub(r"[.\s]", "", h).replace("-", "_")
+        # 헤더 정제 (SQ8-1. -> SQ81)
+        norm_h = normalize_name(h)
+        if not norm_h: continue
+
         for var_name in existing_vars:
-            if clean_h == var_name or (len(clean_h) > 2 and clean_h in var_name):
+            norm_v = normalize_name(var_name)
+            # 정확히 일치하거나 포함관계 확인
+            if norm_h == norm_v or (len(norm_h) > 2 and norm_h in norm_v):
                 target_vars[i] = var_name
                 break
                 
@@ -246,7 +253,6 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
         is_multi = any(k in original_item["질문 내용"] for k in multi_keywords)
         
         if is_multi:
-            # Multi: 폭파
             new_items = []
             full_opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
             for c, l in opts_tuples:
@@ -261,7 +267,6 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
                 extracted_data.insert(idx, item)
             updates += 1
         else:
-            # Single: 값 업데이트
             opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
             extracted_data[idx]["보기 값"] = opts_str
             updates += 1
@@ -271,11 +276,10 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
         opts_tuples = var_options_map[current_entry["변수명"]]
         if opts_tuples:
             if "보기_list" not in current_entry: current_entry["보기_list"] = []
-            # 여기서 보기 값을 텍스트로 미리 만들어 둡니다. (flush_entry에서 Ranking_Sel 처리를 위해)
+            
             opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
             current_entry["보기 값"] = opts_str
             
-            # 보기_list도 업데이트
             for c, l in opts_tuples:
                 current_entry["보기_list"].append(f"{c}) {l}")
             
@@ -932,14 +936,15 @@ def parse_word_to_df(docx_file):
                 rank_count = check_ranking_selection_question(current_entry)
                 if rank_count: pending_ranking_count = rank_count; ranking_options_buffer = [] 
                 else: pending_ranking_count = None; ranking_options_buffer = []
-                max_n_cnt = check_and_split_max_n_text(current_entry)
-                if max_n_cnt:
-                    q_norm = current_entry["질문 내용"].replace("［", "[").replace("］", "]")
-                    m = re.search(r"최대.*?(\d+)", q_norm)
-                    if m: pending_max_n_count = int(m.group(1))
-                    elif "3" in q_norm and "기입" in q_norm: pending_max_n_count = 3
-                    else: pending_max_n_count = None
-                else: pending_max_n_count = None
+                
+                # [FIX] Force Max N check based on text pattern (regardless of function return)
+                q_norm = current_entry["질문 내용"].replace("［", "[").replace("］", "]").replace("（", "(").replace("）", ")")
+                max_n_match = re.search(r"최대\s*(\d+)", q_norm)
+                if max_n_match:
+                    pending_max_n_count = int(max_n_match.group(1))
+                else:
+                    pending_max_n_count = None
+                
                 if "1개 선택" in current_entry["질문 내용"]: current_entry["유형"] = "Single"
             elif current_entry:
                 if not is_parent_added:
