@@ -32,33 +32,21 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (요약 기능 추가)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (가로형 표 지원)")
 
 # ==============================================================================
 # [Part 0] 문항 요약 함수 (Regex Rule-based)
 # ==============================================================================
 def summarize_label_regex(text):
-    """
-    설문 문항 텍스트를 분석하기 좋게 요약합니다. (규칙 기반)
-    """
     if not text: return ""
-    
-    # 1. 불필요한 메타데이터/가이드 제거
-    text = re.sub(r"\(PROG.*?\)", "", text, flags=re.IGNORECASE) # (PROG: ...)
+    text = re.sub(r"\(PROG.*?\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[PROG.*?\]", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\(.*?(입력|기입|범위|선택).*?\)", "", text) # (입력범위...)
-    text = re.sub(r"\[.*?(선택|기입|응답).*?\]", "", text) # [1개 선택]
-    
-    # 2. 도입부 제거 ("다음은 ... 질문입니다.")
+    text = re.sub(r"\(.*?(입력|기입|범위|선택).*?\)", "", text)
+    text = re.sub(r"\[.*?(선택|기입|응답).*?\]", "", text)
     text = re.sub(r"^다음은.*?질문입니다\.?", "", text).strip()
     text = re.sub(r"^다음.*?대해.*?(선택|응답).*?주십시오\.?", "", text).strip()
-    
-    # 3. 주어/수식어 간소화
     text = text.replace("귀하의 ", "").replace("귀하께서는 ", "").replace("귀 댁의 ", "")
     text = text.replace("응답자 본인의 ", "").replace("평소 ", "")
-    
-    # 4. 서술어 제거 및 명사형 종결
-    # (~은 무엇입니까?, ~를 선택해 주십시오, ~어떻게 되십니까? 등)
     patterns = [
         r"은 무엇입니까\?*$", r"는 무엇입니까\?*$", r"는 무엇인가요\?*$",
         r"을 선택해 주십시오\.?$", r"를 선택해 주십시오\.?$",
@@ -68,50 +56,23 @@ def summarize_label_regex(text):
         r"에 대해 어떻게 생각하십니까\?*$",
         r"정도입니까\?*$", r"되십니까\?*$", r"인가요\?*$", r"있습니까\?*$"
     ]
-    
-    for pat in patterns:
-        text = re.sub(pat, "", text)
-        
-    # 5. 특정 패턴 치환 (많이 쓰이는 설문 용어)
-    replacements = {
-        "만족하는 정도": "만족도",
-        "얼마나 만족하십니까": "만족도",
-        "얼마나 자주": "빈도",
-        "이유는 무엇": "이유",
-        "생각나는 이미지": "이미지",
-        "구입한 적이": "구입 경험",
-        "이용한 경험": "이용 경험",
-        "어디입니까": "장소",
-        "누구입니까": "대상"
-    }
-    
-    for old, new in replacements.items():
-        if old in text:
-            text = text.replace(old, new)
-
-    # 6. 마무리 정리
-    text = text.strip()
-    text = re.sub(r"\?+$", "", text) # 끝에 남은 물음표 제거
-    text = re.sub(r"\.$", "", text) # 끝에 남은 마침표 제거
-    
+    for pat in patterns: text = re.sub(pat, "", text)
+    replacements = { "만족하는 정도": "만족도", "얼마나 만족하십니까": "만족도", "얼마나 자주": "빈도", "이유는 무엇": "이유", "생각나는 이미지": "이미지", "구입한 적이": "구입 경험", "이용한 경험": "이용 경험", "어디입니까": "장소", "누구입니까": "대상" }
+    for old, new in replacements.items(): 
+        if old in text: text = text.replace(old, new)
+    text = text.strip(); text = re.sub(r"\?+$", "", text); text = re.sub(r"\.$", "", text)
     return text.strip()
 
 # ==============================================================================
 # [Part 1] 워드 파싱 및 유틸리티 함수 정의
 # ==============================================================================
 def iter_block_items(parent):
-    if isinstance(parent, _Document):
-        parent_elm = parent.element.body
-    elif isinstance(parent, _Cell):
-        parent_elm = parent._tc
-    else:
-        raise ValueError("Something's not right")
-
+    if isinstance(parent, _Document): parent_elm = parent.element.body
+    elif isinstance(parent, _Cell): parent_elm = parent._tc
+    else: raise ValueError("Something's not right")
     for child in parent_elm.iterchildren():
-        if isinstance(child, CT_P):
-            yield Paragraph(child, parent)
-        elif isinstance(child, CT_Tbl):
-            yield Table(child, parent)
+        if isinstance(child, CT_P): yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl): yield Table(child, parent)
 
 def clean_empty_parentheses(text):
     if not text: return text
@@ -123,27 +84,23 @@ def clean_header_text(text):
     if match:
         code = match.group(1)
         label = re.sub(r"[\(\[\{\<]?\s*" + code + r"\s*[\)\]\}\>]?[\.]?", "", text).strip()
-        if not label:
-            label = f"{code}점"
+        if not label: label = f"{code}점"
         return f"{code}={label}"
     return f"{text}={text}"
 
 def extract_options_from_line(text):
     pattern = re.compile(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]")
     matches = list(pattern.finditer(text))
-    if not matches:
-        return []
+    if not matches: return []
     results = []
     for i in range(len(matches)):
         start = matches[i].start()
         end = matches[i+1].start() if i + 1 < len(matches) else len(text)
         item = text[start:end].strip()
         item = clean_empty_parentheses(item)
-        if item:
-            results.append(item)
+        if item: results.append(item)
     return results
 
-# [NEW] 텍스트 내 복수 입력 감지 (A7 대응)
 def check_mixed_text_input(entry):
     if entry["유형"] != "Single" and entry["유형"] != "Open": return [entry]
     full_text = entry["질문 내용"]
@@ -165,23 +122,86 @@ def check_mixed_text_input(entry):
 def analyze_table_structure(table):
     rows = table.rows
     if len(rows) < 1: return "UNKNOWN"
-    all_text = ""; first_row_text = ""; has_input_pattern = False
+    all_text = ""; first_row_text = ""; second_row_text = ""; has_input_pattern = False
     input_keywords = ["입력", "범위", "cm", "kg", "명", "개", "회", "( )", "()"]
+    
     for i, row in enumerate(rows):
         row_txt = " ".join([c.text.strip() for c in row.cells])
         all_text += row_txt + " "; 
         if i == 0: first_row_text = row_txt
+        if i == 1: second_row_text = row_txt
         if any(k in row_txt for k in input_keywords): has_input_pattern = True
 
+    # 1. 자녀 정보 (SQ6)
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
+    
+    # [NEW] 가로형 입력 표 (B3, B4)
+    # 조건: 2행, 1행은 헤더(입력패턴X), 2행은 데이터(입력패턴O), 열 개수 >= 2
+    is_row0_input = any(k in first_row_text for k in input_keywords)
+    is_row1_input = any(k in second_row_text for k in input_keywords)
+    if len(rows) == 2 and len(table.columns) >= 2 and not is_row0_input and is_row1_input:
+        return "HORIZONTAL_INPUT"
+
+    # 3. 시간 분할 (A2, A4 - 세로형)
+    # 가로형 시간표는 HORIZONTAL_INPUT에서 처리됨
     if "시간" in all_text and "분" in all_text: return "TIME_SPLIT"
+    
+    # 4. 고정 합계
     if ("합계" in all_text or "Total" in all_text) and ("%" in all_text or "100" in all_text):
         if len(table.columns) == 2: return "CONSTANT_SUM"
+        
+    # 5. 단순 입력 (A1)
     is_option_table = bool(re.search(r"(\d+|[①-⑩]|[a-zA-Z])[\)\.]", first_row_text))
     if has_input_pattern and not is_option_table and len(table.columns) <= 2: return "PLAIN_INPUT"
+    
     return "STANDARD"
 
-# ... (Extractor Functions) ...
+# ------------------------------------------------------------------------------
+# [Extractor] 가로형 입력 표 (B3, B4 대응)
+# ------------------------------------------------------------------------------
+def extract_horizontal_input_table(table, current_var):
+    rows = table.rows
+    if len(rows) < 2: return None
+    
+    extracted = []
+    headers = rows[0].cells
+    values = rows[1].cells
+    
+    for i in range(len(headers)):
+        header_text = headers[i].text.strip()
+        value_text = values[i].text.strip()
+        
+        if not header_text: continue
+        
+        # 헤더 정제
+        clean_label = clean_empty_parentheses(header_text)
+        
+        # 값에 '시간'과 '분'이 모두 있으면 분리 (B4)
+        if "시간" in value_text and "분" in value_text and ("입력" in value_text or "(" in value_text):
+             extracted.append({
+                "변수명": f"{current_var['변수명']}_{i+1}_H",
+                "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)",
+                "보기 값": "(숫자입력)",
+                "유형": "Open"
+            })
+             extracted.append({
+                "변수명": f"{current_var['변수명']}_{i+1}_M",
+                "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)",
+                "보기 값": "(숫자입력)",
+                "유형": "Open"
+            })
+        else:
+            # 일반 입력 (B3)
+            extracted.append({
+                "변수명": f"{current_var['변수명']}_{i+1}",
+                "질문 내용": f"[{current_var['변수명']}] {clean_label}",
+                "보기 값": "(숫자입력)",
+                "유형": "Open"
+            })
+            
+    return extracted
+
+# ... (기존 Extractor들) ...
 def extract_child_demographics_table(table, current_var):
     headers = [c.text.strip() for c in table.rows[0].cells]
     gender_col_idx = -1; birth_col_idx = -1
@@ -642,6 +662,11 @@ def parse_word_to_df(docx_file):
                 if current_entry and not is_parent_added:
                     new_entries = extract_child_demographics_table(block, current_entry)
             
+            elif table_type == "HORIZONTAL_INPUT":
+                # [NEW] 가로형 입력 표 (B3, B4)
+                if current_entry and not is_parent_added:
+                    new_entries = extract_horizontal_input_table(block, current_entry)
+
             elif table_type == "TIME_SPLIT":
                 if current_entry and not is_parent_added:
                     new_entries = extract_time_split_table(block, current_entry)
@@ -889,7 +914,7 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
-* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계]** 등의 유형을 자동으로 판단합니다.
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력]** 등의 유형을 자동으로 판단합니다.
 * **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
 * **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
 """)
@@ -913,14 +938,13 @@ with tab1:
         st.subheader("📊 분석 결과 미리보기")
         st.dataframe(st.session_state['df_raw'], use_container_width=True, height=400)
         
-        # [NEW] 요약 옵션
+        # 요약 옵션
         st.markdown("---")
         use_summary = st.checkbox("✂️ 긴 질문 내용을 간략하게 요약하기 (Beta)", 
                                   help="질문 끝의 '~입니까?', '귀하의' 같은 불필요한 문구를 자동으로 제거합니다.")
         
         st.info("아래 엑셀 파일을 다운로드하여 내용을 수정하세요.")
         
-        # 요약 적용 여부에 따라 데이터 변환
         if use_summary:
             df_to_download = st.session_state['df_raw'].copy()
             df_to_download['질문 내용'] = df_to_download['질문 내용'].apply(summarize_label_regex)
