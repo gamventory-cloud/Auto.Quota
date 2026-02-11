@@ -16,6 +16,7 @@ try:
     from docx.oxml.table import CT_Tbl
     from docx.table import _Cell, Table
     from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn 
     from openpyxl.styles import Font, PatternFill, Alignment
 except ImportError:
     st.error("필수 라이브러리가 설치되지 않았습니다. requirements.txt에 'python-docx'와 'openpyxl'을 추가하세요.")
@@ -32,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Final Fix 2)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (워드 자동번호 해결)")
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수 (가장 먼저 정의)
@@ -118,7 +119,6 @@ def summarize_label_regex(text):
 # ==============================================================================
 
 def check_mixed_text_input(entry):
-    # A7 등 텍스트 내 복수 입력 감지
     if entry["유형"] != "Single" and entry["유형"] != "Open": return [entry]
     full_text = entry["질문 내용"]
     if "보기_list" in entry: full_text += " " + " ".join(entry["보기_list"])
@@ -134,52 +134,35 @@ def check_mixed_text_input(entry):
     return new_entries
 
 def extract_embedded_open_entry(entry):
-    # [NEW] SQ5 등 보기 내 입력 감지 (강화됨)
     if entry["유형"] not in ["Single", "Multi"]: return []
-    
     vals_str = entry.get("보기 값", "")
     if not vals_str: return []
-    
     new_entries = []
     lines = vals_str.split('\n')
-    
-    # 괄호 정규화 (전각 -> 반각)
     normalized_lines = [line.replace("（", "(").replace("）", ")").replace("[", "(").replace("]", ")") for line in lines]
-    
     for line in normalized_lines:
         if "=" not in line: continue
         parts = line.split("=", 1)
-        code = parts[0].strip()
-        label = parts[1].strip()
-        
-        # 보기 라벨 안에 입력 관련 키워드가 괄호 안에 있는지 확인
-        # 예: 1) 있음 ( 입력범위 : 1~10 )명 -> ( 입력범위 : 1~10 ) 감지
+        code = parts[0].strip(); label = parts[1].strip()
         if "(" in label and ")" in label:
-            # 괄호 안의 내용 추출
             paren_content_match = re.search(r"\(([^)]+)\)", label)
             if paren_content_match:
                 content = paren_content_match.group(1)
-                # 괄호 안에 '입력', '기입', '범위', '구체적' 등의 단어가 있는지 확인
                 if any(k in content for k in ["입력", "기입", "범위", "구체적", "작성"]):
-                    # 단위 추출 (괄호 뒤에 붙은 글자)
                     unit = ""
                     suffix_match = re.search(r"\)[^)]*$", label)
                     if suffix_match:
                         suffix = suffix_match.group(0).replace(")", "").strip()
                         if suffix: unit = f" ({suffix})"
-                    
-                    # 새끼 문항 생성
                     new_entries.append({
                         "변수명": f"{entry['변수명']}_{code}",
                         "질문 내용": f"[{entry['변수명']}] {code}번 선택 시 구체적 내용{unit}",
                         "보기 값": "(숫자입력)" if "범위" in content or "수" in content or "명" in suffix else "(주관식)",
                         "유형": "Open"
                     })
-            
     return new_entries
 
 def extract_child_demographics_table(table, current_var):
-    # SQ6
     headers = [c.text.strip() for c in table.rows[0].cells]
     gender_col_idx = -1; birth_col_idx = -1
     for idx, h in enumerate(headers):
@@ -207,26 +190,21 @@ def extract_child_demographics_table(table, current_var):
     return extracted_entries
 
 def extract_time_split_table(table, current_var):
-    # A2, A4
     extracted = []
     for i, row in enumerate(table.rows):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
         if not cells_text: continue
         row_full_text = " ".join(cells_text)
-        
         is_header_row = ("시간" in row_full_text and "분" in row_full_text and "입력" not in row_full_text and "범위" not in row_full_text and "(" not in row_full_text)
         if is_header_row: continue
-        
         row_label = cells_text[0]
         clean_label = re.sub(r"※.*", "", row_label).strip().replace(":", "").strip()
         if len(clean_label) > 40 or not clean_label: continue
-        
         extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_H", "질문 내용": f"[{current_var['변수명']}] {clean_label} (시간)", "보기 값": "(숫자입력)", "유형": "Open" })
         extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}_M", "질문 내용": f"[{current_var['변수명']}] {clean_label} (분)", "보기 값": "(숫자입력)", "유형": "Open" })
     return extracted
 
 def extract_horizontal_scale_table(table, current_var):
-    # B2, A10-1
     rows = table.rows
     headers = [c.text.strip() for c in rows[0].cells]
     values = [c.text.strip() for c in rows[1].cells]
@@ -244,7 +222,6 @@ def extract_horizontal_scale_table(table, current_var):
     return None
 
 def extract_horizontal_input_table(table, current_var):
-    # B3, B4
     rows = table.rows
     if len(rows) < 2: return None
     extracted = []
@@ -263,7 +240,6 @@ def extract_horizontal_input_table(table, current_var):
     return extracted
 
 def extract_plain_input_table(table, current_var):
-    # A1
     extracted = []
     for i, row in enumerate(table.rows):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
@@ -614,6 +590,9 @@ def parse_word_to_df(docx_file):
     current_entry = None
     is_parent_added = False 
     
+    # [NEW] 워드 자동번호 인식용 카운터
+    auto_num_counters = collections.defaultdict(int)
+    
     pending_ranking_count = None
     ranking_options_buffer = []
     pending_max_n_count = None
@@ -689,19 +668,52 @@ def parse_word_to_df(docx_file):
 
     for block in iter_block_items(doc):
         if isinstance(block, Paragraph):
+            # [NEW] 워드 자동번호 인식 및 텍스트 병합
             text = block.text.strip()
+            
+            # 워드 자동번호(Numbering) 속성 확인
+            if block._p.pPr is not None and block._p.pPr.numPr is not None:
+                try:
+                    num_id = block._p.pPr.numPr.numId.val
+                    ilvl = block._p.pPr.numPr.ilvl.val if block._p.pPr.numPr.ilvl is not None else 0
+                    
+                    # 카운터 증가 (단순화된 로직: 같은 레벨이면 증가)
+                    auto_num_counters[(num_id, ilvl)] += 1
+                    num_val = auto_num_counters[(num_id, ilvl)]
+                    
+                    # 텍스트 앞에 번호 붙이기 (예: 1) 질문...)
+                    # 이미 번호가 텍스트에 있다면 중복 방지
+                    if not re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", text):
+                        text = f"{num_val}) {text}"
+                except:
+                    pass
+
             if not text: continue
             if re.match(r"^\[PROG", text, re.IGNORECASE) or re.match(r"^\(PROG", text, re.IGNORECASE): continue
             text = re.sub(r"\[PROG.*?\]", "", text, flags=re.IGNORECASE)
             text = re.sub(r"\(PROG.*?\)", "", text, flags=re.IGNORECASE)
             text = text.strip()
             if not text: continue
+            
             match_var = var_pattern.match(text)
             is_new_q = False
             if match_var:
                 temp_var = match_var.group(1)
-                if re.search(r"\d", temp_var) or any(temp_var.startswith(x) for x in allowed_starts):
+                # 시작 문자가 허용된 리스트에 있는지 확인 (Q, SQ 등)
+                is_valid_start = False
+                for start_char in allowed_starts:
+                    if temp_var.upper().startswith(start_char):
+                        is_valid_start = True
+                        break
+                
+                # 숫자만 있는 경우(1., 2.)는 질문일 수도 있고 보기일 수도 있음
+                # 문맥상 현재 질문이 없으면 질문으로 간주
+                if temp_var.replace(".", "").isdigit():
+                    if current_entry is None: is_new_code = True
+                    # 이미 질문이 있으면 보기일 확률 높음 -> is_new_q = False
+                elif is_valid_start:
                     if temp_var not in ["보기", "다음", "참고", "주"]: is_new_q = True
+            
             if is_new_q:
                 if current_entry and not is_parent_added:
                     flushed_data = flush_entry(current_entry)
