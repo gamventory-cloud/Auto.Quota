@@ -1,381 +1,285 @@
 import streamlit as st
 import pandas as pd
-import io
-import collections
 import numpy as np
-import altair as alt
-from joblib import Parallel, delayed, cpu_count
-import traceback
+import io
 import sys
 import os
+import random  # [추가] 랜덤 선발을 위해 필요
 
+# 상위 폴더의 utils.py를 불러오기 위한 경로 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils
 
+# 페이지 설정
 st.set_page_config(page_title="쿼터 솔루션", layout="wide")
 
+# 비밀번호 잠금
 if not utils.check_password():
     st.stop()
 
-st.title("📊 쿼터 자동 할당 솔루션 (Turbo + Visual)")
-n_cores = cpu_count()
-st.sidebar.caption(f"🖥️ CPU 코어: {n_cores}개 가동")
+st.title("📊 쿼터(Quota) 관리 솔루션")
 
-st.subheader("1. 데이터 업로드")
-data_file = st.file_uploader("설문 데이터", type=['csv', 'xlsx'], key="quota_up")
+# 탭 구성
+tab1, tab2 = st.tabs(["🎯 쿼터 맞추기 (Matching)", "📋 쿼터 현황 확인 (Checking)"])
 
-if data_file:
-    df_survey = utils.load_df(data_file)
-    st.success(f"로드 완료: {len(df_survey)}명")
-    st.divider()
+# ==============================================================================
+# [공통 함수] 데이터 정규화 및 갭 계산 (핵심 로직 개선)
+# ==============================================================================
 
-    st.subheader("2. 쿼터 설정")
-    use_main = st.checkbox("✅ 메인 쿼터 사용", value=True)
-    main_map = {}; algo_main_cols = []
+def normalize_val(val):
+    """
+    모든 값을 문자열로 변환하고, 엑셀에서 흔한 실수(.0) 및 공백을 제거하여 통일시킴
+    예: 1 (int) -> "1", 1.0 (float) -> "1", "1.0" (str) -> "1", " 1 " -> "1"
+    """
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s
+
+def calculate_gaps(current_df, quota_df):
+    """
+    현재 데이터(current_df)와 목표(quota_df) 간의 차이(Gap)를 정밀하게 계산
+    """
+    gaps = []
     
-    if use_main:
-        q_mode = st.radio("메인 쿼터 방식", ["엑셀 업로드", "화면 설계"], horizontal=True)
-        if q_mode == "엑셀 업로드":
-            qf = st.file_uploader("쿼터 파일", type=['xlsx'])
-            c1,c2,c3 = st.columns(3)
-            with c1: q1=st.selectbox("qt1", df_survey.columns)
-            with c2: q2=st.selectbox("qt2", df_survey.columns)
-            with c3: q3=st.selectbox("qt3", df_survey.columns)
-            if qf:
-                algo_main_cols=[q1,q2,q3]
-                try:
-                    raw = pd.read_excel(qf,0,header=None)
-                    flat = utils.transform_pivoted_quota(raw)
-                    main_map = {(r.qt1, r.qt2, r.qt3): r.target for r in flat.itertuples()}
-                except: st.error("엑셀 오류")
-        else:
-            rv = st.multiselect("행(Row) 변수", df_survey.columns)
-            cv = st.selectbox("열(Col) 변수", ["(선택)"]+list(df_survey.columns))
-            if rv and cv!="(선택)":
-                algo_main_cols = rv+[cv]
-                base = df_survey.copy()
-                for c in algo_main_cols:
-                    base[c]=base[c].apply(utils.clean_val)
-                    uv=sorted(base[c].unique(), key=utils.natural_key)
-                    base[c]=pd.Categorical(base[c], categories=uv, ordered=True)
-                pi = base.groupby(algo_main_cols, observed=False).size().unstack(fill_value=0)
-                ed = st.data_editor(pi.reset_index(), use_container_width=True, disabled=rv)
-                mlt = ed.melt(id_vars=rv, var_name=cv, value_name='target')
-                for _,r in mlt.iterrows():
-                    try:
-                        t=int(r['target'])
-                        if t>0: main_map[tuple(str(r[c]) for c in algo_main_cols)]=t
-                    except: pass
-    else:
-        main_map = {('All',): st.number_input("전체 목표", 1, 10000, 1000)}; algo_main_cols=[]
-
-    ex_configs = []
-    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4"])
-    
-    for i, tab in enumerate(tabs):
-        with tab:
-            ex_mode = st.radio(f"설정 방식 (그룹 {i+1})", ["단순형 (변수 값별 할당)", "조합형 (행/열 교차 할당)"], key=f"ex_mode_{i}", horizontal=True)
-            
-            config = {'cols': [], 'map': {}, 'name': f"Extra_{i+1}", 'mode': 'simple'}
-            
-            if ex_mode.startswith("단순형"):
-                config['mode'] = 'simple'
-                cols = st.multiselect(f"변수 선택 (그룹 {i+1})", df_survey.columns, key=f"ms{i}")
-                if cols:
-                    config['cols'] = cols
-                    auto_name = "_".join([str(c) for c in cols])
-                    config['name'] = utils.sanitize_sheet_name(auto_name)
-                    
-                    vals = []
-                    for _, r in df_survey[cols].fillna("").iterrows(): vals.extend(utils.collect_values_from_cols(r, cols))
-                    cnt = pd.DataFrame.from_dict(collections.Counter(vals), orient='index', columns=['현재']).reset_index()
-                    cnt.columns=['값','현재']; cnt['목표']=cnt['현재']
-                    cnt['srt']=cnt['값'].apply(utils.natural_key)
-                    ed = st.data_editor(cnt.sort_values('srt').drop(columns=['srt']), use_container_width=True, key=f"ed{i}")
-                    for _,r in ed.iterrows(): 
-                        if r['목표']>0: config['map'][str(r['값'])]=int(r['목표'])
-            
-            else:
-                config['mode'] = 'grid'
-                st.caption("메인 쿼터처럼 행과 열을 교차하여 상세 목표를 설정합니다.")
-                ex_rv = st.multiselect(f"행(Row) 변수 (그룹 {i+1})", df_survey.columns, key=f"ex_rv_{i}")
-                ex_cv = st.selectbox(f"열(Col) 변수 (그룹 {i+1})", ["(선택)"]+list(df_survey.columns), key=f"ex_cv_{i}")
-                
-                if ex_rv and ex_cv != "(선택)":
-                    target_cols = ex_rv + [ex_cv]
-                    config['cols'] = target_cols
-                    auto_name = "_".join([str(c) for c in target_cols])
-                    config['name'] = utils.sanitize_sheet_name(auto_name)
-                    
-                    base = df_survey.copy()
-                    for c in target_cols:
-                        base[c] = base[c].apply(utils.clean_val)
-                        uv = sorted(base[c].unique(), key=utils.natural_key)
-                        base[c] = pd.Categorical(base[c], categories=uv, ordered=True)
-                    
-                    pi = base.groupby(target_cols, observed=False).size().unstack(fill_value=0)
-                    ed = st.data_editor(pi.reset_index(), use_container_width=True, disabled=ex_rv, key=f"ex_ed_grid_{i}")
-                    
-                    mlt = ed.melt(id_vars=ex_rv, var_name=ex_cv, value_name='target')
-                    for _, r in mlt.iterrows():
-                        try:
-                            t = int(r['target'])
-                            if t > 0:
-                                key_tuple = tuple(str(r[c]) for c in target_cols)
-                                config['map'][key_tuple] = t
-                        except: pass
-
-            ex_configs.append(config)
-
-    st.divider()
-    st.subheader("3. 실행 옵션")
-    c1, c2 = st.columns(2)
-    with c1:
-        c_no = st.selectbox("ID 컬럼 (결과 확인용)", df_survey.columns)
-        tol = st.number_input("허용 오차", 0, 100, 0)
-    with c2:
-        iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
-        use_intval = st.checkbox("intval 최적화", value=True)
-        c_int = st.selectbox("intval 컬럼", df_survey.columns) if use_intval else None
-
-    if st.button("🚀 매칭 시작 (Turbo)", type="primary"):
-        if not main_map: st.error("목표 없음"); st.stop()
+    for _, row in quota_df.iterrows():
+        var_name = str(row['변수명']).strip()
+        # [핵심] 목표값 정규화
+        target_val = normalize_val(row['값'])
+        target_count = int(row['목표수'])
         
+        if current_df.empty:
+            current_count = 0
+        else:
+            # [핵심] 현재 데이터도 정규화하여 비교
+            # 해당 컬럼을 문자열로 변환 -> .0 제거 -> 공백 제거
+            if var_name in current_df.columns:
+                current_col_str = current_df[var_name].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                current_count = (current_col_str == target_val).sum()
+            else:
+                current_count = 0 # 변수명이 없으면 0 처리
+            
+        gap = target_count - current_count
+        
+        gaps.append({
+            "var": var_name,
+            "val": target_val, # 정규화된 값 저장
+            "target": target_count,
+            "current": current_count,
+            "gap": gap,
+            # 우선순위: 남은 비율이 높을수록(달성률이 낮을수록) 높게 설정
+            "priority": gap / target_count if target_count > 0 else 0 
+        })
+        
+    return pd.DataFrame(gaps)
+
+def best_fit_selection(raw_df, quota_df):
+    """
+    최적화 알고리즘: 목표 대비 가장 부족한(Gap이 큰) 그룹을 우선적으로 채우는 방식
+    """
+    df_pool = raw_df.copy()
+    
+    # 고유 ID 생성 (없으면)
+    if 'RESP_ID' not in df_pool.columns:
+        df_pool['RESP_ID'] = range(len(df_pool))
+        
+    df_selected = pd.DataFrame(columns=raw_df.columns)
+    
+    # 총 목표 N 계산 (첫 번째 변수의 목표 합계를 전체 N으로 가정)
+    if quota_df.empty:
+        return df_selected, pd.DataFrame()
+        
+    first_var = quota_df.iloc[0]['변수명']
+    total_target_n = quota_df[quota_df['변수명'] == first_var]['목표수'].sum()
+    
+    # 진행 상황 표시
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # 무한 루프 방지 (목표의 1.5배수까지만 반복)
+    max_loops = int(total_target_n * 1.5)
+    
+    for i in range(max_loops):
+        # 1. 현재 Gap 계산
+        gap_df = calculate_gaps(df_selected, quota_df)
+        
+        # 종료 조건: 모든 쿼터가 충족되었으면(Gap <= 0) 종료
+        if gap_df['gap'].max() <= 0:
+            status_text.success("🎉 모든 쿼터 목표 달성 완료!")
+            progress_bar.progress(1.0)
+            break
+            
+        # 종료 조건: 더 이상 뽑을 사람이 없으면 종료
+        if df_pool.empty:
+            status_text.warning("⚠️ 가용 풀이 소진되었습니다.")
+            break
+            
+        # 2. 우선순위 선정 (아직 덜 채운 조건들 중 Priority 높은 순)
+        active_gaps = gap_df[gap_df['gap'] > 0]
+        if active_gaps.empty:
+            break # 이론상 위에서 걸러지지만 안전장치
+            
+        # 3. 필요 집합(Needs) 생성 (각 변수별로 필요한 값들 미리 파악)
+        needs = {}
+        for _, r in active_gaps.iterrows():
+            if r['var'] not in needs: needs[r['var']] = []
+            needs[r['var']].append(r['val'])
+            
+        # 4. 최우선 타겟 선정 (가장 급한 불 끄기)
+        top_gap_row = active_gaps.sort_values('priority', ascending=False).iloc[0]
+        target_var = top_gap_row['var']
+        target_val = top_gap_row['val'] # 이미 normalize됨
+        
+        # 5. 후보자 필터링 (정규화 비교 적용)
+        # 풀의 해당 컬럼을 문자열로 변환 -> .0 제거 -> 타겟값과 비교
+        if target_var in df_pool.columns:
+            pool_col_norm = df_pool[target_var].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            candidates_mask = (pool_col_norm == target_val)
+            candidates = df_pool[candidates_mask]
+        else:
+            candidates = pd.DataFrame()
+        
+        if candidates.empty:
+            # 이 조건을 만족하는 사람이 없으면 다음 루프로 (해당 조건은 포기 상태가 됨)
+            # 무한 루프 방지를 위해 임시로 gap_df 조작 등이 필요할 수 있으나,
+            # 여기선 우선순위가 계속 바뀌므로 자연스럽게 다른 조건을 탐색하게 둠
+            continue
+            
+        # 6. 점수 산정 (이 사람을 뽑았을 때 다른 쿼터도 얼마나 채워주는지)
+        scores = []
+        for idx, row in candidates.iterrows():
+            score = 0
+            for var, needed_vals in needs.items():
+                if var == target_var: continue # 이미 타겟 조건은 만족함
+                
+                # 다른 변수 값도 정규화해서 비교
+                if var in row:
+                    val_norm = normalize_val(row[var])
+                    if val_norm in needed_vals:
+                        score += 1
+            scores.append((idx, score))
+            
+        # 7. 선발 (점수 높은 순, 동점이면 랜덤)
+        scores.sort(key=lambda x: x[1], reverse=True)
+        best_score = scores[0][1]
+        top_candidates = [x[0] for x in scores if x[1] == best_score]
+        chosen_idx = random.choice(top_candidates)
+        
+        # 8. 이동 (Pool -> Selected)
+        person = df_pool.loc[[chosen_idx]]
+        df_selected = pd.concat([df_selected, person])
+        df_pool = df_pool.drop(chosen_idx)
+        
+        # 진행률 업데이트
+        if total_target_n > 0:
+            prog = min(len(df_selected) / total_target_n, 1.0)
+            progress_bar.progress(prog)
+            status_text.text(f"매칭 진행 중... ({len(df_selected)} / {total_target_n} 명)")
+
+    return df_selected, gap_df
+
+# ==============================================================================
+# [Tab 1] 쿼터 맞추기 (Matching)
+# ==============================================================================
+with tab1:
+    st.header("🎯 최적 쿼터 매칭 (Best-Fit)")
+    st.markdown("전체 데이터에서 **목표 쿼터에 딱 맞는 인원**을 최적의 조합으로 선발합니다.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        raw_file = st.file_uploader("1. 전체 응답자 데이터(.xlsx)", type=["xlsx", "csv"], key="match_raw")
+    with col2:
+        quota_file = st.file_uploader("2. 목표 쿼터 설정표(.xlsx)", type=["xlsx", "csv"], key="match_quota")
+        
+    if raw_file and quota_file:
         try:
-            with st.spinner("종합 희소성 계산 및 병렬 연산 중..."):
-                df_proc = df_survey.copy()
-                if use_main:
-                    for c in algo_main_cols: df_proc[c] = df_proc[c].apply(utils.clean_val)
-                    m_keys = list(zip(*[df_proc[c] for c in algo_main_cols]))
-                else: m_keys = [('All',) for _ in range(len(df_proc))]
-
-                ex_keys_list = []
-                for cfg in ex_configs:
-                    if not cfg['cols']:
-                        ex_keys_list.append([[] for _ in range(len(df_proc))])
-                        continue
-                        
-                    if cfg['mode'] == 'simple':
-                        keys = df_proc.apply(lambda r: utils.collect_values_from_cols(r, cfg['cols']), axis=1).tolist()
+            df_raw = pd.read_excel(raw_file) if raw_file.name.endswith('xlsx') else pd.read_csv(raw_file)
+            df_quota = pd.read_excel(quota_file) if quota_file.name.endswith('xlsx') else pd.read_csv(quota_file)
+            
+            st.info(f"원본 데이터: {len(df_raw)}명 로드됨")
+            
+            if st.button("🚀 쿼터 매칭 시작", type="primary"):
+                with st.spinner("알고리즘이 최적의 조합을 계산 중입니다... (1분 내외 소요)"):
+                    final_df, final_gap = best_fit_selection(df_raw, df_quota)
+                    
+                    st.success(f"매칭 완료! 총 {len(final_df)}명 선발됨")
+                    
+                    # 1. 결과 다운로드
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        final_df.to_excel(writer, index=False)
+                    
+                    st.download_button(
+                        label="📥 선발된 데이터 다운로드 (Selected_Data.xlsx)",
+                        data=output.getvalue(),
+                        file_name="Selected_Data.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    
+                    # 2. 결과 리포트
+                    st.subheader("📈 쿼터 달성 결과")
+                    
+                    # 달성률 계산 및 스타일링
+                    final_gap['달성률'] = (final_gap['current'] / final_gap['target'] * 100).fillna(0).round(1).astype(str) + "%"
+                    
+                    def style_gap(v):
+                        return 'color: red; font-weight: bold;' if v > 0 else 'color: green;'
+                    
+                    st.dataframe(
+                        final_gap[['var', 'val', 'target', 'current', 'gap', '달성률']].style.applymap(style_gap, subset=['gap']),
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # 미달 항목 안내
+                    failed = final_gap[final_gap['gap'] > 0]
+                    if not failed.empty:
+                        st.error(f"총 {len(failed)}개 항목에서 목표를 채우지 못했습니다.")
                     else:
-                        for c in cfg['cols']: df_proc[c] = df_proc[c].apply(utils.clean_val)
-                        tuples = list(zip(*[df_proc[c] for c in cfg['cols']]))
-                        keys = [[t] for t in tuples]
-                    ex_keys_list.append(keys)
-
-                target_total = sum(main_map.values())
-                soft_target = target_total - tol
-                
-                # Score Calculation
-                m_cnt = collections.Counter(m_keys)
-                if use_main:
-                    score_main = np.array([m_cnt.get(k,0)/main_map.get(k,1) if main_map.get(k,0)>0 else 999 for k in m_keys])
-                else:
-                    score_main = np.ones(len(df_proc))
-
-                score_extras = np.zeros(len(df_proc))
-                for j, cfg in enumerate(ex_configs):
-                    if not cfg['cols']: continue
-                    all_vals = []
-                    for keys in ex_keys_list[j]: all_vals.extend(keys)
-                    ex_cnt_total = collections.Counter(all_vals)
-                    row_scores = []
-                    ex_map = cfg['map']
-                    for keys in ex_keys_list[j]:
-                        if not keys: row_scores.append(1.0); continue
-                        s_vals = []
-                        for k in keys:
-                            if k in ex_map and ex_map[k] > 0: s_vals.append(ex_cnt_total[k] / ex_map[k])
-                            else: s_vals.append(999)
-                        row_scores.append(min(s_vals))
-                    score_extras += np.array(row_scores)
-                
-                final_scarcity_scores = score_main + score_extras
-                
-                # Parallel
-                ipc = max(1, iters // n_cores)
-                res = Parallel(n_jobs=-1, backend="threading")(delayed(utils.simulation_worker)(
-                    i, ipc, df_proc.index.to_numpy(), final_scarcity_scores, m_keys, ex_keys_list, main_map, [c['map'] for c in ex_configs], soft_target
-                ) for i in range(n_cores))
-                
-                g_best_cnt = 0; g_best_idxs = []
-                for c, ixs in res:
-                    if c > g_best_cnt: g_best_cnt=c; g_best_idxs=ixs
-
-            is_fail = g_best_cnt < soft_target
-            
-            # -------------------------------------------------------------
-            # 엑셀 데이터 및 분석 준비
-            # -------------------------------------------------------------
-            fin_idxs = list(g_best_idxs)
-            m_keys_map = {idx: k for idx, k in zip(df_proc.index, m_keys)}
-            ex_keys_maps = [{idx: k for idx, k in zip(df_proc.index, k_list)} for k_list in ex_keys_list]
-            
-            final_m = collections.Counter()
-            final_exs = [collections.Counter() for _ in range(len(ex_configs))]
-            clean_fin_idxs = [int(idx) for idx in fin_idxs]
-            
-            for idx in clean_fin_idxs:
-                final_m[m_keys_map[idx]] += 1
-                for j, cfg in enumerate(ex_configs):
-                    if cfg['cols']:
-                        for k in ex_keys_maps[j][idx]: final_exs[j][k] += 1
-
-            recs = []
-            if is_fail:
-                if use_main:
-                    for k, tgt in main_map.items():
-                        act = final_m.get(k, 0); diff = tgt - act
-                        if diff > 0: 
-                            raw_avail = m_cnt.get(k, 0)
-                            reason = "⚠️ 물리적 부족" if raw_avail < tgt else "⚔️ 경합 부족"
-                            recs.append({'순서': 0, '구분': '메인 쿼터', '항목': " / ".join(k), '목표': tgt, '현재': act, '부족': diff, '진단': reason, '전체보유': raw_avail})
-                
-                for j, cfg in enumerate(ex_configs):
-                    if cfg['cols']:
-                        all_vals_raw = []
-                        for keys in ex_keys_list[j]: all_vals_raw.extend(keys)
-                        raw_cnt_map = collections.Counter(all_vals_raw)
-                        for k, tgt in cfg['map'].items():
-                            act = final_exs[j].get(k, 0); diff = tgt - act
-                            if diff > 0: 
-                                raw_avail = raw_cnt_map.get(k, 0)
-                                reason = "⚠️ 물리적 부족" if raw_avail < tgt else "⚔️ 경합 부족"
-                                display_item = " / ".join(k) if isinstance(k, tuple) else k
-                                recs.append({'순서': j+1, '구분': cfg['name'], '항목': display_item, '목표': tgt, '현재': act, '부족': diff, '진단': reason, '전체보유': raw_avail})
-
-            # 엑셀 데이터 생성
-            df_survey['Chk'] = "제외"
-            df_survey.loc[clean_fin_idxs, 'Chk'] = "통과"
-            
-            df_all = df_survey.sort_values(by=c_no, ascending=True)
-            df_pass = df_survey[df_survey['Chk'] == "통과"].sort_values(c_no, ascending=True)
-            
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine='xlsxwriter') as w:
-                df_all.to_excel(w, index=False, sheet_name='Result_All')
-                df_pass.to_excel(w, index=False, sheet_name='Result_Pass')
-                if recs: 
-                    df_excel = pd.DataFrame(recs)
-                    df_excel['sort_val'] = df_excel['항목'].apply(lambda x: tuple(utils.natural_key(x)))
-                    df_excel = df_excel.sort_values(by=['순서', 'sort_val'], ascending=[True, True])
-                    df_excel.drop(columns=['순서', 'sort_val']).to_excel(w, index=False, sheet_name='Shortage_Analysis')
-                if use_main:
-                        pd.DataFrame([{'G':str(k), 'T':v, 'A':final_m[k]} for k,v in main_map.items()]).to_excel(w, sheet_name='Main_Status')
-
-                for j, cfg in enumerate(ex_configs):
-                    if cfg['cols']:
-                        data_e = []
-                        for k, t in cfg['map'].items():
-                            k_str = " / ".join(k) if isinstance(k, tuple) else k
-                            data_e.append({'Value': k_str, 'Target': t, 'Actual': final_exs[j][k], 'Diff': t - final_exs[j][k]})
-                        pd.DataFrame(data_e).sort_values('Value', key=lambda c: c.map(utils.natural_key)).to_excel(w, sheet_name=cfg['name'], index=False)
-            
-            # -------------------------------------------------------------
-            # 결과 표시 섹션
-            # -------------------------------------------------------------
-            st.divider()
-            
-            st.subheader("📊 할당 결과 시각화")
-            
-            total_rows = len(df_survey)
-            pass_rows = len(df_pass)
-            exclude_rows = total_rows - pass_rows
-            
-            btn_label = "📥 결과 파일 다운로드 (Result.xlsx)" if not is_fail else "⚠️ 실패한 결과라도 다운로드"
-            st.download_button(btn_label, out.getvalue(), "result.xlsx", type="primary", use_container_width=True)
-            
-            # 상단 메트릭
-            rate = (g_best_cnt / target_total) * 100
-            c1, c2, c3 = st.columns(3)
-            c1.metric("📌 전체 목표", f"{target_total:,}명")
-            c2.metric("✅ 매칭 성공", f"{g_best_cnt:,}명")
-            delta_color = "normal" if not is_fail else "inverse"
-            c3.metric("📈 달성률", f"{rate:.1f}%", delta=f"{g_best_cnt - target_total}명" if is_fail else "목표 달성", delta_color=delta_color)
-
-            if is_fail:
-                st.error("⚠️ 목표 인원을 달성하지 못했습니다. 아래 분석 결과를 확인하세요.")
-            else:
-                st.success("🎉 목표 인원을 모두 달성했습니다!")
-            
-            # 차트
-            active_ex_cfgs = [(j, cfg) for j, cfg in enumerate(ex_configs) if cfg['cols']]
-            v_tabs = st.tabs(["메인 쿼터"] + [cfg['name'] for _, cfg in active_ex_cfgs])
-            
-            with v_tabs[0]:
-                if use_main:
-                    data_m = []
-                    for k, tgt in main_map.items():
-                        k_str = " / ".join(k)
-                        act = final_m[k]
-                        data_m.append({'Label': k_str, 'Type': '1.목표', 'Value': tgt})
-                        data_m.append({'Label': k_str, 'Type': '2.달성', 'Value': act})
-                    
-                    if data_m:
-                        df_chart_m = pd.DataFrame(data_m)
-                        df_chart_m['sort_val'] = df_chart_m['Label'].apply(lambda x: tuple(utils.natural_key(x)))
-                        df_chart_m = df_chart_m.sort_values('sort_val')
-                        sorted_labels = df_chart_m['Label'].unique().tolist()
+                        st.balloons()
                         
-                        chart_data = df_chart_m.drop(columns=['sort_val'])
-                        chart = alt.Chart(chart_data).mark_bar().encode(
-                            y=alt.Y('Label:N', axis=alt.Axis(title=None), sort=sorted_labels),
-                            x=alt.X('Value:Q', axis=alt.Axis(title='인원수')),
-                            color=alt.Color('Type:N', scale=alt.Scale(domain=['1.목표', '2.달성'], range=['#e0e0e0', '#4c78a8']), legend=alt.Legend(title="구분")),
-                            yOffset='Type:N'
-                        ).properties(height=max(300, len(main_map)*25))
-                        st.altair_chart(chart, use_container_width=True)
-                else:
-                    st.info("메인 쿼터 설정이 없습니다.")
+        except Exception as e:
+            st.error(f"오류 발생: {e}")
 
-            for idx, (j, cfg) in enumerate(active_ex_cfgs):
-                with v_tabs[idx + 1]:
-                    data_e = []
-                    for k, tgt in cfg['map'].items():
-                        k_str = " / ".join(k) if isinstance(k, tuple) else k
-                        act = final_exs[j][k]
-                        data_e.append({'Label': k_str, 'Type': '1.목표', 'Value': tgt})
-                        data_e.append({'Label': k_str, 'Type': '2.달성', 'Value': act})
-                    
-                    if data_e:
-                        df_chart_e = pd.DataFrame(data_e)
-                        df_chart_e['sort_val'] = df_chart_e['Label'].apply(lambda x: tuple(utils.natural_key(x)))
-                        df_chart_e = df_chart_e.sort_values('sort_val')
-                        sorted_labels_e = df_chart_e['Label'].unique().tolist()
-                        
-                        chart_data_e = df_chart_e.drop(columns=['sort_val'])
-                        chart = alt.Chart(chart_data_e).mark_bar().encode(
-                            y=alt.Y('Label:N', axis=alt.Axis(title=None), sort=sorted_labels_e),
-                            x=alt.X('Value:Q', axis=alt.Axis(title='인원수')),
-                            color=alt.Color('Type:N', scale=alt.Scale(domain=['1.목표', '2.달성'], range=['#e0e0e0', '#4c78a8']), legend=alt.Legend(title="구분")),
-                            yOffset='Type:N'
-                        ).properties(height=max(300, len(cfg['map'])*25))
-                        st.altair_chart(chart, use_container_width=True)
+# ==============================================================================
+# [Tab 2] 쿼터 현황 확인 (Checking)
+# ==============================================================================
+with tab2:
+    st.header("📋 현재 쿼터 달성 현황 점검")
+    st.markdown("현재 수집된 데이터가 **목표 쿼터를 얼마나 달성했는지** 확인합니다.")
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        check_raw_file = st.file_uploader("1. 현재 수집 데이터(.xlsx)", type=["xlsx", "csv"], key="check_raw")
+    with col4:
+        check_quota_file = st.file_uploader("2. 목표 쿼터 설정표(.xlsx)", type=["xlsx", "csv"], key="check_quota")
+        
+    if check_raw_file and check_quota_file:
+        try:
+            df_check_raw = pd.read_excel(check_raw_file) if check_raw_file.name.endswith('xlsx') else pd.read_csv(check_raw_file)
+            df_check_quota = pd.read_excel(check_quota_file) if check_quota_file.name.endswith('xlsx') else pd.read_csv(check_quota_file)
             
-            if recs:
-                st.divider()
-                st.subheader("📉 부족 쿼터 분석 및 진단")
-                df_recs = pd.DataFrame(recs)
-                df_recs['sort_val'] = df_recs['항목'].apply(lambda x: tuple(utils.natural_key(x)))
-                df_recs = df_recs.sort_values(by=['순서', 'sort_val'], ascending=[True, True])
-                st.dataframe(df_recs.drop(columns=['순서', 'sort_val']), use_container_width=True, hide_index=True)
-
-            # [Moved to Bottom] 제외된 ID 복사 기능 (세로 목록)
-            st.divider()
-            all_idxs = set(df_survey.index)
-            pass_idxs = set(clean_fin_idxs)
-            exclude_idxs = list(all_idxs - pass_idxs)
-            
-            if exclude_idxs:
-                st.subheader("📋 제외된 응답자 ID (복사 붙여넣기용)")
-                excluded_ids = df_survey.loc[exclude_idxs, c_no].tolist()
+            if st.button("🔍 현황 점검"):
+                # calculate_gaps 함수 재사용 (정규화 로직 포함됨)
+                gap_result = calculate_gaps(df_check_raw, df_check_quota)
                 
-                # 쉼표 대신 줄바꿈(\n)으로 연결하여 세로 목록 생성
-                id_text_vertical = "\n".join(map(str, excluded_ids))
+                # 달성률 계산
+                gap_result['달성률(%)'] = (gap_result['current'] / gap_result['target'] * 100).fillna(0).round(1)
                 
-                st.info(f"총 **{len(excluded_ids)}명**이 제외되었습니다. 오른쪽 위의 📄 아이콘을 누르면 세로 목록이 복사됩니다.")
-                st.code(id_text_vertical, language="text")
-            else:
-                st.success("🎉 제외된 인원이 없습니다. (모두 통과)")
+                # 보기 좋게 컬럼 정리
+                display_df = gap_result[['var', 'val', 'target', 'current', 'gap', '달성률(%)']].rename(columns={
+                    'var': '변수명', 'val': '값', 'target': '목표N', 'current': '현재N', 'gap': '부족분'
+                })
+                
+                # 스타일링 (부족하면 빨강, 달성하면 초록)
+                def highlight_status(row):
+                    if row['부족분'] > 0:
+                        return ['background-color: #ffe6e6'] * len(row) # 연한 빨강
+                    else:
+                        return ['background-color: #e6ffe6'] * len(row) # 연한 초록
 
-        except Exception as e: st.error("오류 발생"); st.code(traceback.format_exc())
+                st.subheader("📊 점검 결과")
+                st.dataframe(display_df.style.apply(highlight_status, axis=1), use_container_width=True, height=600)
+                
+        except Exception as e:
+            st.error(f"오류 발생: {e}")
