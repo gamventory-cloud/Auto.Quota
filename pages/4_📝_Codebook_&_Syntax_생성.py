@@ -283,26 +283,87 @@ def to_excel_with_usage_flag(df):
     return output.getvalue()
 
 # ==============================================================================
-# [Part 5] UI
+# Streamlit UI
 # ==============================================================================
+st.set_page_config(page_title="설문지 데이터 처리 마스터 (v100 Final)", layout="wide")
+st.title("📑 설문지 데이터 처리 마스터")
+st.markdown("""
+**[최종 업데이트 v100]**
+* **Save with KEEP:** SPSS 신택스 생성 시, '사용여부'가 O/R인 변수들만 `/KEEP=` 명령어로 길게 나열하여 저장하도록 변경했습니다.
+* **완벽 통합:** 기존의 모든 기능(순위형, 표 파싱, PROG 삭제, 하이픈 처리 등)이 포함된 최종 완성본입니다.
+""")
 
-tab1, tab2 = st.tabs(["1단계: 워드 분석", "2단계: SPSS 생성"])
+tab1, tab2 = st.tabs(["1단계: 워드 ➡️ 엑셀 생성", "2단계: 엑셀 ➡️ SPSS 생성"])
 
 with tab1:
-    f = st.file_uploader("설문지(.docx) 업로드", type=["docx"])
-    if f and st.button("분석 시작"):
-        df_raw = parse_word_to_df(f)
-        st.session_state['df_raw'] = df_raw
-        st.dataframe(df_raw, use_container_width=True)
-        st.download_button("📥 코드북 다운로드", to_excel_with_usage_flag(df_raw), "Codebook.xlsx")
+    st.header("1. 워드 파일 파싱")
+    uploaded_word = st.file_uploader("설문지(.docx) 업로드", type=["docx"], key="word_uploader")
+    if uploaded_word:
+        if st.button("분석 시작", key="btn_analyze"):
+            with st.spinner("문서 구조 정밀 분석 중..."):
+                try: 
+                    df_raw = parse_word_to_df(uploaded_word)
+                    st.session_state['df_raw'] = df_raw
+                    st.success(f"분석 완료! {len(df_raw)}개 항목 추출됨")
+                except Exception as e: 
+                    st.error(f"오류 발생: {e}")
+                    
+    if 'df_raw' in st.session_state:
+        st.subheader("📊 분석 결과 미리보기")
+        st.dataframe(st.session_state['df_raw'], use_container_width=True, height=400)
+        
+        st.info("아래 엑셀 파일을 다운로드하여 내용을 수정하세요.")
+        excel_data = to_excel_with_usage_flag(st.session_state['df_raw'])
+        st.download_button(
+            label="📥 편집용 코드북 다운로드 (Codebook.xlsx)",
+            data=excel_data,
+            file_name="Codebook_Draft.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
 
 with tab2:
-    excel_file = st.file_uploader("수정된 엑셀 업로드", type=["xlsx"])
-    if excel_file:
-        df_edit = pd.read_excel(excel_file)
+    st.header("2. SPSS 신택스 생성")
+    uploaded_excel = st.file_uploader("수정된 코드북(.xlsx) 업로드", type=["xlsx"], key="excel_uploader")
+    if uploaded_excel:
         try:
-            spss_syntax = utils.generate_spss_final(df_edit, encoding_type='utf-8')
-        except:
-            spss_syntax = generate_spss_syntax(df_edit)
-        st.code(spss_syntax, language="spss")
-        st.download_button("💾 신텍스 다운로드", spss_syntax.encode('utf-8-sig'), "Syntax.sps")
+            df_edited = pd.read_excel(uploaded_excel)
+            if '사용여부' not in df_edited.columns: 
+                st.error("⚠️ 1단계에서 생성된 엑셀 파일을 사용해주세요.")
+            else:
+                st.success("파일 로드 성공!")
+                df_filtered = df_edited[df_edited['사용여부'].isin(['O', 'R'])].copy()
+                st.write(f"총 {len(df_edited)}개 중 {len(df_filtered)}개 문항 선택됨")
+                
+                col1, col2 = st.columns(2)
+                
+                # Option 1: UTF-8
+                with col1:
+                    spss_utf8 = generate_spss_final(df_edited, encoding_type='utf-8')
+                    st.download_button(
+                        label="💾 (추천) SPSS 신택스 다운로드 (UTF-8)",
+                        data=spss_utf8.encode('utf-8-sig'), 
+                        file_name="Syntax_UTF8.sps",
+                        mime="text/plain",
+                        type="primary",
+                        use_container_width=True
+                    )
+                    st.caption("최신 버전 SPSS 사용 시 권장")
+
+                # Option 2: CP949
+                with col2:
+                    spss_cp949 = generate_spss_final(df_edited, encoding_type='cp949')
+                    st.download_button(
+                        label="💾 (구버전) SPSS 신택스 다운로드 (CP949)",
+                        data=spss_cp949.encode('cp949', errors='ignore'), 
+                        file_name="Syntax_CP949.sps",
+                        mime="text/plain",
+                        type="secondary",
+                        use_container_width=True
+                    )
+                    st.caption("SPSS에서 한글이 깨질 때 사용")
+                
+                with st.expander("신택스 내용 미리보기 (UTF-8 기준)"):
+                    st.code(spss_utf8, language="spss")
+        except Exception as e: 
+            st.error(f"파일 처리 중 오류: {e}")
