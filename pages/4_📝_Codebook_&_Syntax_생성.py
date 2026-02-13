@@ -33,10 +33,10 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Matrix 인식 강화)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (Matrix & Circle Number)")
 
 # ==============================================================================
-# [Part 2] 유틸리티 및 텍스트 처리 함수
+# [Part 2] 유틸리티 및 텍스트 처리 함수 (동그라미 숫자 대응)
 # ==============================================================================
 
 CIRCLE_MAP = {'①':'1','②':'2','③':'3','④':'4','⑤':'5','⑥':'6','⑦':'7','⑧':'8','⑨':'9','⑩':'10'}
@@ -45,18 +45,8 @@ def clean_empty_parentheses(text):
     if not text: return text
     return re.sub(r"\(\s*\)", "", text).strip()
 
-def clean_header_text(text):
-    text = text.strip()
-    match = re.search(r"([①-⑩]|\d+)", text)
-    if match:
-        raw_code = match.group(1)
-        code = CIRCLE_MAP.get(raw_code, raw_code)
-        label = re.sub(r"[\(\[\{\<]?\s*" + re.escape(raw_code) + r"\s*[\)\]\}\>]?[\.]?", "", text).strip()
-        if not label: label = f"{code}점"
-        return f"{code}={label}"
-    return f"{text}={text}"
-
 def extract_options_from_line(text):
+    # 동그라미 숫자(①-⑩) 또는 숫자/알파벳 + 기호 패턴 인식
     pattern = re.compile(r"([①-⑩]|(?:\d+|[a-zA-Z])[\)\.])")
     matches = list(pattern.finditer(text))
     if not matches: return []
@@ -78,47 +68,40 @@ def iter_block_items(parent):
         elif isinstance(child, CT_Tbl): yield Table(child, parent)
 
 # ==============================================================================
-# [Part 3] 테이블 추출기 (Matrix 대응 강화)
+# [Part 3] 테이블 추출기 (Matrix 7점 척도 특화)
 # ==============================================================================
 
-def extract_table_scale(table):
+def extract_matrix_scale(table):
+    """표 헤더와 내용을 분석하여 7점 척도 및 매트릭스 구조를 추출함"""
     rows = table.rows
     if len(rows) < 2: return None, False
-    headers = [cell.text.strip().replace('\n', ' ') for cell in rows[0].cells]
-    first_data_row = [cell.text.strip() for cell in rows[1].cells]
     
-    numeric_cells = []
-    for cell_text in first_data_row:
+    # 헤더에서 텍스트 레이블 추출
+    headers = [cell.text.strip().replace('\n', ' ') for cell in rows[0].cells]
+    
+    # 첫 번째 데이터 행에서 동그라미 숫자가 있는지 확인하여 척도 값 확정
+    first_data_cells = [cell.text.strip() for cell in rows[1].cells]
+    scale_values = []
+    for cell_text in first_data_cells:
         match = re.search(r"([①-⑩]|\d+)", cell_text)
         if match:
-            raw_code = match.group(1)
-            numeric_cells.append(CIRCLE_MAP.get(raw_code, raw_code))
-        else: numeric_cells.append(None)
-    
-    body_numeric_count = sum(1 for x in numeric_cells if x is not None)
-    if len(first_data_row) > 0 and (body_numeric_count / len(first_data_row)) >= 0.3:
+            raw = match.group(1)
+            scale_values.append(CIRCLE_MAP.get(raw, raw))
+        else:
+            scale_values.append(None)
+            
+    # 유효한 척도 값이 일정 비율 이상일 경우 매트릭스로 간주
+    valid_vals = [v for v in scale_values if v is not None]
+    if len(first_data_cells) > 0 and (len(valid_vals) / len(first_data_cells)) >= 0.3:
         scale_pairs = []
-        for i, h_text in enumerate(headers):
-            if i >= len(numeric_cells) or numeric_cells[i] is None: continue
-            if h_text: scale_pairs.append(f"{numeric_cells[i]}={h_text}")
-        if scale_pairs: return "\n".join(scale_pairs), True
+        for i, val in enumerate(scale_values):
+            if val is not None and i < len(headers) and headers[i]:
+                scale_pairs.append(f"{val}={headers[i]}")
+        return "\n".join(scale_pairs), True
     return None, False
 
-def extract_single_choice_options(table):
-    options = []
-    for row in table.rows:
-        cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
-        if not cells_text: continue
-        match = re.match(r"^([①-⑩]|\d+[\)\.])", cells_text[0])
-        if match:
-            raw_code = match.group(1).replace(')','').replace('.','')
-            code = CIRCLE_MAP.get(raw_code, raw_code)
-            label = " - ".join(cells_text[1:]) if len(cells_text) > 1 else cells_text[0][len(match.group(0)):].strip()
-            options.append(f"{code}={label}")
-    return "\n".join(options)
-
 # ==============================================================================
-# [Part 5] 메인 파서 (B1~B4 매트릭스 특화)
+# [Part 5] 메인 파서
 # ==============================================================================
 
 def parse_word_to_df(docx_file):
@@ -127,7 +110,6 @@ def parse_word_to_df(docx_file):
     var_pattern = re.compile(r"^([a-zA-Z가-힣0-9\-\_]+)(?:[\.\s]|\s+)(.*)")
     current_entry = None
     is_parent_added = False 
-    variable_map = {} 
 
     def flush_entry(entry):
         entry["질문 내용"] = clean_empty_parentheses(entry["질문 내용"])
@@ -138,7 +120,7 @@ def parse_word_to_df(docx_file):
             if opt_match:
                 raw_code = opt_match.group(1).replace(')','').replace('.','')
                 code = CIRCLE_MAP.get(raw_code, raw_code)
-                clean_opts.append(f"{code}={opt_match.group(2)}")
+                clean_opts.append(f"{code}={opt_match.group(2).strip()}")
             else: clean_opts.append(opt)
         entry["보기 값"] = "\n".join(clean_opts)
         if "보기_list" in entry: del entry["보기_list"]
@@ -148,6 +130,7 @@ def parse_word_to_df(docx_file):
         if isinstance(block, Paragraph):
             text = block.text.strip()
             if not text: continue
+            
             match_var = var_pattern.match(text)
             if match_var and any(match_var.group(1).upper().startswith(p) for p in ['Q','S','A','B','C','D']):
                 if current_entry and not is_parent_added:
@@ -162,36 +145,37 @@ def parse_word_to_df(docx_file):
 
         elif isinstance(block, Table):
             if not current_entry: continue
-            rows = block.rows
-            # 매트릭스 여부 및 척도 추출
-            table_vals, is_matrix_scale = extract_table_scale(block)
             
-            if is_matrix_scale:
+            # B1~B4 매트릭스 척도 처리
+            scale_str, is_matrix = extract_matrix_scale(block)
+            if is_matrix:
                 sub_cnt = 0
-                for row in rows[1:]:
+                for row in block.rows[1:]:
                     row_label = row.cells[0].text.strip()
-                    if not row_label or row_label in ["①", "②"]: continue
+                    if not row_label or row_label in CIRCLE_MAP: continue
                     sub_cnt += 1
                     extracted_data.append({
                         "변수명": f"{current_entry['변수명']}_{sub_cnt}",
                         "질문 내용": f"[{current_entry['변수명']}] {row_label}",
-                        "보기 값": table_vals, "유형": "Matrix"
+                        "보기 값": scale_str,
+                        "유형": "Matrix"
                     })
                 is_parent_added = True
             elif not is_parent_added:
-                # 단순 보기 테이블인 경우
-                opt_str = extract_single_choice_options(block)
-                if opt_str:
-                    current_entry["보기 값"] = opt_str
-                    extracted_data.extend(flush_entry(current_entry))
-                    is_parent_added = True
+                # 일반 보기 테이블 처리
+                for row in block.rows:
+                    opts = extract_options_from_line(" ".join([c.text for c in row.cells]))
+                    if opts: current_entry["보기_list"].extend(opts)
 
     if current_entry and not is_parent_added:
         extracted_data.extend(flush_entry(current_entry))
             
     return pd.DataFrame(extracted_data)
 
-# (이하 엑셀 생성 및 SPSS UI 로직은 원본과 동일하게 유지)
+# ==============================================================================
+# [UI & SPSS Export]
+# ==============================================================================
+
 def to_excel_with_usage_flag(df):
     rows = []
     for _, row in df.iterrows():
@@ -201,7 +185,8 @@ def to_excel_with_usage_flag(df):
         pd.DataFrame(rows).to_excel(writer, index=False)
     return output.getvalue()
 
-tab1, tab2 = st.tabs(["1단계: 워드 ➡️ 엑셀", "2단계: 엑셀 ➡️ SPSS"])
+tab1, tab2 = st.tabs(["1단계: 워드 분석", "2단계: SPSS 생성"])
+
 with tab1:
     f = st.file_uploader("설문지(.docx) 업로드", type=["docx"])
     if f and st.button("분석 시작"):
@@ -211,9 +196,14 @@ with tab1:
         st.download_button("📥 코드북 다운로드", to_excel_with_usage_flag(df_raw), "Codebook.xlsx")
 
 with tab2:
-    excel = st.file_uploader("수정된 엑셀 업로드", type=["xlsx"])
-    if excel:
-        df_edit = pd.read_excel(excel)
-        spss_utf8 = utils.generate_spss_final(df_edit, encoding_type='utf-8')
-        st.code(spss_utf8, language="spss")
-        st.download_button("💾 SPSS 신택스 다운로드", spss_utf8.encode('utf-8-sig'), "Syntax.sps")
+    excel_file = st.file_uploader("수정된 엑셀 업로드", type=["xlsx"])
+    if excel_file:
+        df_edit = pd.read_excel(excel_file)
+        # 에러 방지: utils 라이브러리의 함수명을 확인하여 호출 (보통 generate_spss_syntax 또는 generate_spss_final)
+        try:
+            spss_syntax = utils.generate_spss_final(df_edit, encoding_type='utf-8')
+        except AttributeError:
+            spss_syntax = utils.generate_spss_syntax(df_edit, encoding_type='utf-8')
+            
+        st.code(spss_syntax, language="spss")
+        st.download_button("💾 신텍스 다운로드", spss_syntax.encode('utf-8-sig'), "Syntax.sps")
