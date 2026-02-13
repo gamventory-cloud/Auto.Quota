@@ -33,7 +33,7 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (AHP & Full Logic)")
+st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (AHP & All Features)")
 
 # ==============================================================================
 # [Part 0] 동그라미 숫자 매핑 (추가됨)
@@ -133,11 +133,12 @@ def check_section_header(text, current_prefix):
     return new_prefix
 
 # ==============================================================================
-# [Part 3] 테이블 추출기 (Extractors)
+# [Part 3] 테이블 추출기 (Extractors) - 모든 기능 유지 + AHP 추가
 # ==============================================================================
 
 # [NEW] AHP 이원비교 테이블 전용 추출기 (Q11 등 대응)
 def extract_ahp_table(table, current_var):
+    """AHP 쌍대비교 테이블을 처리합니다."""
     rows = table.rows
     if len(rows) < 2: return None
     
@@ -225,7 +226,6 @@ def extract_embedded_open_entry(entry):
                     })
     return new_entries
 
-# 변수 매핑 테이블 (SQ8, SQ8-1, SQ10-1 등)
 def extract_mapped_option_table(table, extracted_data, variable_map, current_entry):
     rows = table.rows
     if len(rows) < 2: return None
@@ -626,6 +626,28 @@ def extract_table_scale(table):
             if idx == 0 and not re.search(r"\d", h_text): continue
             potential_values.append(clean_header_text(h_text))
         if potential_values: return "\n".join(potential_values), False
+    return None, False
+
+def extract_matrix_info(table):
+    """매트릭스 7점 척도 감지 및 분리 (extract_table_scale의 대안)"""
+    rows = table.rows
+    if len(rows) < 2: return None, False
+    headers = [cell.text.strip().replace('\n', ' ') for cell in rows[0].cells]
+    first_data_cells = [cell.text.strip() for cell in rows[1].cells]
+    scale_values = []
+    for cell_text in first_data_cells:
+        match = re.search(r"([①-⑩]|\d+)", cell_text)
+        if match:
+            raw = match.group(1)
+            scale_values.append(CIRCLE_MAP.get(raw, raw))
+        else: scale_values.append(None)
+    valid_vals = [v for v in scale_values if v is not None]
+    if len(first_data_cells) > 0 and (len(valid_vals) / len(first_data_cells)) >= 0.3:
+        scale_pairs = []
+        for i, val in enumerate(scale_values):
+            if val is not None and i < len(headers) and headers[i]:
+                scale_pairs.append(f"{val}={headers[i].strip()}")
+        return "\n".join(scale_pairs), True
     return None, False
 
 def is_input_table(table):
@@ -1074,7 +1096,7 @@ def parse_word_to_df(docx_file):
             
             new_entries = []
             
-            # [NEW] AHP 이원비교 우선 처리
+            # [NEW] AHP 이원비교 테이블 최우선 처리
             ahp_entries = extract_ahp_table(block, current_entry)
             if ahp_entries:
                 new_entries = ahp_entries
@@ -1163,14 +1185,19 @@ def parse_word_to_df(docx_file):
                         if not new_entries and current_entry:
                             table_vals_str, is_body_mapped = extract_table_scale(block)
                             is_matrix = False
-                            if len(rows) > 1:
-                                for row in rows[1:]:
-                                    fc = row.cells[0].text.strip()
-                                    # 동그라미 숫자 등의 척도값은 건너뛰고 질문라벨만 체크
-                                    if fc and not fc.isdigit() and fc not in ["○", "●", "V"] and fc not in CIRCLE_MAP: 
-                                        is_matrix = True; break
                             
-                            # [수정] B1-B4 매트릭스 척도 처리 강화
+                            # [FIX] B1~B4 Matrix Check (동그라미 숫자 척도 감지)
+                            matrix_vals, is_matrix_scale = extract_matrix_info(block)
+                            if is_matrix_scale:
+                                is_matrix = True
+                                table_vals_str = matrix_vals
+                            else:
+                                if len(rows) > 1:
+                                    for row in rows[1:]:
+                                        fc = row.cells[0].text.strip()
+                                        if fc and not fc.isdigit() and fc not in ["○", "●", "V"] and fc not in CIRCLE_MAP: 
+                                            is_matrix = True; break
+                            
                             if is_matrix:
                                 sub_cnt = 0
                                 for row in rows[1:]:
