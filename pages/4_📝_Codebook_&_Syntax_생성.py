@@ -33,12 +33,23 @@ st.set_page_config(page_title="설문지 코드북 생성", layout="wide")
 if not utils.check_password():
     st.stop()
 
-st.title("📝 설문지 읽기 & 코드북/신텍스 자동 생성 (AHP & All Features)")
+st.title("📝 설문지 파싱 & 신택스 생성 (원문자 및 AHP 표 인식 강화판)")
 
 # ==============================================================================
-# [Part 0] 동그라미 숫자 매핑 (추가됨)
+# [NEW] 원문자 변환 함수
 # ==============================================================================
-CIRCLE_MAP = {'①':'1','②':'2','③':'3','④':'4','⑤':'5','⑥':'6','⑦':'7','⑧':'8','⑨':'9','⑩':'10'}
+def convert_circled_num(text):
+    if not text: return text
+    circled_map = {
+        '①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5',
+        '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10',
+        '⑪': '11', '⑫': '12', '⑬': '13', '⑭': '14', '⑮': '15',
+        '⑯': '16', '⑰': '17', '⑱': '18', '⑲': '19', '⑳': '20'
+    }
+    for char, num in circled_map.items():
+        if char in text:
+            text = text.replace(char, num)
+    return text
 
 # ==============================================================================
 # [Part 1] 핵심 파싱 함수
@@ -68,19 +79,17 @@ def clean_empty_parentheses(text):
 
 def clean_header_text(text):
     text = text.strip()
-    # [수정] 동그라미 숫자 대응
-    match = re.search(r"([①-⑩]|\d+)", text)
+    match = re.search(r"(\d+)", text)
     if match:
-        raw_code = match.group(1)
-        code = CIRCLE_MAP.get(raw_code, raw_code)
-        label = re.sub(r"[\(\[\{\<]?\s*" + re.escape(raw_code) + r"\s*[\)\]\}\>]?[\.]?", "", text).strip()
+        code = match.group(1)
+        label = re.sub(r"[\(\[\{\<]?\s*" + code + r"\s*[\)\]\}\>]?[\.]?", "", text).strip()
         if not label: label = f"{code}점"
         return f"{code}={label}"
     return f"{text}={text}"
 
 def extract_options_from_line(text):
-    # [수정] 동그라미 숫자 포함 패턴
-    pattern = re.compile(r"([①-⑩]|(?:\d+|[a-zA-Z])[\)\.])")
+    # [수정] 원문자 및 점/괄호 없는 경우까지 포괄
+    pattern = re.compile(r"(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*")
     matches = list(pattern.finditer(text))
     if not matches:
         return []
@@ -88,10 +97,17 @@ def extract_options_from_line(text):
     for i in range(len(matches)):
         start = matches[i].start()
         end = matches[i+1].start() if i + 1 < len(matches) else len(text)
-        item = text[start:end].strip()
-        item = clean_empty_parentheses(item)
-        if item:
-            results.append(item)
+        
+        chunk = text[start:end].strip()
+        chunk = clean_empty_parentheses(chunk)
+        
+        m = pattern.match(chunk)
+        if m:
+            raw_code = m.group(1)
+            code = convert_circled_num(raw_code)
+            label = chunk[m.end():].strip()
+            # 무조건 "1) 보기" 형태로 정규화하여 리턴 (뒤쪽 로직 안정화)
+            results.append(f"{code}) {label}")
     return results
 
 def summarize_label_regex(text):
@@ -133,54 +149,8 @@ def check_section_header(text, current_prefix):
     return new_prefix
 
 # ==============================================================================
-# [Part 3] 테이블 추출기 (Extractors) - 모든 기능 유지 + AHP 추가
+# [Part 3] 테이블 추출기 (Extractors)
 # ==============================================================================
-
-# [NEW] AHP 이원비교 테이블 전용 추출기 (Q11 등 대응)
-def extract_ahp_table(table, current_var):
-    """AHP 쌍대비교 테이블을 처리합니다."""
-    rows = table.rows
-    if len(rows) < 2: return None
-    
-    # 헤더 분석: A와 B가 있고 척도(9, 7, 5...)가 있는지 확인
-    header_text = " ".join([c.text for c in rows[0].cells])
-    if not ("A" in header_text and "B" in header_text and ("중요" in header_text or "9" in header_text)):
-        return None
-
-    # AHP 9점 척도 정의
-    ahp_scale_pairs = [
-        "1=A 절대 중요(9)", "2=A 매우 중요(7)", "3=A 상당히 중요(5)", "4=A 약간 중요(3)", 
-        "5=A와 B 동등(1)", 
-        "6=B 약간 중요(3)", "7=B 상당히 중요(5)", "8=B 매우 중요(7)", "9=B 절대 중요(9)"
-    ]
-    scale_str = "\n".join(ahp_scale_pairs)
-    
-    extracted_entries = []
-    
-    for i, row in enumerate(rows[1:]):
-        cells = row.cells
-        if len(cells) < 3: continue
-        
-        # 좌측 항목(A)과 우측 항목(B) 추출
-        # 병합된 셀이나 빈 셀을 건너뛰고 텍스트가 있는 첫/마지막 셀 찾기
-        item_a = cells[0].text.strip()
-        item_b = cells[-1].text.strip()
-        
-        # 중간에 숫자가 없거나 A, B가 비어있으면 유효한 행이 아님
-        if not item_a or not item_b or item_a == item_b: 
-            continue
-            
-        var_name = f"{current_var['변수명']}_{i+1}"
-        label = f"[{current_var['변수명']}] {item_a} vs {item_b}"
-        
-        extracted_entries.append({
-            "변수명": var_name,
-            "질문 내용": label,
-            "보기 값": scale_str,
-            "유형": "Scale"
-        })
-        
-    return extracted_entries
 
 def check_mixed_text_input(entry):
     if entry["유형"] != "Single" and entry["유형"] != "Open": return [entry]
@@ -229,35 +199,34 @@ def extract_embedded_open_entry(entry):
 def extract_mapped_option_table(table, extracted_data, variable_map, current_entry):
     rows = table.rows
     if len(rows) < 2: return None
+    
     header_cells = [c.text.strip() for c in rows[0].cells]
     
     option_col_idx = -1
     for i, h in enumerate(header_cells):
-        if "보기" in h: option_col_idx = i; break
+        if "보기" in h:
+            option_col_idx = i
+            break
+    
     if option_col_idx == -1: return None
     
-    multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "모두 체크"]
-
     target_vars = {} 
     existing_vars = list(variable_map.keys())
     current_var_name = current_entry["변수명"] if current_entry else None
-    if current_var_name: existing_vars.append(current_var_name)
+    if current_var_name:
+        existing_vars.append(current_var_name)
     
-    def normalize_name(n): return re.sub(r"[^a-zA-Z0-9]", "", n).upper()
-
     for i, h in enumerate(header_cells):
         if i == option_col_idx: continue
-        norm_h = normalize_name(h)
-        if not norm_h: continue
+        clean_h = re.sub(r"[.\s]", "", h).replace("-", "_")
         for var_name in existing_vars:
-            norm_v = normalize_name(var_name)
-            if norm_h == norm_v or (len(norm_h) > 2 and norm_h in norm_v):
+            if clean_h == var_name or (len(clean_h) > 2 and clean_h in var_name):
                 target_vars[i] = var_name
                 break
                 
     if not target_vars: return None
     
-    var_options_map = {v: [] for v in target_vars.values()} 
+    var_options = {v: [] for v in target_vars.values()}
     
     for row in rows[1:]:
         if len(row.cells) <= option_col_idx: continue
@@ -265,58 +234,36 @@ def extract_mapped_option_table(table, extracted_data, variable_map, current_ent
         if not opt_text: continue
         
         code = ""; val = ""
-        # [수정] 동그라미 숫자 대응
-        match = re.match(r"^([①-⑩]|\d+|[a-zA-Z])[\)\.]?\s*(.*)", opt_text)
+        # [수정] 원문자 인식 추가
+        match = re.match(r"^(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*(.*)", opt_text)
         if match:
-            raw = match.group(1).replace(')','').replace('.','') 
-            code = CIRCLE_MAP.get(raw, raw)
+            code = convert_circled_num(match.group(1))
             val = match.group(2).strip()
-        else: val = opt_text
+        else:
+            val = opt_text
             
         for col_idx, var_name in target_vars.items():
             if len(row.cells) > col_idx:
                 check_val = row.cells[col_idx].text.strip()
                 if check_val:
                     final_code = check_val if check_val.isdigit() else code
-                    if final_code: var_options_map[var_name].append((final_code, val))
+                    if final_code:
+                        var_options[var_name].append(f"{final_code}={val}")
 
     updates = 0
-    vars_to_process = [v for v in var_options_map.keys() if v in variable_map]
-    vars_to_process.sort(key=lambda x: variable_map[x], reverse=True) 
-    
-    for var_name in vars_to_process:
-        opts_tuples = var_options_map[var_name] 
-        if not opts_tuples: continue
-        idx = variable_map[var_name]
-        original_item = extracted_data[idx]
-        is_multi = any(k in original_item["질문 내용"] for k in multi_keywords)
-        
-        if is_multi:
-            new_items = []
-            full_opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
-            for c, l in opts_tuples:
-                new_items.append({ "변수명": f"{var_name}_{c}", "질문 내용": f"{original_item['질문 내용']} ({l})", "보기 값": full_opts_str, "유형": "Multi" })
-            del extracted_data[idx]
-            for item in reversed(new_items): extracted_data.insert(idx, item)
-            updates += 1
-        else:
-            opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
-            extracted_data[idx]["보기 값"] = opts_str
-            updates += 1
-
-    if current_entry and current_entry["변수명"] in var_options_map:
-        opts_tuples = var_options_map[current_entry["변수명"]]
-        if opts_tuples:
-            if "보기_list" not in current_entry: current_entry["보기_list"] = []
-            opts_str = "\n".join([f"{c}={l}" for c, l in opts_tuples])
-            current_entry["보기 값"] = opts_str
-            for c, l in opts_tuples: current_entry["보기_list"].append(f"{c}) {l}")
+    for var_name, opts in var_options.items():
+        if opts and var_name in variable_map:
+            idx = variable_map[var_name]
+            if idx < len(extracted_data):
+                extracted_data[idx]["보기 값"] = "\n".join(opts)
+                updates += 1
+                
+    if current_entry and current_entry["변수명"] in var_options:
+        opts = var_options[current_entry["변수명"]]
+        if opts:
+            current_entry["보기 값"] = "\n".join(opts)
             updates += 1
                 
-    if updates > 0:
-        new_map = {}
-        for i, item in enumerate(extracted_data): new_map[item['변수명']] = i
-        variable_map.clear(); variable_map.update(new_map)
     return updates > 0
 
 def extract_unit_input_table(table, current_var):
@@ -328,21 +275,30 @@ def extract_unit_input_table(table, current_var):
     if unit_col_idx == -1 and len(table.rows) > 1:
          for i, cell in enumerate(table.rows[-1].cells):
             if any(u in cell.text for u in unit_keywords): unit_col_idx = i; break
+                
     label_col_idx = 0
     if len(table.columns) > 1:
         if unit_col_idx == 1: label_col_idx = 0
         else: label_col_idx = 1
+        
     for i, row in enumerate(table.rows):
         cells = row.cells
         if len(cells) <= label_col_idx: continue
         row_label = cells[label_col_idx].text.strip()
         if row_label.isdigit() and len(cells) > label_col_idx + 1: row_label = cells[label_col_idx + 1].text.strip()
         if not row_label or "입력" in row_label: continue
+        
         unit = ""
         if unit_col_idx != -1 and len(cells) > unit_col_idx:
             unit_text = cells[unit_col_idx].text.strip()
             if unit_text in unit_keywords: unit = f" ({unit_text})"
-        extracted.append({ "변수명": f"{current_var['변수명']}_{i+1}", "질문 내용": f"[{current_var['변수명']}] {row_label}{unit}", "보기 값": "(숫자입력)", "유형": "Open" })
+        
+        extracted.append({
+            "변수명": f"{current_var['변수명']}_{i+1}",
+            "질문 내용": f"[{current_var['변수명']}] {row_label}{unit}",
+            "보기 값": "(숫자입력)",
+            "유형": "Open"
+        })
     return extracted
 
 def extract_child_demographics_table(table, current_var):
@@ -362,11 +318,8 @@ def extract_child_demographics_table(table, current_var):
         if gender_opts:
             g_lines = []
             for opt in gender_opts:
-                # [수정] 동그라미 숫자 대응
-                m = re.match(r"^([①-⑩]|\d+|[a-zA-Z])[\)\.]?\s*(.*)", opt)
-                if m: 
-                    code = CIRCLE_MAP.get(m.group(1), m.group(1).replace(')','').replace('.',''))
-                    g_lines.append(f"{code}={m.group(2).strip()}")
+                m = re.match(r"(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*(.*)", opt)
+                if m: code, val = m.groups(); g_lines.append(f"{convert_circled_num(code)}={val.strip()}")
                 else: g_lines.append(opt)
             gender_vals_str = "\n".join(g_lines)
         extracted_entries.append({ "변수명": f"{current_var['변수명']}_{i+1}_1", "질문 내용": f"[{current_var['변수명']}] {row_label} - 성별", "보기 값": gender_vals_str, "유형": "Single" })
@@ -392,49 +345,16 @@ def extract_time_split_table(table, current_var):
 
 def extract_horizontal_scale_table(table, current_var):
     rows = table.rows
-    if len(rows) < 2: return None
-    
-    numeric_row_idx = -1
-    label_row_idx = -1
-    
-    for i, row in enumerate(rows):
-        cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
-        if not cells_text: continue
-        # [수정] 동그라미 숫자 감지 강화
-        numeric_count = sum(1 for t in cells_text if t.isdigit() or t in CIRCLE_MAP)
-        if len(cells_text) > 0 and (numeric_count / len(cells_text)) > 0.7:
-            numeric_row_idx = i
-        elif len(cells_text) > 0:
-            label_row_idx = i
-            
-    if numeric_row_idx == -1: return None
-    
-    codes = []
-    for c in rows[numeric_row_idx].cells:
-        t = c.text.strip()
-        if not t: continue
-        # [수정] 동그라미 숫자를 아라비아 숫자로 변환
-        codes.append(CIRCLE_MAP.get(t, t))
-
-    labels = []
-    if label_row_idx != -1:
-        labels = [c.text.strip() for c in rows[label_row_idx].cells if c.text.strip()]
-    
+    headers = [c.text.strip() for c in rows[0].cells]
+    values = [c.text.strip() for c in rows[1].cells]
+    row0_digits = sum(1 for x in headers if x.isdigit())
+    row1_digits = sum(1 for x in values if x.isdigit())
     scale_pairs = []
-    
-    # 모든 코드를 살리되, 라벨이 부족하면 양극단 매핑
-    if codes:
-        if len(labels) == 2: # 양극단
-            scale_pairs.append(f"{codes[0]}={labels[0]}")
-            for c in codes[1:-1]: scale_pairs.append(f"{c}={c}점")
-            scale_pairs.append(f"{codes[-1]}={labels[1]}")
-        elif len(labels) == len(codes): # 1:1 매핑
-             for i in range(len(codes)): scale_pairs.append(f"{codes[i]}={labels[i]}")
-        else: # 매핑 애매하면 그냥 순서대로 넣고 나머진 점수
-             for i, c in enumerate(codes):
-                 if i < len(labels): scale_pairs.append(f"{c}={labels[i]}")
-                 else: scale_pairs.append(f"{c}={c}점")
-
+    if row1_digits > row0_digits: codes = values; labels = headers
+    else: codes = headers; labels = values
+    for i in range(min(len(codes), len(labels))):
+        c = codes[i]; l = labels[i]
+        if c and l: scale_pairs.append(f"{c}={l}")
     if scale_pairs:
         current_var["보기 값"] = "\n".join(scale_pairs)
         return [current_var]
@@ -464,8 +384,7 @@ def extract_plain_input_table(table, current_var):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
         if not cells_text: continue
         row_full_text = " ".join(cells_text)
-        # [수정] 동그라미 숫자 패턴 회피
-        if re.search(r"([①-⑩]|\d+|[a-zA-Z])[\)\.]", row_full_text): continue
+        if re.search(r"(\d+|[①-⑳]|[a-zA-Z])[\)\.]", row_full_text): continue
         clean_label = re.sub(r"\(\s*입력.*?\)", "", row_full_text).replace(":", "").strip()
         clean_label = re.sub(r"[a-zA-Z]+$", "", clean_label).strip()
         if not clean_label: continue
@@ -489,7 +408,7 @@ def extract_constant_sum_table(table, current_var):
 
 def is_multiple_choice(entry):
     vals = str(entry.get("보기 값", "")); q_text = str(entry.get("질문 내용", ""))
-    if re.search(r"([①-⑩]|\d+[\)\.])", vals) or "=" in vals: return True
+    if re.search(r"\d+[\)\.]", vals) or "=" in vals: return True
     if "선택]" in q_text: return True
     return False
 
@@ -591,63 +510,37 @@ def extract_double_scale_table(table, current_var):
         extracted_entries.append(entry1); extracted_entries.append(entry2)
     return extracted_entries
 
+# [수정] 일반 척도형 인식 강화 (Q5~Q9)
 def extract_table_scale(table):
     rows = table.rows
     if len(rows) < 2: return None, False
-    headers = [cell.text.strip().replace('\n', ' ') for cell in rows[0].cells]
-    first_data_row = [cell.text.strip() for cell in rows[1].cells]
     
-    numeric_cells = []
-    for cell_text in first_data_row:
-        if "입력" in cell_text or "범위" in cell_text or "%" in cell_text: numeric_cells.append(None); continue
-        
-        # [수정] 동그라미 숫자 대응 (B1-B4 매트릭스 등)
-        match = re.search(r"([①-⑩]|\d+)", cell_text)
-        if match: 
-            raw_code = match.group(1)
-            numeric_cells.append(CIRCLE_MAP.get(raw_code, raw_code))
-        else: numeric_cells.append(None)
+    num_row_idx = -1
+    for i, row in enumerate(rows):
+        cells_text = [c.text.strip() for c in row.cells]
+        digits = [x for x in cells_text if x.isdigit()]
+        if len(digits) >= 3 and len(digits) / max(1, len([x for x in cells_text if x])) > 0.5:
+            num_row_idx = i
+            break
             
-    body_numeric_count = sum(1 for x in numeric_cells if x is not None)
-    if len(first_data_row) > 0 and (body_numeric_count / len(first_data_row)) >= 0.3:
-        scale_pairs = []
-        for i, val in enumerate(numeric_cells):
-            if i >= len(headers): break
-            if val is not None and headers[i]: 
-                scale_pairs.append(f"{val}={headers[i].strip()}")
-        if scale_pairs: return "\n".join(scale_pairs), True
-
-    # 헤더에 숫자가 있는 경우 (기존 로직)
-    potential_values = []
-    header_numeric_count = sum(1 for h in headers if re.search(r"(\d)", h))
-    if len(headers) > 0 and (header_numeric_count / len(headers)) >= 0.3:
-        for idx, h_text in enumerate(headers):
-            if not h_text: continue
-            if idx == 0 and not re.search(r"\d", h_text): continue
-            potential_values.append(clean_header_text(h_text))
-        if potential_values: return "\n".join(potential_values), False
-    return None, False
-
-def extract_matrix_info(table):
-    """매트릭스 7점 척도 감지 및 분리 (extract_table_scale의 대안)"""
-    rows = table.rows
-    if len(rows) < 2: return None, False
-    headers = [cell.text.strip().replace('\n', ' ') for cell in rows[0].cells]
-    first_data_cells = [cell.text.strip() for cell in rows[1].cells]
-    scale_values = []
-    for cell_text in first_data_cells:
-        match = re.search(r"([①-⑩]|\d+)", cell_text)
-        if match:
-            raw = match.group(1)
-            scale_values.append(CIRCLE_MAP.get(raw, raw))
-        else: scale_values.append(None)
-    valid_vals = [v for v in scale_values if v is not None]
-    if len(first_data_cells) > 0 and (len(valid_vals) / len(first_data_cells)) >= 0.3:
-        scale_pairs = []
-        for i, val in enumerate(scale_values):
-            if val is not None and i < len(headers) and headers[i]:
-                scale_pairs.append(f"{val}={headers[i].strip()}")
-        return "\n".join(scale_pairs), True
+    if num_row_idx != -1:
+        codes = [c.text.strip() for c in rows[num_row_idx].cells if c.text.strip().isdigit()]
+        headers = [c.text.strip() for c in rows[0].cells]
+        
+        scale_opts = []
+        for h in headers:
+            m = re.search(r'(\d+)', h)
+            if m:
+                c_code = m.group(1)
+                c_label = re.sub(r'\s+', ' ', h.replace(c_code, '')).strip()
+                if c_label and c_label not in ["척도", "구분", "항목", "내용"]:
+                    scale_opts.append(f"{c_code}={c_label}")
+        
+        if not scale_opts:
+            scale_opts = [f"{c}={c}" for c in codes]
+            
+        return "\n".join(scale_opts), True
+        
     return None, False
 
 def is_input_table(table):
@@ -667,8 +560,7 @@ def extract_multi_column_input_table(table, current_var, force_row_count=None):
     non_empty_headers = [h for h in headers if h]
     if len(non_empty_headers) < 1: return None
     first_data_row_cells = [c.text.strip() for c in rows[1].cells[1:]] 
-    # [수정] 동그라미 숫자 대응
-    digit_count = sum(1 for c in first_data_row_cells if (c.isdigit() or c in CIRCLE_MAP) and len(c) == 1)
+    digit_count = sum(1 for c in first_data_row_cells if c.isdigit() and len(c) == 1)
     if len(first_data_row_cells) > 0 and (digit_count / len(first_data_row_cells)) > 0.5: return None
     extracted_entries = []
     actual_data_rows = len(rows) - 1
@@ -720,8 +612,7 @@ def check_and_split_max_n_text(entry):
 
 def is_option_description_table(table):
     if len(table.rows) < 1: return False
-    # [수정] 동그라미 숫자 대응
-    pattern = re.compile(r"^([①-⑩]|\d+|[a-zA-Z])[\)\.]")
+    pattern = re.compile(r"^(\d+|[①-⑳]|[a-zA-Z])[\)\.]")
     match_count = 0
     for row in table.rows:
         if not row.cells: continue
@@ -735,12 +626,10 @@ def extract_single_choice_options(table):
         cells_text = [c.text.strip() for c in row.cells if c.text.strip()]
         if not cells_text: continue
         first_cell_text = cells_text[0]
-        # [수정] 동그라미 숫자 대응
-        match = re.match(r"^([①-⑩]|\d+|[a-zA-Z])[\)\.]", first_cell_text)
+        match = re.match(r"^(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*(.*)", first_cell_text)
         if match:
-            raw_code = match.group(1).replace(')','').replace('.','')
-            code = CIRCLE_MAP.get(raw_code, raw_code)
-            clean_first = first_cell_text[len(match.group(0)):].strip()
+            code = convert_circled_num(match.group(1))
+            clean_first = match.group(2).strip()
             label_parts = []
             if clean_first: label_parts.append(clean_first)
             if len(cells_text) > 1: label_parts.extend(cells_text[1:])
@@ -782,11 +671,18 @@ def analyze_table_structure(table):
     row0_digits = 0; row0_len = 0
     row1_digits = 0; row1_len = 0
     
-    # [NEW] 보기 목록형 테이블 감지 (SQ8)
+    # [NEW] AHP 테이블 감지 (Q11 등 쌍대비교)
+    if len(rows) > 0 and len(rows[0].cells) >= 3:
+        h_first = rows[0].cells[0].text.strip()
+        h_last = rows[0].cells[-1].text.strip()
+        if "A" in h_first and "B" in h_last:
+            mid_cells = [c.text for c in rows[0].cells[1:-1]]
+            if any(re.search(r'\d', c) for c in mid_cells):
+                return "AHP_PAIRWISE"
+    
     if "보기" in [c.text.strip() for c in rows[0].cells]:
         return "MAPPED_OPTION"
     
-    # [NEW] 단위 입력형 테이블 감지 (SQ6)
     unit_keywords = ["명", "세", "개", "원", "년"]
     has_unit_col = False
     for row in rows:
@@ -794,18 +690,6 @@ def analyze_table_structure(table):
             has_unit_col = True
             break
     if has_unit_col: return "UNIT_INPUT"
-    
-    # [FIX] 수평 척도형 테이블 감지 로직 강화 (B1-1)
-    has_numeric_row = False
-    for row in rows:
-        cells = [c.text.strip() for c in row.cells if c.text.strip()]
-        if len(cells) >= 5: # 최소 5점 척도 이상
-            # [수정] 동그라미 숫자 감지 강화
-            digit_count = sum(1 for c in cells if c.isdigit() or c in CIRCLE_MAP)
-            if digit_count / len(cells) > 0.8: 
-                has_numeric_row = True
-                break
-    if has_numeric_row: return "HORIZONTAL_SCALE"
 
     for i, row in enumerate(rows):
         row_txt = " ".join([c.text.strip() for c in row.cells])
@@ -813,46 +697,37 @@ def analyze_table_structure(table):
         if i == 0: 
             first_row_text = row_txt
             row0_len = len(row.cells)
-            # [수정] 동그라미 숫자 감지
-            row0_digits = sum(1 for c in row.cells if re.search(r"^([①-⑩]|\d+)[\)\.]?$", c.text.strip()))
+            row0_digits = sum(1 for c in row.cells if re.search(r"^\d+$|^\d+\)", c.text.strip()))
         if i == 1: 
             second_row_text = row_txt
             row1_len = len(row.cells)
-            # [수정] 동그라미 숫자 감지
-            row1_digits = sum(1 for c in row.cells if (c.text.strip().isdigit() or c.text.strip() in CIRCLE_MAP))
+            row1_digits = sum(1 for c in row.cells if c.text.strip().isdigit())
             
         if any(k in row_txt for k in input_keywords): has_input_pattern = True
 
-    # 1. [최우선] 매트릭스 척도형 (E1-1 방어용)
     if len(table.columns) >= 4 and row0_digits >= 3 and not has_input_pattern:
         return "STANDARD"
 
-    # 2. 자녀 정보 (SQ6)
     if "성별" in all_text and ("생년" in all_text or "생일" in all_text): return "CHILD_DEMO"
     
-    # 3. 시간 분할 (세로형 - A2, A4)
     if "시간" in all_text and "분" in all_text and has_input_pattern:
         if len(table.columns) <= 4:
             return "TIME_SPLIT"
 
-    # 4. 가로형 척도 (B2, A10-1)
     if len(rows) == 2 and not has_input_pattern:
         row0_is_numeric = row0_len > 0 and (row0_digits / row0_len) > 0.5
         row1_is_numeric = row1_len > 0 and (row1_digits / row1_len) > 0.5
         if (row0_is_numeric and not row1_is_numeric) or (not row0_is_numeric and row1_is_numeric):
             return "HORIZONTAL_SCALE"
 
-    # 5. 가로형 입력 (B3, B4)
     is_row1_input = any(k in second_row_text for k in input_keywords)
     if len(rows) >= 2 and len(table.columns) >= 2 and is_row1_input:
         return "HORIZONTAL_INPUT"
     
-    # 6. 고정 합계
     if ("합계" in all_text or "Total" in all_text) and ("%" in all_text or "100" in all_text):
         if len(table.columns) == 2: return "CONSTANT_SUM"
         
-    # 7. 단순 입력 (A1)
-    is_option_table = bool(re.search(r"([①-⑩]|\d+|[a-zA-Z])[\)\.]", first_row_text))
+    is_option_table = bool(re.search(r"(\d+|[①-⑳]|[a-zA-Z])[\)\.]", first_row_text))
     if has_input_pattern and not is_option_table and len(table.columns) <= 2: return "PLAIN_INPUT"
     
     return "STANDARD"
@@ -865,18 +740,13 @@ def parse_word_to_df(docx_file):
     doc = Document(docx_file)
     extracted_data = []
     var_pattern = re.compile(r"^([a-zA-Z가-힣0-9\-\_]+)(?:[\.\s]|\s+)(.*)")
-    # [SQ10 해결] 띄어쓰기 포함된 키워드 추가
     multi_keywords = ["복수응답", "모두 선택", "중복선택", "중복 응답", "모두 골라", "중복 선택", "복수 선택", "중복가능", "모두 체크", "모두 응답"]
     current_entry = None
     is_parent_added = False 
     
-    # [NEW] 섹션 인식 변수
     current_prefix = "Q"
     prefix_counters = collections.defaultdict(int)
-    
-    # [NEW] 워드 자동번호 인식용 카운터
     auto_num_counters = collections.defaultdict(int)
-    
     variable_map = {} 
     
     pending_ranking_count = None
@@ -896,7 +766,6 @@ def parse_word_to_df(docx_file):
                 results.append({ "변수명": f"{entry['변수명']}_{i}", "질문 내용": f"{entry['질문 내용']} ({i}순위)", "보기 값": final_opts_str, "유형": "Ranking_Sel" })
             return results
         if pending_max_n_count is not None:
-            # [FIX] 보기가 있는 경우(Mapped Table 등에서 유입), Open이 아니라 Selection으로 처리
             has_options = bool(entry.get("보기 값") or entry.get("보기_list"))
             opts_str = entry.get("보기 값", "")
             if not opts_str and entry.get("보기_list"):
@@ -905,16 +774,11 @@ def parse_word_to_df(docx_file):
             new_entries = []
             for i in range(1, pending_max_n_count + 1):
                 if has_options:
-                    # 보기가 있으면 Ranking_Sel로 변경
-                    v = entry.copy()
-                    v["변수명"] = f"{entry['변수명']}_{i}"
-                    v["질문 내용"] = f"[{entry['변수명']}] {i}순위"
-                    v["보기 값"] = opts_str
-                    v["유형"] = "Ranking_Sel"
+                    v = entry.copy(); v["변수명"] = f"{entry['변수명']}_{i}"; v["질문 내용"] = f"[{entry['변수명']}] {i}순위"
+                    v["보기 값"] = opts_str; v["유형"] = "Ranking_Sel"
                     if "보기_list" in v: del v["보기_list"]
                     new_entries.append(v)
                 else:
-                    # 기존 주관식 처리
                     has_manufacturer = "제조사" in entry["질문 내용"]; has_brand = "브랜드" in entry["질문 내용"]
                     if has_manufacturer and has_brand:
                         v1 = entry.copy(); v1["변수명"] = f"{entry['변수명']}_{i}_1"; v1["질문 내용"] = f"[{entry['변수명']}] {i}순위 - 제조사"; v1["유형"] = "Open"
@@ -936,35 +800,22 @@ def parse_word_to_df(docx_file):
         if is_multi and raw_options:
             full_options_str_list = []
             for opt in raw_options:
-                # [수정] 동그라미 숫자 대응
-                opt_match = re.match(r"^\s*([①-⑩]|\d+|[a-zA-Z])[\)\.]\s*(.*)", opt)
+                opt_match = re.match(r"^\s*(\d+|[a-zA-Z])[\)\.\s]\s*(.*)", opt) # 정규화된 형태
                 if opt_match:
-                    raw_code = opt_match.group(1).replace(')','').replace('.','')
-                    code = CIRCLE_MAP.get(raw_code, raw_code)
-                    label = clean_empty_parentheses(opt_match.group(2))
+                    code, label = opt_match.groups(); label = clean_empty_parentheses(label)
                     full_options_str_list.append(f"{code}={label}")
+                elif "=" in opt:
+                    full_options_str_list.append(opt)
             full_options_str = "\n".join(full_options_str_list)
             results = []
             for opt in raw_options:
-                opt_match = re.match(r"^\s*([①-⑩]|\d+|[a-zA-Z])[\)\.]\s*(.*)", opt)
+                opt_match = re.match(r"^\s*(\d+|[a-zA-Z])[\)\.\s]\s*(.*)", opt)
                 if opt_match:
-                    raw_code = opt_match.group(1).replace(')','').replace('.','')
-                    code = CIRCLE_MAP.get(raw_code, raw_code)
-                    label = clean_empty_parentheses(opt_match.group(2))
+                    code, label = opt_match.groups(); label = clean_empty_parentheses(label) 
                     results.append({ "변수명": f"{entry['변수명']}_{code}", "질문 내용": f"{entry['질문 내용']} ({label})", "보기 값": full_options_str, "유형": "Multi" })
             return results
         else:
-            # 단일 선택 보기 변환
-            clean_opts = []
-            for opt in raw_options:
-                opt_match = re.match(r"^\s*([①-⑩]|\d+|[a-zA-Z])[\)\.]\s*(.*)", opt)
-                if opt_match:
-                    raw_code = opt_match.group(1).replace(')','').replace('.','')
-                    code = CIRCLE_MAP.get(raw_code, raw_code)
-                    clean_opts.append(f"{code}={clean_empty_parentheses(opt_match.group(2))}")
-                else: clean_opts.append(opt)
-
-            entry["보기 값"] = "\n".join(clean_opts)
+            entry["보기 값"] = "\n".join(raw_options)
             if "보기_list" in entry: del entry["보기_list"]
             
             mixed_input = check_mixed_text_input(entry)
@@ -982,7 +833,6 @@ def parse_word_to_df(docx_file):
             return split_entries
 
     for block in iter_block_items(doc):
-        # 표 내부 섹션 헤더 감지
         if isinstance(block, Table):
             if len(block.rows) > 0 and len(block.rows[0].cells) > 0:
                 first_cell_text = block.rows[0].cells[0].text
@@ -999,7 +849,7 @@ def parse_word_to_df(docx_file):
                     auto_num_counters[(num_id, ilvl)] += 1
                     num_val = auto_num_counters[(num_id, ilvl)]
                     
-                    if not re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", text):
+                    if not re.match(r"^(\d+|[①-⑳]|[a-zA-Z])[\)\.]", text):
                         if "?" in text or "다." in text or "시오" in text or len(text) > 40:
                             prefix_counters[current_prefix] += 1
                             q_num = prefix_counters[current_prefix]
@@ -1040,45 +890,45 @@ def parse_word_to_df(docx_file):
                             extracted_data.append(item)
                             
                 var_name = match_var.group(1).replace("-", "_"); label = match_var.group(2)
-                inline_opts = extract_options_from_line(label)
+                
+                # 라인에 포함된 보기 강제 추출 (원문자 지원)
+                inline_opts = []
+                if re.search(r"(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*", label):
+                    inline_opts = extract_options_from_line(label)
+                    
                 if inline_opts:
-                    first_opt = inline_opts[0]; split_idx = label.find(first_opt)
-                    if split_idx != -1: q_text = label[:split_idx].strip(); current_entry = { "변수명": var_name, "질문 내용": q_text, "보기 값": "", "보기_list": inline_opts, "유형": "Single" }
-                    else: current_entry = { "변수명": var_name, "질문 내용": label.strip(), "보기 값": "", "보기_list": [], "유형": "Single" }
+                    first_opt_match = re.search(r"(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*", label)
+                    if first_opt_match:
+                        q_text = label[:first_opt_match.start()].strip()
+                        current_entry = { "변수명": var_name, "질문 내용": q_text, "보기 값": "", "보기_list": inline_opts, "유형": "Single" }
+                    else:
+                        current_entry = { "변수명": var_name, "질문 내용": label.strip(), "보기 값": "", "보기_list": [], "유형": "Single" }
                 else: current_entry = { "변수명": var_name, "질문 내용": label.strip(), "보기 값": "", "보기_list": [], "유형": "Single" }
+                
                 is_parent_added = False
                 rank_count = check_ranking_selection_question(current_entry)
                 if rank_count: pending_ranking_count = rank_count; ranking_options_buffer = [] 
                 else: pending_ranking_count = None; ranking_options_buffer = []
                 
-                # [FIX] Force Max N check based on text pattern (regardless of function return)
                 q_norm = current_entry["질문 내용"].replace("［", "[").replace("］", "]").replace("（", "(").replace("）", ")")
                 max_n_match = re.search(r"최대\s*(\d+)", q_norm)
-                if max_n_match:
-                    pending_max_n_count = int(max_n_match.group(1))
-                else:
-                    pending_max_n_count = None
+                if max_n_match: pending_max_n_count = int(max_n_match.group(1))
+                else: pending_max_n_count = None
                 
                 if "1개 선택" in current_entry["질문 내용"]: current_entry["유형"] = "Single"
+            
             elif current_entry:
                 if not is_parent_added:
-                    # [FIX] S5 등 옵션 강제 인식
-                    # 숫자로 시작하는 문단은 무조건 보기로 간주 (1) S 2WD 같은 경우)
-                    opts_in_line = extract_options_from_line(text)
-                    # [수정] 동그라미 숫자 포함 패턴 대응
-                    if not opts_in_line and re.match(r"^([①-⑩]|\d+)[\)\.]", text): opts_in_line = [text]
-
-                    if opts_in_line:
-                        if pending_ranking_count:
-                            for opt in opts_in_line:
-                                opt_match = re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]\s*(.*)", opt)
-                                if opt_match: 
-                                    raw_code = opt_match.group(1).replace(')','').replace('.','')
-                                    code = CIRCLE_MAP.get(raw_code, raw_code)
-                                    val = opt_match.group(2)
-                                    ranking_options_buffer.append(f"{code}={val}")
-                        else:
-                            if "보기_list" in current_entry: current_entry["보기_list"].extend(opts_in_line)
+                    # 원문자나 보기 패턴 인식
+                    if re.match(r"^(\d+|[①-⑳]|[a-zA-Z])[\)\.]?\s*", text) or any(c in text for c in "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"):
+                        opts_in_line = extract_options_from_line(text)
+                        if opts_in_line:
+                            if pending_ranking_count:
+                                for opt in opts_in_line:
+                                    opt_match = re.match(r"^(\d+|[a-zA-Z])[\)\.]\s*(.*)", opt) # extract_options_from_line가 정규화함
+                                    if opt_match: code, val = opt_match.groups(); ranking_options_buffer.append(f"{code}={val}")
+                            else:
+                                if "보기_list" in current_entry: current_entry["보기_list"].extend(opts_in_line)
                     elif "=" in text or "점" in text:
                          if "보기_list" in current_entry: current_entry["보기_list"].append(text)
                     elif "[주관식]" in text or "직접 기입" in text:
@@ -1091,46 +941,50 @@ def parse_word_to_df(docx_file):
             rows = block.rows
             if len(rows) < 1: continue
 
-            # 지능형 테이블 분석 (Scanning)
             table_type = analyze_table_structure(block)
-            
             new_entries = []
             
-            # [NEW] AHP 이원비교 테이블 최우선 처리
-            ahp_entries = extract_ahp_table(block, current_entry)
-            if ahp_entries:
-                new_entries = ahp_entries
-                
+            # [NEW] AHP 쌍대비교 테이블 파싱
+            if table_type == "AHP_PAIRWISE":
+                if current_entry and not is_parent_added:
+                    ahp_options = []
+                    header = [c.text.strip() for c in rows[0].cells]
+                    for cell in header[1:-1]:
+                        num_match = re.search(r'(\d)', cell)
+                        if num_match:
+                            code = num_match.group(1)
+                            label = re.sub(r'\s+', ' ', cell).replace(code, '').strip()
+                            ahp_options.append(f"{code}={label}")
+                    ahp_opt_str = "\n".join(ahp_options)
+                    
+                    for r_idx, row in enumerate(rows[1:]):
+                        if len(row.cells) < 3: continue
+                        a_item = row.cells[0].text.replace('\n', ' ').strip()
+                        b_item = row.cells[-1].text.replace('\n', ' ').strip()
+                        if not a_item or not b_item: continue
+                        
+                        sub_var = f"{current_entry['변수명']}_{r_idx + 1}"
+                        sub_label = f"[{current_entry['변수명']}] {a_item} vs {b_item}"
+                        new_entries.append({
+                            "변수명": sub_var, "질문 내용": sub_label, "보기 값": ahp_opt_str, "유형": "Scale"
+                        })
+            
             elif table_type == "MAPPED_OPTION":
                 is_updated = extract_mapped_option_table(block, extracted_data, variable_map, current_entry)
-            
             elif table_type == "UNIT_INPUT":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_unit_input_table(block, current_entry)
-
+                if current_entry and not is_parent_added: new_entries = extract_unit_input_table(block, current_entry)
             elif table_type == "CHILD_DEMO":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_child_demographics_table(block, current_entry)
-            
+                if current_entry and not is_parent_added: new_entries = extract_child_demographics_table(block, current_entry)
             elif table_type == "HORIZONTAL_SCALE":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_horizontal_scale_table(block, current_entry)
-
+                if current_entry and not is_parent_added: new_entries = extract_horizontal_scale_table(block, current_entry)
             elif table_type == "HORIZONTAL_INPUT":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_horizontal_input_table(block, current_entry)
-
+                if current_entry and not is_parent_added: new_entries = extract_horizontal_input_table(block, current_entry)
             elif table_type == "TIME_SPLIT":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_time_split_table(block, current_entry)
-            
+                if current_entry and not is_parent_added: new_entries = extract_time_split_table(block, current_entry)
             elif table_type == "CONSTANT_SUM":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_constant_sum_table(block, current_entry)
-            
+                if current_entry and not is_parent_added: new_entries = extract_constant_sum_table(block, current_entry)
             elif table_type == "PLAIN_INPUT":
-                if current_entry and not is_parent_added:
-                    new_entries = extract_plain_input_table(block, current_entry)
+                if current_entry and not is_parent_added: new_entries = extract_plain_input_table(block, current_entry)
             
             elif table_type == "STANDARD":
                 if current_entry and not is_parent_added:
@@ -1142,7 +996,7 @@ def parse_word_to_df(docx_file):
                         if q_type in ["Single", "Multi"]:
                             is_opt = False
                             fc = rows[0].cells[0].text.strip()
-                            if re.match(r"^(\d+|[①-⑩]|[a-zA-Z])[\)\.]", fc): is_opt = True
+                            if re.match(r"^(\d+|[①-⑳]|[a-zA-Z])[\)\.]", fc): is_opt = True
                             if is_opt:
                                 opt_str = extract_single_choice_options(block)
                                 if q_type == "Single": current_entry["보기 값"] = opt_str; extracted_data.append(current_entry)
@@ -1183,26 +1037,18 @@ def parse_word_to_df(docx_file):
                                     new_entries.append({ "변수명": f"{current_entry['변수명']}_{sub_cnt}", "질문 내용": f"{current_entry['질문 내용']} ({fc})", "보기 값": "(숫자입력)", "유형": "Open" })
 
                         if not new_entries and current_entry:
-                            table_vals_str, is_body_mapped = extract_table_scale(block)
+                            table_vals_str, _ = extract_table_scale(block) # 강력해진 척도 함수
                             is_matrix = False
-                            
-                            # [FIX] B1~B4 Matrix Check (동그라미 숫자 척도 감지)
-                            matrix_vals, is_matrix_scale = extract_matrix_info(block)
-                            if is_matrix_scale:
-                                is_matrix = True
-                                table_vals_str = matrix_vals
-                            else:
-                                if len(rows) > 1:
-                                    for row in rows[1:]:
-                                        fc = row.cells[0].text.strip()
-                                        if fc and not fc.isdigit() and fc not in ["○", "●", "V"] and fc not in CIRCLE_MAP: 
-                                            is_matrix = True; break
+                            if len(rows) > 1:
+                                for row in rows[1:]:
+                                    fc = row.cells[0].text.strip()
+                                    if fc and not fc.isdigit() and fc not in ["○", "●", "V"]: is_matrix = True; break
                             
                             if is_matrix:
                                 sub_cnt = 0
                                 for row in rows[1:]:
                                     fc = row.cells[0].text.strip()
-                                    if not fc or fc in CIRCLE_MAP: continue
+                                    if not fc: continue
                                     sub_cnt += 1
                                     m_var = f"{current_entry['변수명']}_{sub_cnt}"
                                     new_entries.append({ "변수명": m_var, "질문 내용": f"[{current_entry['변수명']} 세부] {fc}", "보기 값": table_vals_str if table_vals_str else "(헤더참조)", "유형": "Matrix" })
@@ -1230,7 +1076,8 @@ def parse_word_to_df(docx_file):
 
 def to_excel_with_usage_flag(df):
     rows = []
-    code_start_pattern = re.compile(r"^(\d+|[①-⑩]|[a-zA-Z]|[가-하])[\.\)\s=]\s*(.*)")
+    # 엑셀 생성 시 정규식에 원문자 패턴 추가
+    code_start_pattern = re.compile(r"^(\d+|[①-⑳]|[a-zA-Z]|[가-하])[\.\)\s=]\s*(.*)")
     for idx, row in df.iterrows():
         var_name = row['변수명']; raw_q = str(row['질문 내용']); clean_q = re.sub(r"^\[.*?\]\s*", "", raw_q)
         if "_" in var_name:
@@ -1295,7 +1142,6 @@ def compress_var_list(var_list):
     else: compressed.extend(current_chunk)
     return " ".join(compressed)
 
-# [FIX] utils 에러 방지를 위한 내부 함수
 def generate_spss_final(df_edited, encoding_type='utf-8'):
     enc_str = "UTF-8" if encoding_type == 'utf-8' else "CP949"
     syntax_lines = ["* SPSS Syntax Generated by Streamlit (Final).", f"* Encoding: {enc_str}.", "", "* 0. Set Working Directory and Load Data.", "CD '경로'.", "GET FILE='project_CE.sav'.", ""]
@@ -1374,9 +1220,8 @@ def generate_spss_final(df_edited, encoding_type='utf-8'):
 # ==============================================================================
 st.markdown("""
 **[기능 설명]**
-* **스마트 스캐닝:** 표 전체를 먼저 분석하여 **[자녀정보], [시간/분 입력], [단순 입력], [고정 합계], [가로형 입력], [가로형 척도]** 등의 유형을 자동으로 판단합니다.
-* **복합 문항 지원:** A7 처럼 텍스트 안에 입력 칸이 여러 개 있는 경우(회/시간 등)도 자동으로 분리합니다.
-* **질문 요약 (Beta):** 체크박스를 선택하면, 질문 내용의 불필요한 수식어를 제거하고 간결하게 요약합니다.
+* **스마트 스캐닝:** 표 전체를 먼저 분석하여 일반 척도, AHP 척도, 매핑 테이블 등을 파악합니다.
+* **원문자 자동 처리:** ①, ②, ③ 등의 원문자 보기를 자동으로 감지하고 `1=, 2=` 숫자로 변환합니다.
 """)
 
 tab1, tab2 = st.tabs(["1단계: 워드 ➡️ 엑셀 생성", "2단계: 엑셀 ➡️ SPSS 생성"])
@@ -1398,12 +1243,7 @@ with tab1:
         st.subheader("📊 분석 결과 미리보기")
         st.dataframe(st.session_state['df_raw'], use_container_width=True, height=400)
         
-        # 요약 옵션
-        st.markdown("---")
-        use_summary = st.checkbox("✂️ 긴 질문 내용을 간략하게 요약하기 (Beta)", 
-                                  help="질문 끝의 '~입니까?', '귀하의' 같은 불필요한 문구를 자동으로 제거합니다.")
-        
-        st.info("아래 엑셀 파일을 다운로드하여 내용을 수정하세요.")
+        use_summary = st.checkbox("✂️ 긴 질문 내용을 간략하게 요약하기 (Beta)")
         
         if use_summary:
             df_to_download = st.session_state['df_raw'].copy()
@@ -1435,13 +1275,8 @@ with tab2:
                 
                 col1, col2 = st.columns(2)
                 
-                # Option 1: UTF-8
                 with col1:
-                    try:
-                        spss_utf8 = utils.generate_spss_final(df_edited, encoding_type='utf-8')
-                    except:
-                        spss_utf8 = generate_spss_final(df_edited, encoding_type='utf-8')
-                        
+                    spss_utf8 = generate_spss_final(df_edited, encoding_type='utf-8')
                     st.download_button(
                         label="💾 (추천) SPSS 신택스 다운로드 (UTF-8)",
                         data=spss_utf8.encode('utf-8-sig'), 
@@ -1450,15 +1285,9 @@ with tab2:
                         type="primary",
                         use_container_width=True
                     )
-                    st.caption("최신 버전 SPSS 사용 시 권장")
 
-                # Option 2: CP949
                 with col2:
-                    try:
-                        spss_cp949 = utils.generate_spss_final(df_edited, encoding_type='cp949')
-                    except:
-                        spss_cp949 = generate_spss_final(df_edited, encoding_type='cp949')
-
+                    spss_cp949 = generate_spss_final(df_edited, encoding_type='cp949')
                     st.download_button(
                         label="💾 (구버전) SPSS 신택스 다운로드 (CP949)",
                         data=spss_cp949.encode('cp949', errors='ignore'), 
@@ -1467,7 +1296,6 @@ with tab2:
                         type="secondary",
                         use_container_width=True
                     )
-                    st.caption("SPSS에서 한글이 깨질 때 사용")
                 
                 with st.expander("신택스 내용 미리보기 (UTF-8 기준)"):
                     st.code(spss_utf8, language="spss")
