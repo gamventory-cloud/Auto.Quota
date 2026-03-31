@@ -7,7 +7,7 @@ import altair as alt
 from joblib import Parallel, delayed, cpu_count
 import sys
 import os
-import traceback # 오류 추적용
+import traceback
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils
@@ -22,7 +22,7 @@ n_cores = cpu_count()
 st.sidebar.caption(f"🖥️ CPU 코어: {n_cores}개 가동")
 
 # ==============================================================================
-# [핵심 추가] 데이터 정규화 함수 (1, 1.0, "1" 통일)
+# [데이터 정규화 함수] (1, 1.0, "1" 통일)
 # ==============================================================================
 def normalize_val(val):
     """모든 값을 문자열로 변환하고 소수점(.0) 제거 및 공백 제거"""
@@ -63,7 +63,7 @@ if data_file:
                 try:
                     raw = pd.read_excel(qf,0,header=None)
                     flat = utils.transform_pivoted_quota(raw)
-                    # [수정] 쿼터 키 정규화
+                    # 쿼터 키 정규화
                     main_map = {
                         tuple(normalize_val(v) for v in (r.qt1, r.qt2, r.qt3)): r.target 
                         for r in flat.itertuples()
@@ -86,7 +86,7 @@ if data_file:
                     try:
                         t=int(r['target'])
                         if t>0: 
-                            # [수정] 키 정규화
+                            # 키 정규화
                             key = tuple(normalize_val(r[c]) for c in algo_main_cols)
                             main_map[key]=t
                     except: pass
@@ -94,7 +94,9 @@ if data_file:
         main_map = {('All',): st.number_input("전체 목표", 1, 10000, 1000)}; algo_main_cols=[]
 
     ex_configs = []
-    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4"])
+    
+    # [핵심 변경] 추가 쿼터 탭을 4개에서 6개로 확장
+    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4", "추가 5", "추가 6"])
     
     for i, tab in enumerate(tabs):
         with tab:
@@ -111,7 +113,7 @@ if data_file:
                     config['name'] = utils.sanitize_sheet_name(auto_name)
                     
                     vals = []
-                    # [수정] 값 수집 시 정규화 적용
+                    # 값 수집 시 정규화 적용
                     for _, r in df_survey[cols].fillna("").iterrows(): 
                         raw_vals = utils.collect_values_from_cols(r, cols)
                         norm_vals = [normalize_val(v) for v in raw_vals]
@@ -123,7 +125,7 @@ if data_file:
                     ed = st.data_editor(cnt.sort_values('srt').drop(columns=['srt']), use_container_width=True, key=f"ed{i}")
                     for _,r in ed.iterrows(): 
                         if r['목표']>0: 
-                            # [수정] 맵 키 정규화
+                            # 맵 키 정규화
                             config['map'][normalize_val(r['값'])]=int(r['목표'])
             
             else:
@@ -152,7 +154,7 @@ if data_file:
                         try:
                             t = int(r['target'])
                             if t > 0:
-                                # [수정] 맵 키 정규화
+                                # 맵 키 정규화
                                 key_tuple = tuple(normalize_val(r[c]) for c in target_cols)
                                 config['map'][key_tuple] = t
                         except: pass
@@ -177,7 +179,7 @@ if data_file:
             with st.spinner("종합 희소성 계산 및 병렬 연산 중..."):
                 df_proc = df_survey.copy()
                 
-                # [핵심] 데이터 전처리: 쿼터에 사용되는 모든 컬럼 정규화 (1 -> "1", 1.0 -> "1")
+                # 데이터 전처리: 쿼터에 사용되는 모든 컬럼 정규화
                 if use_main:
                     for c in algo_main_cols: 
                         df_proc[c] = clean_series(df_proc[c])
@@ -191,12 +193,11 @@ if data_file:
                         ex_keys_list.append([[] for _ in range(len(df_proc))])
                         continue
                         
-                    # [핵심] 추가 쿼터 컬럼 정규화
+                    # 추가 쿼터 컬럼 정규화
                     for c in cfg['cols']:
                         df_proc[c] = clean_series(df_proc[c])
                     
                     if cfg['mode'] == 'simple':
-                        # simple 모드는 값이 하나씩 리스트로 들어감 ['1'], ['2']
                         keys = df_proc.apply(lambda r: [str(r[c]) for c in cfg['cols']], axis=1).tolist()
                     else:
                         tuples = list(zip(*[df_proc[c] for c in cfg['cols']]))
