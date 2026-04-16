@@ -31,10 +31,6 @@ def normalize_val(val):
         s = s[:-2]
     return s
 
-def clean_series(series):
-    """판다스 시리즈 전체를 정규화 (속도 최적화)"""
-    return series.astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-
 # ==============================================================================
 # 1. 데이터 업로드
 # ==============================================================================
@@ -95,7 +91,7 @@ if data_file:
 
     ex_configs = []
     
-    # [핵심 변경] 추가 쿼터 탭을 4개에서 6개로 확장
+    # 추가 쿼터 6개로 확장
     tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4", "추가 5", "추가 6"])
     
     for i, tab in enumerate(tabs):
@@ -113,7 +109,6 @@ if data_file:
                     config['name'] = utils.sanitize_sheet_name(auto_name)
                     
                     vals = []
-                    # 값 수집 시 정규화 적용
                     for _, r in df_survey[cols].fillna("").iterrows(): 
                         raw_vals = utils.collect_values_from_cols(r, cols)
                         norm_vals = [normalize_val(v) for v in raw_vals]
@@ -125,7 +120,6 @@ if data_file:
                     ed = st.data_editor(cnt.sort_values('srt').drop(columns=['srt']), use_container_width=True, key=f"ed{i}")
                     for _,r in ed.iterrows(): 
                         if r['목표']>0: 
-                            # 맵 키 정규화
                             config['map'][normalize_val(r['값'])]=int(r['목표'])
             
             else:
@@ -154,7 +148,6 @@ if data_file:
                         try:
                             t = int(r['target'])
                             if t > 0:
-                                # 맵 키 정규화
                                 key_tuple = tuple(normalize_val(r[c]) for c in target_cols)
                                 config['map'][key_tuple] = t
                         except: pass
@@ -179,10 +172,10 @@ if data_file:
             with st.spinner("종합 희소성 계산 및 병렬 연산 중..."):
                 df_proc = df_survey.copy()
                 
-                # 데이터 전처리: 쿼터에 사용되는 모든 컬럼 정규화
+                # [버그 수정] utils.clean_val을 유지하면서 안전하게 normalize_val 적용
                 if use_main:
                     for c in algo_main_cols: 
-                        df_proc[c] = clean_series(df_proc[c])
+                        df_proc[c] = df_proc[c].apply(utils.clean_val).apply(normalize_val)
                     m_keys = list(zip(*[df_proc[c] for c in algo_main_cols]))
                 else: 
                     m_keys = [('All',) for _ in range(len(df_proc))]
@@ -193,13 +186,15 @@ if data_file:
                         ex_keys_list.append([[] for _ in range(len(df_proc))])
                         continue
                         
-                    # 추가 쿼터 컬럼 정규화
-                    for c in cfg['cols']:
-                        df_proc[c] = clean_series(df_proc[c])
-                    
                     if cfg['mode'] == 'simple':
-                        keys = df_proc.apply(lambda r: [str(r[c]) for c in cfg['cols']], axis=1).tolist()
+                        # [버그 수정] utils.collect_values_from_cols 복구 (다중응답 쪼개기 기능 등 유지)
+                        keys = df_proc.apply(
+                            lambda r: [normalize_val(v) for v in utils.collect_values_from_cols(r, cfg['cols'])], 
+                            axis=1
+                        ).tolist()
                     else:
+                        for c in cfg['cols']: 
+                            df_proc[c] = df_proc[c].apply(utils.clean_val).apply(normalize_val)
                         tuples = list(zip(*[df_proc[c] for c in cfg['cols']]))
                         keys = [[t] for t in tuples]
                     ex_keys_list.append(keys)
@@ -263,7 +258,6 @@ if data_file:
                         for k in ex_keys_maps[j][idx]: final_exs[j][k] += 1
 
             recs = []
-            # 부족분 분석 (엑셀용)
             if is_fail:
                 if use_main:
                     for k, tgt in main_map.items():
