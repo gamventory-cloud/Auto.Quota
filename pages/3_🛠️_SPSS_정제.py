@@ -22,9 +22,8 @@ st.markdown("""
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
 * **기능 2:** Code북에 `문1`, `문2_1`로 표기된 변수를 `Q1`, `Q2_1`로 자동 치환하여 인식
 * **기능 3:** 척도 문항 중복 시 `_1`, `_2` 자동 부여 및 순위 문항(RK) 완벽 매칭
-* **기능 4:** 파생 변수(`_7`, `_etc` 등) 탐색 시 **라벨에 `[기타]` 꼬리표 자동 추가**
-* **기능 5 [NEW]:** 내보내는 엑셀 파일의 **Code북 시트 내 변수명도 바뀐 새 이름에 맞게 자동 갱신**
-* **기능 6:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
+* **기능 4:** 파생 변수 탐색 시 라벨에 `[기타]` 추가 / **복수응답 Code북 업데이트 시 첫 번째 문항(예: `Q1_1`)으로 고정**
+* **기능 5:** 엑셀 다운로드 시 Code북 시트 자동 갱신 및 **순수 데이터(디자인 없음)** 내보내기
 """)
 
 # 1. 파일 업로드
@@ -52,7 +51,7 @@ if uploaded_file:
 
                 df_raw = st.session_state['spss_all_sheets'][raw_sheet]
                 
-                # [NEW] 원본 Code북 구조를 인덱스로 정밀 제어하기 위해 세션에 저장
+                # 원본 Code북 구조를 인덱스로 정밀 제어하기 위해 세션에 저장
                 df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
                 st.session_state['spss_df_code'] = df_code
                 
@@ -98,11 +97,11 @@ if uploaded_file:
                             "질문 내용": col_c_val,
                             "변경할 변수명": new_var_name,
                             "상태": "매칭 성공",
-                            "code_idx": idx # 고유 행 번호 추적
+                            "code_idx": idx 
                         })
                         is_matched = True
 
-                    # [로직 2] 순위 문항 탐색 (예: Code북 Q39RK1 -> Raw Q39_1)
+                    # [로직 2] 순위 문항 탐색
                     if not is_matched:
                         rk_match = re.search(r'^(.*?)_?rk(\d+)$', col_a_val.lower())
                         if rk_match:
@@ -120,13 +119,13 @@ if uploaded_file:
                                     "질문 내용": col_c_val,
                                     "변경할 변수명": new_var_name,
                                     "상태": "매칭 성공 (순위 문항)",
-                                    "code_idx": idx # 고유 행 번호 추적
+                                    "code_idx": idx 
                                 })
                                 is_matched = True
                                 search_base_raw = base_raw 
                                 search_label_base = current_label_base
 
-                    # [로직 3] 기타/파생 변수 탐색 (Q39_7 등 주관식 싹쓸이)
+                    # [로직 3] 기타/파생 변수 탐색 (복수응답 세트 포함)
                     prefix = search_base_raw + "_"
                     found_multiples = []
                     for rc_lower, rc_original in raw_cols_map.items():
@@ -153,7 +152,7 @@ if uploaded_file:
                             "질문 내용": display_label,
                             "변경할 변수명": new_name,
                             "상태": state_msg,
-                            "code_idx": idx # 고유 행 번호 추적
+                            "code_idx": idx 
                         })
 
                 # --- [Step 2] 최적 매칭 선정 (중복/경합 방지) ---
@@ -172,7 +171,6 @@ if uploaded_file:
                         if get_prio(item['상태']) < get_prio(best_match_dict[raw_col]['상태']):
                             best_match_dict[raw_col] = item
 
-                # 이름 빈도수 계산
                 name_freq = collections.Counter([item['변경할 변수명'] for item in best_match_dict.values()])
                 name_counter = collections.defaultdict(int)
                 
@@ -204,24 +202,27 @@ if uploaded_file:
                             "상태": "매칭 실패 (확인 필요)"
                         })
                 
-                # [NEW] 최종 결정된 매핑 정보를 바탕으로 Code북 업데이트 딕셔너리 생성
+                # --- [Step 4] Code북 업데이트 딕셔너리 생성 ---
                 final_code_updates = {}
+                
+                # 우선순위 부여 함수 (숫자가 클수록 강력함)
+                def get_status_score(s):
+                    if s in ["매칭 성공", "매칭 성공 (순위 문항)"]: return 3
+                    if s == "매칭 성공 (세트 문항)": return 2
+                    return 1 # 기타/파생
+                
                 for item in final_data:
                     if 'code_idx' in item and item['변경할 변수명']:
                         r_idx = item['code_idx']
                         status = item['상태']
                         assigned_name = item['변경할 변수명']
                         
-                        # 복수응답/세트/기타 파생의 경우 상위 변수 대푯값으로 치환 (예: Q14_1 -> Q14)
-                        if "기타" in status or "세트" in status:
-                            base_match = re.match(r'^(.*?)_([^_]+)$', assigned_name)
-                            if base_match:
-                                assigned_name = base_match.group(1)
-                                
-                        # 우선순위가 높은 매칭이 이미 들어가 있다면 덮어쓰지 않음
+                        # [핵심 수정] 덮어쓰기 방지: 이미 등록된 행(r_idx)이라면, 
+                        # 새로 들어온 항목의 우선순위(score)가 기존보다 "엄격히 클" 때만 덮어씀.
+                        # 즉, 같은 세트 문항(우선순위 동일)이 들어오면 기존 값(맨 처음 Q1_1)을 그대로 유지!
                         if r_idx in final_code_updates:
                             old_status = final_code_updates[r_idx]['status']
-                            if old_status in ["매칭 성공", "매칭 성공 (순위 문항)"]:
+                            if get_status_score(status) <= get_status_score(old_status):
                                 continue
                                 
                         final_code_updates[r_idx] = {'name': assigned_name, 'status': status}
@@ -330,7 +331,7 @@ if 'spss_result_df' in st.session_state:
                         df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                         
                     elif sheet_name == code_sheet and 'spss_df_code' in st.session_state:
-                        # [NEW] Code북 시트인 경우 추적된 인덱스 맵을 활용해 바뀐 변수명으로 완벽 매칭 및 갱신
+                        # Code북 시트 갱신 반영
                         df_code_export = st.session_state['spss_df_code'].copy()
                         code_updates = st.session_state.get('spss_code_updates', {})
                         
