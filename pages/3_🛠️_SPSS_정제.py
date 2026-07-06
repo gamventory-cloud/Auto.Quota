@@ -22,8 +22,9 @@ st.markdown("""
 * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
 * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-* **기능 3:** 순위 문항(RK) 자동 매칭 및 `(1순위)` 텍스트 제거 후 설문 문항 번호(Q14) 추출
-* **기능 4:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
+* **기능 3:** 순위 문항(RK) 자동 매칭 및 `(1순위)` 텍스트 제거 후 설문 문항 번호 추출
+* **기능 4:** 단수/복수응답의 **기타(_etc, _99 등) 파생 변수까지 모조리 자동 매칭**
+* **기능 5:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
 # 1. 파일 업로드
@@ -62,30 +63,31 @@ if uploaded_file:
                 
                 temp_vars = []
                 
-                # --- [Step 1] Code북 순회 (무조건 1, 2열 사용) ---
+                # --- [Step 1] Code북 순회하며 후보군 싹쓸이 ---
                 for idx, row in df_code.iterrows():
                     if len(row) < 2: continue
                     if pd.isna(row.iloc[0]): continue
                     
-                    col_a_val = utils.clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q39RK1
-                    col_c_val = utils.clean_text(row.iloc[1]) # 질문 라벨 - 예: (1순위) Q14. 가장 좋아하는...
+                    col_a_val = utils.clean_text(row.iloc[0]) # 예: Q39RK1
+                    col_c_val = utils.clean_text(row.iloc[1]) # 예: (1순위) Q14. 가장 좋아하는...
                     
                     if not col_a_val: continue
                     
-                    # [핵심 수정] 1. 라벨에서 (1순위), [2순위], 1순위 등 불필요한 텍스트 먼저 싹 제거
+                    # 1. 라벨에서 (1순위), [2순위], 1순위 등 불필요한 텍스트 먼저 싹 제거
                     clean_label = re.sub(r'[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*', '', col_c_val).strip()
                     
-                    # [핵심 수정] 2. 깨끗해진 라벨에서 찐 기본 문항번호 추출 (예: "Q14. 가장..." -> "Q14")
-                    label_base = utils.extract_base_name(clean_label)
-                    if not label_base: 
-                        label_base = col_a_val # 실패 시 Code명 사용
+                    # 2. 깨끗해진 라벨에서 찐 기본 문항번호 추출 (예: "Q14. 가장..." -> "Q14")
+                    current_label_base = utils.extract_base_name(clean_label)
+                    if not current_label_base: 
+                        current_label_base = col_a_val 
 
                     is_matched = False
+                    search_base_raw = col_a_val.lower() # 파생 변수를 찾기 위한 베이스 키워드
 
-                    # 1. 정확히 일치하는 경우
+                    # [로직 1] 정확히 일치하는 경우 (단수응답 등)
                     if col_a_val.lower() in raw_cols_map:
                         raw_original = raw_cols_map[col_a_val.lower()]
-                        new_var_name = utils.sanitize_var_name(label_base)
+                        new_var_name = utils.sanitize_var_name(current_label_base)
                         
                         temp_vars.append({
                             "Raw 변수명": raw_original,
@@ -96,19 +98,18 @@ if uploaded_file:
                         })
                         is_matched = True
 
-                    # 2. [NEW] 순위 문항 탐색 (예: Code북 Q39RK1 -> Raw Q39_1)
+                    # [로직 2] 순위 문항 탐색 (예: Code북 Q39RK1 -> Raw Q39_1)
                     if not is_matched:
                         rk_match = re.search(r'^(.*?)_?rk(\d+)$', col_a_val.lower())
                         if rk_match:
-                            base_raw = rk_match.group(1)   # 예: q39
-                            rank_num = rk_match.group(2) # 예: 1
-                            expected_raw_col = f"{base_raw}_{rank_num}" # 예: q39_1
+                            base_raw = rk_match.group(1)   
+                            rank_num = rk_match.group(2) 
+                            expected_raw_col = f"{base_raw}_{rank_num}" 
                             
                             if expected_raw_col in raw_cols_map:
                                 raw_original = raw_cols_map[expected_raw_col]
-                                
-                                # [핵심 수정] 3. Data시트 이름(Q39)이 아닌, 라벨에서 뽑아낸 찐 문항번호(Q14)와 순위 결합!
-                                new_var_name = utils.sanitize_var_name(f"{label_base}_{rank_num}")
+                                current_label_base = f"{current_label_base}_{rank_num}" # 라벨도 Q14_1 꼴로 변경
+                                new_var_name = utils.sanitize_var_name(current_label_base)
                                 
                                 temp_vars.append({
                                     "Raw 변수명": raw_original,
@@ -118,59 +119,74 @@ if uploaded_file:
                                     "상태": "매칭 성공 (순위 문항)"
                                 })
                                 is_matched = True
+                                search_base_raw = expected_raw_col # 파생 변수 베이스를 Q39_1_ 등으로 변경
 
-                    # 3. 복수응답/세트 문항 탐색 (예: Code북 Q5 -> Raw q5_1, q5_2...)
-                    if not is_matched:
-                        prefix = col_a_val.lower() + "_"
-                        found_multiples = []
-                        for rc_lower, rc_original in raw_cols_map.items():
-                            if rc_lower.startswith(prefix):
-                                found_multiples.append((rc_lower, rc_original))
+                    # [로직 3] 파생 변수 탐색 (is_matched 여부 무관!)
+                    # 단수/순위 문항의 정확한 짝을 찾았더라도 그 뒤에 Q1_etc 등이 널부러져 있을 수 있으므로 무조건 탐색
+                    prefix = search_base_raw + "_"
+                    found_multiples = []
+                    for rc_lower, rc_original in raw_cols_map.items():
+                        if rc_lower.startswith(prefix):
+                            found_multiples.append((rc_lower, rc_original))
+                    
+                    for _, rc_original in found_multiples:
+                        suffix = rc_original[len(search_base_raw):] 
+                        if not suffix.startswith('_') and not suffix.startswith('-'):
+                            suffix = "_" + suffix
+
+                        new_name = utils.sanitize_var_name(current_label_base + suffix)
+                        state_msg = "매칭 성공 (기타/파생 변수)" if is_matched else "매칭 성공 (세트 문항)"
                         
-                        for _, rc_original in found_multiples:
-                            suffix = rc_original[len(col_a_val):] 
-                            if not suffix.startswith('_') and not suffix.startswith('-'):
-                                suffix = "_" + suffix
+                        temp_vars.append({
+                            "Raw 변수명": rc_original,
+                            "Code 변수명": col_a_val,
+                            "질문 내용": col_c_val,
+                            "변경할 변수명": new_name,
+                            "상태": state_msg
+                        })
 
-                            new_name = utils.sanitize_var_name(label_base + suffix)
-                            
-                            temp_vars.append({
-                                "Raw 변수명": rc_original,
-                                "Code 변수명": col_a_val,
-                                "질문 내용": col_c_val,
-                                "변경할 변수명": new_name,
-                                "상태": "매칭 성공 (세트 문항)"
-                            })
+                # --- [Step 2] 최적 매칭 선정 (경합 방지) ---
+                best_match_dict = {}
+                for item in temp_vars:
+                    raw_col = item['Raw 변수명']
+                    
+                    # 우선순위: 정확한 매칭 1순위 > 세트문항 2순위 > 잡다한 파생 3순위
+                    def get_prio(s):
+                        if s in ["매칭 성공", "매칭 성공 (순위 문항)"]: return 1
+                        if s == "매칭 성공 (세트 문항)": return 2
+                        return 3 
+                    
+                    if raw_col not in best_match_dict:
+                        best_match_dict[raw_col] = item
+                    else:
+                        if get_prio(item['상태']) < get_prio(best_match_dict[raw_col]['상태']):
+                            best_match_dict[raw_col] = item
 
-                # --- [Step 2] 중복 변수명 처리 로직 ---
-                name_freq = collections.Counter([item['변경할 변수명'] for item in temp_vars])
+                # 이름 빈도수 계산
+                name_freq = collections.Counter([item['변경할 변수명'] for item in best_match_dict.values()])
                 name_counter = collections.defaultdict(int)
                 
                 final_data = []
-                seen_raw = set()
                 
-                for item in temp_vars:
-                    if item['Raw 변수명'] in seen_raw: continue
-                    
-                    candidate_name = item['변경할 변수명']
-                    
-                    if name_freq[candidate_name] > 1:
-                        name_counter[candidate_name] += 1
-                        final_name = f"{candidate_name}_{name_counter[candidate_name]}"
-                    else:
-                        final_name = candidate_name
-                        
-                    item['변경할 변수명'] = final_name
-                    final_data.append(item)
-                    seen_raw.add(item['Raw 변수명'])
-
-                # --- [Step 3] 매칭 실패 항목 찾기 ---
+                # --- [Step 3] Raw 데이터 원본 순서대로 뷰어 구성 (가독성 극대화) ---
                 for raw_col in df_raw.columns:
                     raw_col_str = str(raw_col).strip()
                     
                     if raw_col_str.lower() in ['no', 'id', '번호', '순번']: continue
                     
-                    if raw_col_str not in seen_raw:
+                    if raw_col_str in best_match_dict:
+                        item = best_match_dict[raw_col_str]
+                        candidate_name = item['변경할 변수명']
+                        
+                        if name_freq[candidate_name] > 1:
+                            name_counter[candidate_name] += 1
+                            final_name = f"{candidate_name}_{name_counter[candidate_name]}"
+                        else:
+                            final_name = candidate_name
+                            
+                        item['변경할 변수명'] = final_name
+                        final_data.append(item)
+                    else:
                         final_data.append({
                             "Raw 변수명": raw_col_str,
                             "Code 변수명": "-",
