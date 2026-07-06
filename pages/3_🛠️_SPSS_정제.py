@@ -5,7 +5,7 @@ import collections
 import traceback
 import sys
 import os
-import re  # [NEW] 순위 문항 정규식 탐색을 위해 추가됨
+import re
 
 # (주의) utils 모듈이 같은 폴더나 상위 폴더에 있어야 합니다.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,7 +22,7 @@ st.markdown("""
 * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
 * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-* **기능 3:** 순위 문항(RK) 자동 매칭 (예: Code북 `Q39RK1` ↔ Raw `Q39_1`)
+* **기능 3:** 순위 문항(RK) 자동 매칭 (예: Code북 `Q39RK1` ↔ Raw `Q39_1` → 새 변수명 `Q39_1`)
 * **기능 4:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
@@ -105,7 +105,9 @@ if uploaded_file:
                             
                             if expected_raw_col in raw_cols_map:
                                 raw_original = raw_cols_map[expected_raw_col]
-                                new_var_name = utils.sanitize_var_name(label_base)
+                                
+                                # [핵심 수정] 새 변수명 생성 시 label_base 뒤에 _순위번호를 강제 할당!
+                                new_var_name = utils.sanitize_var_name(f"{label_base}_{rank_num}")
                                 
                                 temp_vars.append({
                                     "Raw 변수명": raw_original,
