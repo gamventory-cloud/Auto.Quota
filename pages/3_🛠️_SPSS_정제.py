@@ -22,7 +22,7 @@ st.markdown("""
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
 * **기능 2:** 척도 문항 중복 시 `_1`, `_2` 자동 부여
 * **기능 3:** 순위 문항(RK) 완벽 매칭 (라벨 내 불필요 텍스트 자동 제거)
-* **기능 4:** 순위 문항의 기타 주관식(예: `Q39_7`) 등 **모든 파생 변수 싹쓸이 탐색 지원**
+* **기능 4:** 파생 변수(`_7`, `_etc` 등) 탐색 시 **라벨에 `[기타]` 꼬리표 자동 추가**
 * **기능 5:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
@@ -65,7 +65,7 @@ if uploaded_file:
                     
                     if not col_a_val: continue
                     
-                    # 1. 불필요한 라벨 텍스트 정리
+                    # 1. 불필요한 라벨 텍스트 정리 (순위 등)
                     clean_label = re.sub(r'[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*', '', col_c_val).strip()
                     current_label_base = utils.extract_base_name(clean_label)
                     if not current_label_base: 
@@ -109,11 +109,10 @@ if uploaded_file:
                                     "상태": "매칭 성공 (순위 문항)"
                                 })
                                 is_matched = True
-                                # [핵심 수정] 주관식 탐색을 위해 꼬리표 범위를 q39RK1_가 아닌 q39_ 전체로 확장!
                                 search_base_raw = base_raw 
                                 search_label_base = current_label_base
 
-                    # [로직 3] 기타/파생 변수 탐색 (Q39_7 같은 주관식 전부 싹쓸이)
+                    # [로직 3] 기타/파생 변수 탐색 (Q39_7 등 주관식 싹쓸이)
                     prefix = search_base_raw + "_"
                     found_multiples = []
                     for rc_lower, rc_original in raw_cols_map.items():
@@ -126,12 +125,19 @@ if uploaded_file:
                             suffix = "_" + suffix
 
                         new_name = utils.sanitize_var_name(search_label_base + suffix)
-                        state_msg = "매칭 성공 (기타/파생 변수)" if is_matched else "매칭 성공 (세트 문항)"
+                        
+                        # [핵심 수정] 파생/기타 변수는 라벨 뒤에 [기타]를 명시적으로 붙여줌
+                        if is_matched:
+                            state_msg = "매칭 성공 (기타/파생 변수)"
+                            display_label = f"{clean_label} [기타]"
+                        else:
+                            state_msg = "매칭 성공 (세트 문항)"
+                            display_label = col_c_val
                         
                         temp_vars.append({
                             "Raw 변수명": rc_original,
                             "Code 변수명": col_a_val,
-                            "질문 내용": col_c_val,
+                            "질문 내용": display_label,
                             "변경할 변수명": new_name,
                             "상태": state_msg
                         })
@@ -142,6 +148,7 @@ if uploaded_file:
                     raw_col = item['Raw 변수명']
                     
                     # 우선순위: 1순위(정확한 매칭/순위) > 2순위(세트) > 3순위(잡다한 파생)
+                    # 만약 Q39_1이 로직2(1순위)와 로직3(3순위)에서 중복발견되면 1순위를 채택
                     def get_prio(s):
                         if s in ["매칭 성공", "매칭 성공 (순위 문항)"]: return 1
                         if s == "매칭 성공 (세트 문항)": return 2
