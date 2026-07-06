@@ -19,11 +19,10 @@ if not utils.check_password():
 st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
 st.markdown("""
 **Raw 데이터**와 **Code북**을 비교하여 SPSS 변수명 변경 신텍스를 생성합니다.
-* **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
-* **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-* **기능 3:** 순위 문항(RK) 자동 매칭 및 `(1순위)` 텍스트 제거 후 설문 문항 번호 추출
-* **기능 4:** 단수/복수응답의 **기타(_etc, _99 등) 파생 변수까지 모조리 자동 매칭**
+* **기능 2:** 척도 문항 중복 시 `_1`, `_2` 자동 부여
+* **기능 3:** 순위 문항(RK) 완벽 매칭 (라벨 내 불필요 텍스트 자동 제거)
+* **기능 4:** 순위 문항의 기타 주관식(예: `Q39_7`) 등 **모든 파생 변수 싹쓸이 탐색 지원**
 * **기능 5:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
@@ -41,26 +40,19 @@ if uploaded_file:
         with col1:
             raw_sheet = st.selectbox("Raw 데이터 시트", sheet_names, index=0, key="raw_sheet_select")
         with col2:
-            # 보통 Code북은 뒤쪽에 있으므로 자동 선택 시도
             code_idx = 2 if len(sheet_names) > 2 else (1 if len(sheet_names) > 1 else 0)
             code_sheet = st.selectbox("Code북 시트", sheet_names, index=code_idx, key="code_sheet_select")
         
         # 분석 시작 버튼
         if st.button("분석 시작", key="analyze_btn"):
             with st.spinner('데이터 분석 및 매칭 중...'):
-                # 분석 시작 시 모든 시트를 미리 읽어둠 (다운로드용)
                 st.session_state['spss_all_sheets'] = pd.read_excel(uploaded_file, sheet_name=None)
-                st.session_state['spss_target_sheets'] = [raw_sheet] # 기본 타겟은 선택한 Raw 시트
+                st.session_state['spss_target_sheets'] = [raw_sheet]
 
-                # 데이터프레임 로드 (분석용)
                 df_raw = st.session_state['spss_all_sheets'][raw_sheet]
-                
-                # header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
                 df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
                 
-                # Raw 데이터 컬럼 매핑 (소문자 -> 원본)
                 raw_cols_map = {str(col).strip().lower(): str(col).strip() for col in df_raw.columns}
-                
                 temp_vars = []
                 
                 # --- [Step 1] Code북 순회하며 후보군 싹쓸이 ---
@@ -73,18 +65,17 @@ if uploaded_file:
                     
                     if not col_a_val: continue
                     
-                    # 1. 라벨에서 (1순위), [2순위], 1순위 등 불필요한 텍스트 먼저 싹 제거
+                    # 1. 불필요한 라벨 텍스트 정리
                     clean_label = re.sub(r'[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*', '', col_c_val).strip()
-                    
-                    # 2. 깨끗해진 라벨에서 찐 기본 문항번호 추출 (예: "Q14. 가장..." -> "Q14")
                     current_label_base = utils.extract_base_name(clean_label)
                     if not current_label_base: 
                         current_label_base = col_a_val 
 
                     is_matched = False
-                    search_base_raw = col_a_val.lower() # 파생 변수를 찾기 위한 베이스 키워드
+                    search_base_raw = col_a_val.lower() 
+                    search_label_base = current_label_base
 
-                    # [로직 1] 정확히 일치하는 경우 (단수응답 등)
+                    # [로직 1] 정확히 일치하는 경우
                     if col_a_val.lower() in raw_cols_map:
                         raw_original = raw_cols_map[col_a_val.lower()]
                         new_var_name = utils.sanitize_var_name(current_label_base)
@@ -102,14 +93,13 @@ if uploaded_file:
                     if not is_matched:
                         rk_match = re.search(r'^(.*?)_?rk(\d+)$', col_a_val.lower())
                         if rk_match:
-                            base_raw = rk_match.group(1)   
-                            rank_num = rk_match.group(2) 
+                            base_raw = rk_match.group(1)   # 예: q39
+                            rank_num = rk_match.group(2)   # 예: 1
                             expected_raw_col = f"{base_raw}_{rank_num}" 
                             
                             if expected_raw_col in raw_cols_map:
                                 raw_original = raw_cols_map[expected_raw_col]
-                                current_label_base = f"{current_label_base}_{rank_num}" # 라벨도 Q14_1 꼴로 변경
-                                new_var_name = utils.sanitize_var_name(current_label_base)
+                                new_var_name = utils.sanitize_var_name(f"{current_label_base}_{rank_num}")
                                 
                                 temp_vars.append({
                                     "Raw 변수명": raw_original,
@@ -119,22 +109,23 @@ if uploaded_file:
                                     "상태": "매칭 성공 (순위 문항)"
                                 })
                                 is_matched = True
-                                search_base_raw = expected_raw_col # 파생 변수 베이스를 Q39_1_ 등으로 변경
+                                # [핵심 수정] 주관식 탐색을 위해 꼬리표 범위를 q39RK1_가 아닌 q39_ 전체로 확장!
+                                search_base_raw = base_raw 
+                                search_label_base = current_label_base
 
-                    # [로직 3] 파생 변수 탐색 (is_matched 여부 무관!)
-                    # 단수/순위 문항의 정확한 짝을 찾았더라도 그 뒤에 Q1_etc 등이 널부러져 있을 수 있으므로 무조건 탐색
+                    # [로직 3] 기타/파생 변수 탐색 (Q39_7 같은 주관식 전부 싹쓸이)
                     prefix = search_base_raw + "_"
                     found_multiples = []
                     for rc_lower, rc_original in raw_cols_map.items():
                         if rc_lower.startswith(prefix):
                             found_multiples.append((rc_lower, rc_original))
                     
-                    for _, rc_original in found_multiples:
+                    for rc_lower, rc_original in found_multiples:
                         suffix = rc_original[len(search_base_raw):] 
                         if not suffix.startswith('_') and not suffix.startswith('-'):
                             suffix = "_" + suffix
 
-                        new_name = utils.sanitize_var_name(current_label_base + suffix)
+                        new_name = utils.sanitize_var_name(search_label_base + suffix)
                         state_msg = "매칭 성공 (기타/파생 변수)" if is_matched else "매칭 성공 (세트 문항)"
                         
                         temp_vars.append({
@@ -145,12 +136,12 @@ if uploaded_file:
                             "상태": state_msg
                         })
 
-                # --- [Step 2] 최적 매칭 선정 (경합 방지) ---
+                # --- [Step 2] 최적 매칭 선정 (중복/경합 방지) ---
                 best_match_dict = {}
                 for item in temp_vars:
                     raw_col = item['Raw 변수명']
                     
-                    # 우선순위: 정확한 매칭 1순위 > 세트문항 2순위 > 잡다한 파생 3순위
+                    # 우선순위: 1순위(정확한 매칭/순위) > 2순위(세트) > 3순위(잡다한 파생)
                     def get_prio(s):
                         if s in ["매칭 성공", "매칭 성공 (순위 문항)"]: return 1
                         if s == "매칭 성공 (세트 문항)": return 2
@@ -168,7 +159,7 @@ if uploaded_file:
                 
                 final_data = []
                 
-                # --- [Step 3] Raw 데이터 원본 순서대로 뷰어 구성 (가독성 극대화) ---
+                # --- [Step 3] Raw 데이터 원본 순서대로 뷰어 구성 ---
                 for raw_col in df_raw.columns:
                     raw_col_str = str(raw_col).strip()
                     
