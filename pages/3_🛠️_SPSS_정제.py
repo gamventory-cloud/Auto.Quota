@@ -5,6 +5,7 @@ import collections
 import traceback
 import sys
 import os
+import re  # [NEW] 순위 문항 정규식 탐색을 위해 추가됨
 
 # (주의) utils 모듈이 같은 폴더나 상위 폴더에 있어야 합니다.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,7 +22,8 @@ st.markdown("""
 * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
 * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-* **기능 3:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
+* **기능 3:** 순위 문항(RK) 자동 매칭 (예: Code북 `Q39RK1` ↔ Raw `Q39_1`)
+* **기능 4:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
 # 1. 파일 업로드
@@ -45,14 +47,14 @@ if uploaded_file:
         # 분석 시작 버튼
         if st.button("분석 시작", key="analyze_btn"):
             with st.spinner('데이터 분석 및 매칭 중...'):
-                # [NEW] 분석 시작 시 모든 시트를 미리 읽어둠 (다운로드용)
+                # 분석 시작 시 모든 시트를 미리 읽어둠 (다운로드용)
                 st.session_state['spss_all_sheets'] = pd.read_excel(uploaded_file, sheet_name=None)
                 st.session_state['spss_target_sheets'] = [raw_sheet] # 기본 타겟은 선택한 Raw 시트
 
                 # 데이터프레임 로드 (분석용)
                 df_raw = st.session_state['spss_all_sheets'][raw_sheet]
                 
-                # [수정] header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
+                # header=None 옵션 추가: 첫 번째 줄(Q1)도 데이터로 읽기 위해
                 df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
                 
                 # Raw 데이터 컬럼 매핑 (소문자 -> 원본)
@@ -70,12 +72,14 @@ if uploaded_file:
                     
                     if not col_a_val: continue
                     
-                    # [핵심] 라벨에서 기본 이름 추출 (예: "SQ1. 성별" -> "SQ1")
+                    # 라벨에서 기본 이름 추출 (예: "SQ1. 성별" -> "SQ1")
                     label_base = utils.extract_base_name(col_c_val)
                     if not label_base: 
                         label_base = col_a_val # 실패 시 Code명 사용
 
                     # [스마트 매칭 로직]
+                    is_matched = False
+
                     # 1. 정확히 일치하는 경우
                     if col_a_val.lower() in raw_cols_map:
                         raw_original = raw_cols_map[col_a_val.lower()]
@@ -88,53 +92,70 @@ if uploaded_file:
                             "변경할 변수명": new_var_name,
                             "상태": "매칭 성공"
                         })
+                        is_matched = True
 
-                    # 2. 복수응답/세트 문항 탐색 (예: Q5 -> q5_1, q5_2...)
-                    prefix = col_a_val.lower() + "_"
-                    found_multiples = []
-                    for rc_lower, rc_original in raw_cols_map.items():
-                        if rc_lower.startswith(prefix):
-                            found_multiples.append((rc_lower, rc_original))
-                    
-                    # 찾은 복수응답 컬럼들 추가
-                    for _, rc_original in found_multiples:
-                        # 접미사 추출
-                        suffix = rc_original[len(col_a_val):] 
-                        if not suffix.startswith('_') and not suffix.startswith('-'):
-                            suffix = "_" + suffix
+                    # 2. [NEW] 순위 문항 탐색 (예: Code북 Q39RK1 -> Raw Q39_1)
+                    if not is_matched:
+                        # RK 뒤에 숫자가 오는 패턴 탐색 (예: q39rk1, q39_rk2)
+                        rk_match = re.search(r'^(.*?)_?rk(\d+)$', col_a_val.lower())
+                        if rk_match:
+                            base_q = rk_match.group(1)   # 예: q39
+                            rank_num = rk_match.group(2) # 예: 1
+                            expected_raw_col = f"{base_q}_{rank_num}" # 예: q39_1
+                            
+                            if expected_raw_col in raw_cols_map:
+                                raw_original = raw_cols_map[expected_raw_col]
+                                new_var_name = utils.sanitize_var_name(label_base)
+                                
+                                temp_vars.append({
+                                    "Raw 변수명": raw_original,
+                                    "Code 변수명": col_a_val,
+                                    "질문 내용": col_c_val,
+                                    "변경할 변수명": new_var_name,
+                                    "상태": "매칭 성공 (순위 문항)"
+                                })
+                                is_matched = True
 
-                        # 라벨 기반 이름 + 접미사
-                        new_name = utils.sanitize_var_name(label_base + suffix)
+                    # 3. 복수응답/세트 문항 탐색 (예: Code북 Q5 -> Raw q5_1, q5_2...)
+                    if not is_matched:
+                        prefix = col_a_val.lower() + "_"
+                        found_multiples = []
+                        for rc_lower, rc_original in raw_cols_map.items():
+                            if rc_lower.startswith(prefix):
+                                found_multiples.append((rc_lower, rc_original))
                         
-                        temp_vars.append({
-                            "Raw 변수명": rc_original,
-                            "Code 변수명": col_a_val,
-                            "질문 내용": col_c_val,
-                            "변경할 변수명": new_name,
-                            "상태": "매칭 성공 (세트)"
-                        })
+                        # 찾은 복수응답 컬럼들 추가
+                        for _, rc_original in found_multiples:
+                            # 접미사 추출
+                            suffix = rc_original[len(col_a_val):] 
+                            if not suffix.startswith('_') and not suffix.startswith('-'):
+                                suffix = "_" + suffix
 
-                # --- [Step 2] 중복 변수명 처리 로직 (추가됨) ---
-                # 1. 먼저 생성된 모든 변수명의 빈도수를 체크
+                            # 라벨 기반 이름 + 접미사
+                            new_name = utils.sanitize_var_name(label_base + suffix)
+                            
+                            temp_vars.append({
+                                "Raw 변수명": rc_original,
+                                "Code 변수명": col_a_val,
+                                "질문 내용": col_c_val,
+                                "변경할 변수명": new_name,
+                                "상태": "매칭 성공 (세트 문항)"
+                            })
+
+                # --- [Step 2] 중복 변수명 처리 로직 ---
                 name_freq = collections.Counter([item['변경할 변수명'] for item in temp_vars])
-                
-                # 2. 중복 카운터 준비
                 name_counter = collections.defaultdict(int)
                 
                 final_data = []
                 seen_raw = set()
                 
-                # 3. 리스트를 다시 돌면서 중복인 경우 번호 부여
                 for item in temp_vars:
-                    # 이미 처리한 Raw 변수는 패스
                     if item['Raw 변수명'] in seen_raw: continue
                     
                     candidate_name = item['변경할 변수명']
                     
-                    # 중복이 발생하는 이름인 경우에만 번호 붙임 (단독은 그대로)
                     if name_freq[candidate_name] > 1:
                         name_counter[candidate_name] += 1
-                        # _1, _2 ... 순서대로 붙임
                         final_name = f"{candidate_name}_{name_counter[candidate_name]}"
                     else:
                         final_name = candidate_name
@@ -147,7 +168,6 @@ if uploaded_file:
                 for raw_col in df_raw.columns:
                     raw_col_str = str(raw_col).strip()
                     
-                    # [수정] NO, ID 등 불필요한 컬럼은 실패 목록에서 제외
                     if raw_col_str.lower() in ['no', 'id', '번호', '순번']: continue
                     
                     if raw_col_str not in seen_raw:
@@ -191,13 +211,10 @@ if 'spss_result_df' in st.session_state:
     st.markdown("---")
     st.markdown("### 3. 파일 내보내기")
     
-    c1, c2, c3 = st.columns(3) # 컬럼 3개로 변경
+    c1, c2, c3 = st.columns(3)
     
     with c1:
-        # [수정] Syntax 생성 및 다운로드를 한 번에 처리
-        # 현재 에디터 상태(edited_df)를 기반으로 Syntax 생성
         sps_lines = []
-        # [수정] 파일 경로에 쌍따옴표(") 적용
         sps_lines.append(f'* Auto Generated Syntax for {st.session_state["spss_file_name"]}.')
         sps_lines.append(f'GET FILE="{st.session_state["spss_file_name"]}.sav".')
         sps_lines.append("RENAME VARIABLES")
@@ -207,19 +224,17 @@ if 'spss_result_df' in st.session_state:
             old_v = str(row['Raw 변수명']).strip()
             new_v = str(row['변경할 변수명']).strip()
             
-            if old_v and new_v and (old_v.lower() != new_v.lower()):
+            if old_v and new_v and (old_v.lower() != new_v.lower()) and new_v != "nan":
                 sps_lines.append(f"  ({old_v} = {new_v})")
                 count += 1
                 
         sps_lines.append(".")
         sps_lines.append("EXECUTE.")
-        # [수정] 파일 경로에 쌍따옴표(") 적용
         sps_lines.append(f'SAVE OUTFILE="{st.session_state["spss_file_name"]}_Renamed.sav".')
         sps_lines.append("EXECUTE.")
         
         final_sps = "\n".join(sps_lines)
         
-        # [수정] 한글 깨짐 방지를 위해 cp949 인코딩 적용
         try:
             final_sps_bytes = final_sps.encode('cp949')
         except UnicodeEncodeError:
@@ -237,7 +252,6 @@ if 'spss_result_df' in st.session_state:
             st.caption(f"✅ 총 {count}개의 변환 구문이 포함됩니다.")
 
     with c2:
-        # [수정] 매핑 테이블을 엑셀로 변경
         out_map = io.BytesIO()
         with pd.ExcelWriter(out_map, engine='xlsxwriter') as writer:
             edited_df.to_excel(writer, index=False)
@@ -250,43 +264,30 @@ if 'spss_result_df' in st.session_state:
         )
 
     with c3:
-        # [NEW] 변환된 데이터 엑셀 다운로드 (스타일 제거: 헤더를 데이터로 처리)
         if 'spss_all_sheets' in st.session_state:
             out_data = io.BytesIO()
             
             with pd.ExcelWriter(out_data, engine='xlsxwriter') as writer:
-                # 1. 변경할 이름 딕셔너리 생성
                 rename_map = {}
                 for _, row in edited_df.iterrows():
-                    if row['변경할 변수명'] and str(row['변경할 변수명']).strip():
+                    if row['변경할 변수명'] and str(row['변경할 변수명']).strip() and str(row['변경할 변수명']).strip() != "nan":
                         rename_map[row['Raw 변수명']] = str(row['변경할 변수명']).strip()
                 
-                # 2. 모든 시트 순회
                 for sheet_name, df_sheet in st.session_state['spss_all_sheets'].items():
-                    # 타겟 시트 확인 (DATA, LABEL, 또는 선택한 Raw 시트)
                     is_target = (sheet_name == st.session_state.get('spss_target_sheets', [''])[0]) or \
                                 ('DATA' in sheet_name.upper()) or ('LABEL' in sheet_name.upper())
                     
                     if is_target:
-                        # 1행: 새 변수명 (매칭된 것, 없으면 원래 이름)
                         row1 = [rename_map.get(str(col).strip(), str(col).strip()) for col in df_sheet.columns]
-                        # 2행: 기존 변수명 (Original Header)
                         row2 = df_sheet.columns.tolist()
                         
-                        # 데이터프레임 조립 (헤더 스타일 제거를 위해 데이터로 취급)
-                        # Header DF (2줄)
                         df_header = pd.DataFrame([row1, row2]) 
-                        # Data DF (Index 무시하고 값만)
                         df_body = pd.DataFrame(df_sheet.values)
                         
-                        # 합치기
                         df_export = pd.concat([df_header, df_body], ignore_index=True)
-                        
-                        # 저장 (header=False, index=False -> 스타일 없는 순수 데이터)
                         df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                         
                     else:
-                        # 타겟 아니면 원본 그대로 (단, 스타일 제거를 위해 헤더를 데이터로 내림)
                         row1 = df_sheet.columns.tolist()
                         df_header = pd.DataFrame([row1])
                         df_body = pd.DataFrame(df_sheet.values)
