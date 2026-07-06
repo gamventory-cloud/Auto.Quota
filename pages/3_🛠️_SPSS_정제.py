@@ -22,7 +22,7 @@ st.markdown("""
 * **Code북 규칙:** 1열=변수명(Q1), **2열=질문라벨(SQ1. 성별...)**
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
 * **기능 2:** 척도 문항 등으로 변수명이 중복될 경우, 자동으로 `_1`, `_2`, `_3`을 붙여서 구분
-* **기능 3:** 순위 문항(RK) 자동 매칭 (예: Code북 `Q39RK1` ↔ Raw `Q39_1` → 새 변수명 `Q39_1`)
+* **기능 3:** 순위 문항(RK) 자동 매칭 및 `(1순위)` 텍스트 제거 후 설문 문항 번호(Q14) 추출
 * **기능 4:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
@@ -67,17 +67,19 @@ if uploaded_file:
                     if len(row) < 2: continue
                     if pd.isna(row.iloc[0]): continue
                     
-                    col_a_val = utils.clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q1
-                    col_c_val = utils.clean_text(row.iloc[1]) # 질문 라벨 - 예: SQ1. 성별
+                    col_a_val = utils.clean_text(row.iloc[0]) # 변수명 (Code) - 예: Q39RK1
+                    col_c_val = utils.clean_text(row.iloc[1]) # 질문 라벨 - 예: (1순위) Q14. 가장 좋아하는...
                     
                     if not col_a_val: continue
                     
-                    # 라벨에서 기본 이름 추출 (예: "SQ1. 성별" -> "SQ1")
-                    label_base = utils.extract_base_name(col_c_val)
+                    # [핵심 수정] 1. 라벨에서 (1순위), [2순위], 1순위 등 불필요한 텍스트 먼저 싹 제거
+                    clean_label = re.sub(r'[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*', '', col_c_val).strip()
+                    
+                    # [핵심 수정] 2. 깨끗해진 라벨에서 찐 기본 문항번호 추출 (예: "Q14. 가장..." -> "Q14")
+                    label_base = utils.extract_base_name(clean_label)
                     if not label_base: 
                         label_base = col_a_val # 실패 시 Code명 사용
 
-                    # [스마트 매칭 로직]
                     is_matched = False
 
                     # 1. 정확히 일치하는 경우
@@ -96,19 +98,17 @@ if uploaded_file:
 
                     # 2. [NEW] 순위 문항 탐색 (예: Code북 Q39RK1 -> Raw Q39_1)
                     if not is_matched:
-                        # RK 뒤에 숫자가 오는 패턴 탐색 (예: q39rk1, q39_rk2)
                         rk_match = re.search(r'^(.*?)_?rk(\d+)$', col_a_val.lower())
                         if rk_match:
-                            base_q = rk_match.group(1)   # 예: q39
+                            base_raw = rk_match.group(1)   # 예: q39
                             rank_num = rk_match.group(2) # 예: 1
-                            expected_raw_col = f"{base_q}_{rank_num}" # 예: q39_1
+                            expected_raw_col = f"{base_raw}_{rank_num}" # 예: q39_1
                             
                             if expected_raw_col in raw_cols_map:
                                 raw_original = raw_cols_map[expected_raw_col]
                                 
-                                # [핵심 수정] 엉뚱한 텍스트가 섞일 수 있는 label_base 대신, 
-                                # Code북의 고유 영문명(base_q)을 대문자로 픽스하여 사용합니다. (예: q14 -> Q14_1)
-                                new_var_name = utils.sanitize_var_name(f"{base_q.upper()}_{rank_num}")
+                                # [핵심 수정] 3. Data시트 이름(Q39)이 아닌, 라벨에서 뽑아낸 찐 문항번호(Q14)와 순위 결합!
+                                new_var_name = utils.sanitize_var_name(f"{label_base}_{rank_num}")
                                 
                                 temp_vars.append({
                                     "Raw 변수명": raw_original,
@@ -127,14 +127,11 @@ if uploaded_file:
                             if rc_lower.startswith(prefix):
                                 found_multiples.append((rc_lower, rc_original))
                         
-                        # 찾은 복수응답 컬럼들 추가
                         for _, rc_original in found_multiples:
-                            # 접미사 추출
                             suffix = rc_original[len(col_a_val):] 
                             if not suffix.startswith('_') and not suffix.startswith('-'):
                                 suffix = "_" + suffix
 
-                            # 라벨 기반 이름 + 접미사
                             new_name = utils.sanitize_var_name(label_base + suffix)
                             
                             temp_vars.append({
