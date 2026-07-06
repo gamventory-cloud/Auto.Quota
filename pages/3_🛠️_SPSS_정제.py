@@ -106,8 +106,9 @@ if uploaded_file:
                             if expected_raw_col in raw_cols_map:
                                 raw_original = raw_cols_map[expected_raw_col]
                                 
-                                # [핵심 수정] 새 변수명 생성 시 label_base 뒤에 _순위번호를 강제 할당!
-                                new_var_name = utils.sanitize_var_name(f"{label_base}_{rank_num}")
+                                # [핵심 수정] 엉뚱한 텍스트가 섞일 수 있는 label_base 대신, 
+                                # Code북의 고유 영문명(base_q)을 대문자로 픽스하여 사용합니다. (예: q14 -> Q14_1)
+                                new_var_name = utils.sanitize_var_name(f"{base_q.upper()}_{rank_num}")
                                 
                                 temp_vars.append({
                                     "Raw 변수명": raw_original,
