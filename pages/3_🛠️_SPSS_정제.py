@@ -23,7 +23,8 @@ st.markdown("""
 * **기능 2:** Code북에 `문1`, `문2_1`로 표기된 변수를 `Q1`, `Q2_1`로 자동 치환하여 인식
 * **기능 3:** 척도 문항 중복 시 `_1`, `_2` 자동 부여 및 순위 문항(RK) 완벽 매칭
 * **기능 4:** 파생 변수(`_7`, `_etc` 등) 탐색 시 **라벨에 `[기타]` 꼬리표 자동 추가**
-* **기능 5:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
+* **기능 5 [NEW]:** 내보내는 엑셀 파일의 **Code북 시트 내 변수명도 바뀐 새 이름에 맞게 자동 갱신**
+* **기능 6:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
 
 # 1. 파일 업로드
@@ -50,7 +51,10 @@ if uploaded_file:
                 st.session_state['spss_target_sheets'] = [raw_sheet]
 
                 df_raw = st.session_state['spss_all_sheets'][raw_sheet]
+                
+                # [NEW] 원본 Code북 구조를 인덱스로 정밀 제어하기 위해 세션에 저장
                 df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
+                st.session_state['spss_df_code'] = df_code
                 
                 raw_cols_map = {str(col).strip().lower(): str(col).strip() for col in df_raw.columns}
                 temp_vars = []
@@ -60,13 +64,13 @@ if uploaded_file:
                     if len(row) < 2: continue
                     if pd.isna(row.iloc[0]): continue
                     
-                    col_a_val = utils.clean_text(row.iloc[0]) # 예: Q39RK1 또는 문1
+                    col_a_val = utils.clean_text(row.iloc[0]) # 예: 문1
                     
-                    # [핵심 수정] Code명에 '문1', '문 2_1' 등으로 적혀있으면 'Q1', 'Q2_1'로 자동 치환
+                    # Code명에 '문1', '문 2_1' 등으로 적혀있으면 'Q1', 'Q2_1'로 자동 치환
                     if col_a_val:
                         col_a_val = re.sub(r'^문\s*(\d)', r'Q\1', col_a_val)
 
-                    col_c_val = utils.clean_text(row.iloc[1]) # 예: (1순위) Q14. 가장 좋아하는...
+                    col_c_val = utils.clean_text(row.iloc[1]) # 질문 라벨
                     
                     if not col_a_val: continue
                     
@@ -74,7 +78,6 @@ if uploaded_file:
                     clean_label = re.sub(r'[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*', '', col_c_val).strip()
                     current_label_base = utils.extract_base_name(clean_label)
                     
-                    # [핵심 수정] 라벨에서 뽑아낸 베이스명도 '문1' 형태라면 'Q1'로 통일
                     if current_label_base:
                         current_label_base = re.sub(r'^문\s*(\d)', r'Q\1', current_label_base)
                     else:
@@ -94,7 +97,8 @@ if uploaded_file:
                             "Code 변수명": col_a_val,
                             "질문 내용": col_c_val,
                             "변경할 변수명": new_var_name,
-                            "상태": "매칭 성공"
+                            "상태": "매칭 성공",
+                            "code_idx": idx # 고유 행 번호 추적
                         })
                         is_matched = True
 
@@ -102,8 +106,8 @@ if uploaded_file:
                     if not is_matched:
                         rk_match = re.search(r'^(.*?)_?rk(\d+)$', col_a_val.lower())
                         if rk_match:
-                            base_raw = rk_match.group(1)   # 예: q39
-                            rank_num = rk_match.group(2)   # 예: 1
+                            base_raw = rk_match.group(1)   
+                            rank_num = rk_match.group(2)   
                             expected_raw_col = f"{base_raw}_{rank_num}" 
                             
                             if expected_raw_col in raw_cols_map:
@@ -115,7 +119,8 @@ if uploaded_file:
                                     "Code 변수명": col_a_val,
                                     "질문 내용": col_c_val,
                                     "변경할 변수명": new_var_name,
-                                    "상태": "매칭 성공 (순위 문항)"
+                                    "상태": "매칭 성공 (순위 문항)",
+                                    "code_idx": idx # 고유 행 번호 추적
                                 })
                                 is_matched = True
                                 search_base_raw = base_raw 
@@ -135,7 +140,6 @@ if uploaded_file:
 
                         new_name = utils.sanitize_var_name(search_label_base + suffix)
                         
-                        # 파생/기타 변수는 라벨 뒤에 [기타]를 명시적으로 붙여줌
                         if is_matched:
                             state_msg = "매칭 성공 (기타/파생 변수)"
                             display_label = f"{clean_label} [기타]"
@@ -148,7 +152,8 @@ if uploaded_file:
                             "Code 변수명": col_a_val,
                             "질문 내용": display_label,
                             "변경할 변수명": new_name,
-                            "상태": state_msg
+                            "상태": state_msg,
+                            "code_idx": idx # 고유 행 번호 추적
                         })
 
                 # --- [Step 2] 최적 매칭 선정 (중복/경합 방지) ---
@@ -156,7 +161,6 @@ if uploaded_file:
                 for item in temp_vars:
                     raw_col = item['Raw 변수명']
                     
-                    # 우선순위: 1순위(정확한 매칭/순위) > 2순위(세트) > 3순위(잡다한 파생)
                     def get_prio(s):
                         if s in ["매칭 성공", "매칭 성공 (순위 문항)"]: return 1
                         if s == "매칭 성공 (세트 문항)": return 2
@@ -177,7 +181,6 @@ if uploaded_file:
                 # --- [Step 3] Raw 데이터 원본 순서대로 뷰어 구성 ---
                 for raw_col in df_raw.columns:
                     raw_col_str = str(raw_col).strip()
-                    
                     if raw_col_str.lower() in ['no', 'id', '번호', '순번']: continue
                     
                     if raw_col_str in best_match_dict:
@@ -201,6 +204,29 @@ if uploaded_file:
                             "상태": "매칭 실패 (확인 필요)"
                         })
                 
+                # [NEW] 최종 결정된 매핑 정보를 바탕으로 Code북 업데이트 딕셔너리 생성
+                final_code_updates = {}
+                for item in final_data:
+                    if 'code_idx' in item and item['변경할 변수명']:
+                        r_idx = item['code_idx']
+                        status = item['상태']
+                        assigned_name = item['변경할 변수명']
+                        
+                        # 복수응답/세트/기타 파생의 경우 상위 변수 대푯값으로 치환 (예: Q14_1 -> Q14)
+                        if "기타" in status or "세트" in status:
+                            base_match = re.match(r'^(.*?)_([^_]+)$', assigned_name)
+                            if base_match:
+                                assigned_name = base_match.group(1)
+                                
+                        # 우선순위가 높은 매칭이 이미 들어가 있다면 덮어쓰지 않음
+                        if r_idx in final_code_updates:
+                            old_status = final_code_updates[r_idx]['status']
+                            if old_status in ["매칭 성공", "매칭 성공 (순위 문항)"]:
+                                continue
+                                
+                        final_code_updates[r_idx] = {'name': assigned_name, 'status': status}
+                
+                st.session_state['spss_code_updates'] = {k: v['name'] for k, v in final_code_updates.items()}
                 st.session_state['spss_result_df'] = pd.DataFrame(final_data)
                 st.session_state['spss_file_name'] = uploaded_file.name.split('.')[0]
                 st.success("분석이 완료되었습니다! 아래 표에서 결과를 확인하세요.")
@@ -232,7 +258,6 @@ if 'spss_result_df' in st.session_state:
     # 3. 다운로드 버튼
     st.markdown("---")
     st.markdown("### 3. 파일 내보내기")
-    
     c1, c2, c3 = st.columns(3)
     
     with c1:
@@ -245,7 +270,6 @@ if 'spss_result_df' in st.session_state:
         for _, row in edited_df.iterrows():
             old_v = str(row['Raw 변수명']).strip()
             new_v = str(row['변경할 변수명']).strip()
-            
             if old_v and new_v and (old_v.lower() != new_v.lower()) and new_v != "nan":
                 sps_lines.append(f"  ({old_v} = {new_v})")
                 count += 1
@@ -256,7 +280,6 @@ if 'spss_result_df' in st.session_state:
         sps_lines.append("EXECUTE.")
         
         final_sps = "\n".join(sps_lines)
-        
         try:
             final_sps_bytes = final_sps.encode('cp949')
         except UnicodeEncodeError:
@@ -277,7 +300,6 @@ if 'spss_result_df' in st.session_state:
         out_map = io.BytesIO()
         with pd.ExcelWriter(out_map, engine='xlsxwriter') as writer:
             edited_df.to_excel(writer, index=False)
-            
         st.download_button(
             label="📄 매핑 테이블(XLSX) 다운로드",
             data=out_map.getvalue(),
@@ -288,7 +310,6 @@ if 'spss_result_df' in st.session_state:
     with c3:
         if 'spss_all_sheets' in st.session_state:
             out_data = io.BytesIO()
-            
             with pd.ExcelWriter(out_data, engine='xlsxwriter') as writer:
                 rename_map = {}
                 for _, row in edited_df.iterrows():
@@ -305,15 +326,24 @@ if 'spss_result_df' in st.session_state:
                         
                         df_header = pd.DataFrame([row1, row2]) 
                         df_body = pd.DataFrame(df_sheet.values)
-                        
                         df_export = pd.concat([df_header, df_body], ignore_index=True)
                         df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
+                        
+                    elif sheet_name == code_sheet and 'spss_df_code' in st.session_state:
+                        # [NEW] Code북 시트인 경우 추적된 인덱스 맵을 활용해 바뀐 변수명으로 완벽 매칭 및 갱신
+                        df_code_export = st.session_state['spss_df_code'].copy()
+                        code_updates = st.session_state.get('spss_code_updates', {})
+                        
+                        for r_idx, new_name in code_updates.items():
+                            if r_idx < len(df_code_export):
+                                df_code_export.iloc[r_idx, 0] = new_name
+                        
+                        df_code_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                         
                     else:
                         row1 = df_sheet.columns.tolist()
                         df_header = pd.DataFrame([row1])
                         df_body = pd.DataFrame(df_sheet.values)
-                        
                         df_export = pd.concat([df_header, df_body], ignore_index=True)
                         df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
             
