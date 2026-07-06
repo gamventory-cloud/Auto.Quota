@@ -20,8 +20,8 @@ st.header("📊 SPSS 변수명 자동 정제 & 신텍스 생성")
 st.markdown("""
 **Raw 데이터**와 **Code북**을 비교하여 SPSS 변수명 변경 신텍스를 생성합니다.
 * **기능 1:** 라벨의 앞부분(SQ1)을 추출하여 변수명으로 자동 변환
-* **기능 2:** 척도 문항 중복 시 `_1`, `_2` 자동 부여
-* **기능 3:** 순위 문항(RK) 완벽 매칭 (라벨 내 불필요 텍스트 자동 제거)
+* **기능 2:** Code북에 `문1`, `문2_1`로 표기된 변수를 `Q1`, `Q2_1`로 자동 치환하여 인식
+* **기능 3:** 척도 문항 중복 시 `_1`, `_2` 자동 부여 및 순위 문항(RK) 완벽 매칭
 * **기능 4:** 파생 변수(`_7`, `_etc` 등) 탐색 시 **라벨에 `[기타]` 꼬리표 자동 추가**
 * **기능 5:** 엑셀 다운로드 시 **순수 데이터(디자인 없음)** + **1행: 새변수명, 2행: 기존변수명** 적용
 """)
@@ -60,7 +60,12 @@ if uploaded_file:
                     if len(row) < 2: continue
                     if pd.isna(row.iloc[0]): continue
                     
-                    col_a_val = utils.clean_text(row.iloc[0]) # 예: Q39RK1
+                    col_a_val = utils.clean_text(row.iloc[0]) # 예: Q39RK1 또는 문1
+                    
+                    # [핵심 수정] Code명에 '문1', '문 2_1' 등으로 적혀있으면 'Q1', 'Q2_1'로 자동 치환
+                    if col_a_val:
+                        col_a_val = re.sub(r'^문\s*(\d)', r'Q\1', col_a_val)
+
                     col_c_val = utils.clean_text(row.iloc[1]) # 예: (1순위) Q14. 가장 좋아하는...
                     
                     if not col_a_val: continue
@@ -68,7 +73,11 @@ if uploaded_file:
                     # 1. 불필요한 라벨 텍스트 정리 (순위 등)
                     clean_label = re.sub(r'[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*', '', col_c_val).strip()
                     current_label_base = utils.extract_base_name(clean_label)
-                    if not current_label_base: 
+                    
+                    # [핵심 수정] 라벨에서 뽑아낸 베이스명도 '문1' 형태라면 'Q1'로 통일
+                    if current_label_base:
+                        current_label_base = re.sub(r'^문\s*(\d)', r'Q\1', current_label_base)
+                    else:
                         current_label_base = col_a_val 
 
                     is_matched = False
@@ -126,7 +135,7 @@ if uploaded_file:
 
                         new_name = utils.sanitize_var_name(search_label_base + suffix)
                         
-                        # [핵심 수정] 파생/기타 변수는 라벨 뒤에 [기타]를 명시적으로 붙여줌
+                        # 파생/기타 변수는 라벨 뒤에 [기타]를 명시적으로 붙여줌
                         if is_matched:
                             state_msg = "매칭 성공 (기타/파생 변수)"
                             display_label = f"{clean_label} [기타]"
@@ -148,7 +157,6 @@ if uploaded_file:
                     raw_col = item['Raw 변수명']
                     
                     # 우선순위: 1순위(정확한 매칭/순위) > 2순위(세트) > 3순위(잡다한 파생)
-                    # 만약 Q39_1이 로직2(1순위)와 로직3(3순위)에서 중복발견되면 1순위를 채택
                     def get_prio(s):
                         if s in ["매칭 성공", "매칭 성공 (순위 문항)"]: return 1
                         if s == "매칭 성공 (세트 문항)": return 2
