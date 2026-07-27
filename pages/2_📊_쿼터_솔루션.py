@@ -92,7 +92,7 @@ if data_file:
     ex_configs = []
     
     # 추가 쿼터 6개로 확장
-    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4", "추가 5", "추가 6"])
+    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4", "추가 5", "추가 6", "추가 7", "추가 8"])
     
     for i, tab in enumerate(tabs):
         with tab:
