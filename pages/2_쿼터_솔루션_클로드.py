@@ -1,5 +1,14 @@
 """
-2___쿼터_솔루션.py  (patched)
+╔══════════════════════════════════════════════════════════════════════════╗
+║  파일명 : 2___쿼터_솔루션.py                                               ║
+║  위치   : pages/2___쿼터_솔루션.py   ← 반드시 pages/ 폴더 안!               ║
+║                                                                          ║
+║  이 파일은 화면(UI) 코드입니다. utils.py 에 붙여넣으면                      ║
+║  NameError: name 'utils' is not defined 가 발생합니다.                     ║
+║  utils.py 는 별도 파일이며 리포 최상단에 둡니다.                            ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+2___쿼터_솔루션.py — 쿼터 자동 할당 화면
 
 주요 변경점
 -----------
@@ -7,12 +16,12 @@
 2. 키 생성을 설정 화면과 실행 시점이 같은 함수(utils.build_*_keys)로 공유
    -> 화면에 보이는 집계와 실제 매칭 대상이 어긋나던 문제 해소
    -> df_proc 사본 자체가 불필요해져 제거
-3. @st.cache_data 로 리런마다 반복되던 전처리/집계 제거
+3. @st.cache_data 로 리런마다 반복되던 전처리/집계 제거 (메모리 상한 포함)
 4. 목표값 입력 오류를 조용히 삼키지 않고 경고로 표시
 5. 실행 전 정합성 프리플라이트 : 데이터에 아예 없는 쿼터 셀을 미리 경고
 6. 인덱스 int 강제 캐스팅 제거 (문자열 ID 인덱스에서 죽던 문제)
 7. 시트명 충돌 방지, Main_Status index=False, 0 나누기 가드
-8. joblib 백엔드 선택 옵션 + 시도 횟수 올림 분배
+8. 계산 방식 선택 : 정확해(ILP) / 휴리스틱(그리디)
 """
 
 import streamlit as st
@@ -26,8 +35,41 @@ import sys
 import os
 import traceback
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import utils
+# 리포 최상단(부모 디렉터리)과 현재 디렉터리를 모두 경로에 넣는다.
+# 이 파일이 pages/ 안에 있어도, 실수로 최상단에 있어도 utils 를 찾는다.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (os.path.dirname(_HERE), _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# --- utils 임포트 가드 -------------------------------------------------------
+# 파일 내용이 뒤섞였을 때 원시 트레이스백 대신 무엇을 고쳐야 하는지 알려준다.
+try:
+    import utils
+    if getattr(utils, "MODULE_ROLE", None) != "utils":
+        raise ImportError("utils.py 의 내용이 공용 모듈이 아닙니다.")
+except Exception:
+    st.error(
+        "### ❌ utils.py 를 불러오지 못했습니다\n\n"
+        "**파일 내용이 서로 바뀐 경우가 대부분입니다.** 아래를 확인하세요.\n\n"
+        "| 파일 | 있어야 하는 것 | 없어야 하는 것 |\n"
+        "|---|---|---|\n"
+        "| `utils.py` (최상단) | `def norm_val`, `def check_password` | `st.set_page_config` |\n"
+        "| `pages/2___쿼터_솔루션.py` | `st.file_uploader`, `import utils` | `def norm_val` |\n\n"
+        "`utils.py` 안에 `import utils` 나 `st.set_page_config` 가 보이면 "
+        "그 파일에 화면 코드가 잘못 들어간 것입니다."
+    )
+    st.code(traceback.format_exc())
+    st.stop()
+
+# ILP 솔버는 선택적 의존성 (pip install ortools)
+try:
+    import quota_ilp
+    if getattr(quota_ilp, "MODULE_ROLE", None) != "quota_ilp":
+        raise ImportError("quota_ilp.py 의 내용이 올바르지 않습니다.")
+    HAS_ILP, ILP_ERR = True, None
+except Exception as _e:
+    quota_ilp, HAS_ILP, ILP_ERR = None, False, str(_e)
 
 st.set_page_config(page_title="쿼터 솔루션", layout="wide")
 
@@ -38,28 +80,30 @@ st.title("📊 쿼터 자동 할당 솔루션")
 n_cores = cpu_count()
 st.sidebar.caption(f"🖥️ CPU 코어: {n_cores}개")
 
-MAX_GRID_CELLS = 20000   # 교차표 폭발 방지 임계치
+MAX_GRID_CELLS = 20000       # 교차표 폭발 방지 임계치
+CACHE_MAX_ENTRIES = 6        # 캐시 항목 상한 (배포 환경 메모리 보호)
+CACHE_TTL = 3600             # 캐시 유효 시간(초)
 
 
 # ==============================================================================
 # 캐시 래퍼 : 설정 화면과 실행 시점이 같은 결과를 공유하도록 보장한다
 # ==============================================================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=CACHE_MAX_ENTRIES, ttl=CACHE_TTL)
 def cached_simple_keys(df, cols):
     return utils.build_simple_keys(df, list(cols))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=CACHE_MAX_ENTRIES, ttl=CACHE_TTL)
 def cached_tuple_keys(df, cols):
     return utils.build_tuple_keys(df, list(cols))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=CACHE_MAX_ENTRIES, ttl=CACHE_TTL)
 def cached_grid_keys(df, cols):
     return utils.build_grid_keys(df, list(cols))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=CACHE_MAX_ENTRIES, ttl=CACHE_TTL)
 def cached_pivot(df, row_cols, col_name):
     """교차표(행 변수 × 열 변수) 집계. 값은 전부 norm_val 로 정규화된 상태."""
     cols = list(row_cols) + [col_name]
@@ -265,20 +309,43 @@ if data_file:
     # ==========================================================================
     st.divider()
     st.subheader("3. 실행 옵션")
+    solver_opts = (["정확해 (ILP)", "휴리스틱 (그리디)"] if HAS_ILP
+                   else ["휴리스틱 (그리디)"])
+    solver_kind = st.radio(
+        "계산 방식", solver_opts, horizontal=True,
+        help=("ILP: 최적해임을 증명하고, 미달 시 어느 상한이 막는지 정확히 알려줍니다. "
+              "그리디: 랜덤 재시작 휴리스틱으로 최적성 보장이 없습니다.")
+    )
+    if not HAS_ILP:
+        st.caption(f"ℹ️ ILP 사용 불가 (`pip install ortools`) — {ILP_ERR}")
+    use_ilp = solver_kind.startswith("정확해")
+
     c1, c2 = st.columns(2)
     with c1:
         c_no = st.selectbox("ID 컬럼", df_survey.columns)
         tol = st.number_input("허용 오차", 0, 100, 0)
-        jitter = st.slider("탐색 폭 (지터)", 0.0, 0.5, 0.15, 0.05,
-                           help="클수록 다양한 조합을 시도합니다. 0이면 항상 같은 해만 나옵니다.")
+        rand_pick = st.checkbox(
+            "동일 조건 응답자 무작위 선택", value=True,
+            help="같은 쿼터 조합을 가진 응답자 중 누구를 뽑을지 무작위로 결정합니다. "
+                 "끄면 데이터 순서대로 뽑아 결과가 완전히 재현됩니다.")
     with c2:
-        iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
-        backend = st.selectbox(
-            "병렬 방식", ["프로세스 (loky)", "스레드 (threading)"],
-            help=("워커가 파이썬 루프 위주라 스레드는 GIL 때문에 거의 빨라지지 않습니다. "
-                  "기본은 프로세스이며, 데이터가 매우 크면 직렬화 비용 때문에 "
-                  "스레드가 나을 수도 있습니다.")
-        )
+        if use_ilp:
+            time_limit = st.number_input("시간 제한(초)", 5, 600, 60, 5)
+            balance = st.checkbox(
+                "부족분 고르게 분산", value=True,
+                help="총 부족 인원을 최소화한 뒤, 특정 셀에 부족이 몰리지 않도록 재조정합니다.")
+            iters, backend, jitter = 0, None, 0.0
+        else:
+            iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
+            jitter = st.slider("탐색 폭 (지터)", 0.0, 0.5, 0.15, 0.05,
+                               help="0이면 항상 같은 해만 나옵니다.")
+            backend = st.selectbox(
+                "병렬 방식", ["프로세스 (loky)", "스레드 (threading)"],
+                help=("워커가 파이썬 루프 위주라 스레드는 GIL 때문에 거의 빨라지지 "
+                      "않습니다. 데이터가 매우 크면 직렬화 비용 때문에 스레드가 "
+                      "나을 수도 있습니다.")
+            )
+            time_limit, balance = 0, False
 
     if st.button("🚀 매칭 시작", type="primary"):
         if not main_map:
@@ -324,9 +391,28 @@ if data_file:
                         + (" ..." if len(ghosts) > 10 else "")
                     )
 
-                # ------------------------------------------------------------------
+                ex_maps = [c['map'] for c in ex_configs]
+                indices = df_survey.index.to_numpy()
+                pick_rng = np.random.default_rng(0) if rand_pick else None
+                ilp_sol = None
+
+            # ======================================================================
+            # 실행 (A) 정확해 : 정수계획법
+            # ======================================================================
+            if use_ilp:
+                with st.spinner("정수계획법으로 최적해 탐색 중..."):
+                    ilp_sol = quota_ilp.solve_quota_ilp(
+                        m_keys, ex_keys_list, main_map, ex_maps, indices,
+                        balance=balance, time_limit=time_limit,
+                        workers=n_cores, rng=pick_rng)
+                g_best_cnt, g_best_idxs = ilp_sol.total, ilp_sol.selected
+
+            # ======================================================================
+            # 실행 (B) 휴리스틱 : 랜덤 재시작 그리디
+            # ======================================================================
+            else:
+              with st.spinner("희소성 계산 및 병렬 연산 중..."):
                 # 희소성 점수 : 보유/목표 비율이 낮을수록 먼저 뽑는다
-                # ------------------------------------------------------------------
                 if use_main:
                     score_main = np.array([
                         m_cnt.get(k, 0) / main_map[k] if main_map.get(k, 0) > 0
@@ -511,6 +597,63 @@ if data_file:
                 st.error("⚠️ 목표 인원을 달성하지 못했습니다. 아래 분석을 확인하세요.")
             else:
                 st.success("🎉 목표 인원을 모두 달성했습니다!")
+
+            # ------------------------------------------------------------------
+            # ILP 전용: 최적성 보증 + 병목 진단
+            # ------------------------------------------------------------------
+            if ilp_sol is not None:
+                if ilp_sol.proven_optimal:
+                    st.success(
+                        f"✅ **최적해임이 증명되었습니다.** 이 조건에서 {ilp_sol.total:,}명보다 "
+                        f"많이 뽑는 방법은 존재하지 않습니다. "
+                        f"(프로파일 {ilp_sol.n_profiles:,}개로 집약 / {ilp_sol.solve_sec:.2f}초)"
+                    )
+                else:
+                    st.warning(
+                        f"⏱️ 시간 제한({time_limit}초) 내에 최적성을 증명하지 못했습니다 "
+                        f"(상태: {ilp_sol.status}). 현재 해는 유효하지만 더 나은 해가 "
+                        f"있을 수 있습니다. 시간 제한을 늘려보세요."
+                    )
+
+                d = ilp_sol.diagnosis
+                if is_fail:
+                    st.markdown("#### 🧭 왜 목표를 못 채웠는가")
+
+                    if d.group_relax_gain:
+                        rows = [{'추가 쿼터 그룹': ex_configs[j]['name'],
+                                 '이 그룹 상한을 없애면': f"+{gain:,}명 확보 가능"}
+                                for j, gain in sorted(d.group_relax_gain.items(),
+                                                      key=lambda x: -x[1])]
+                        st.markdown("**어느 그룹이 막고 있는지**")
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                                     hide_index=True)
+
+                    if d.value_relax_gain:
+                        rows = [{'그룹': ex_configs[j]['name'],
+                                 '항목': " / ".join(k) if isinstance(k, tuple) else str(k),
+                                 '상한 +1명당 확보': f"+{gain:,}명"}
+                                for (j, k), gain in sorted(d.value_relax_gain.items(),
+                                                           key=lambda x: -x[1])]
+                        st.markdown("**한도를 조금만 풀면 효과가 큰 항목** (섀도 프라이스)")
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                                     hide_index=True)
+                        st.caption("추가 쿼터 상한을 1명 늘렸을 때 전체 확보 인원이 "
+                                   "몇 명 늘어나는지를 실제로 재계산한 값입니다.")
+
+                    if not d.group_relax_gain and not d.value_relax_gain:
+                        st.info("추가 쿼터를 전부 해제해도 인원이 늘지 않습니다. "
+                                "미달은 순수하게 **데이터에 해당 응답자가 없어서**입니다. "
+                                "표본을 더 확보하거나 목표를 조정해야 합니다.")
+
+                if d.binding:
+                    with st.expander(f"한도까지 꽉 찬 추가 쿼터 {len(d.binding)}건 (병목 후보)"):
+                        st.dataframe(pd.DataFrame([
+                            {'그룹': ex_configs[b['group']]['name'],
+                             '항목': " / ".join(b['key']) if isinstance(b['key'], tuple)
+                                     else str(b['key']),
+                             '상한': b['cap'], '사용': b['used']}
+                            for b in d.binding
+                        ]), use_container_width=True, hide_index=True)
 
             # ------------------------------------------------------------------
             # 차트
