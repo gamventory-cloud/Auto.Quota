@@ -324,10 +324,18 @@ if data_file:
     with c1:
         c_no = st.selectbox("ID 컬럼", df_survey.columns)
         tol = st.number_input("허용 오차", 0, 100, 0)
-        rand_pick = st.checkbox(
-            "동일 조건 응답자 무작위 선택", value=True,
-            help="같은 쿼터 조합을 가진 응답자 중 누구를 뽑을지 무작위로 결정합니다. "
-                 "끄면 데이터 순서대로 뽑아 결과가 완전히 재현됩니다.")
+        use_intval = st.checkbox(
+            "intval 최적화", value=True,
+            help="쿼터 조건이 완전히 같은 응답자들 사이에서, intval 값이 낮은 쪽을 "
+                 "먼저 탈락시킵니다. 조건이 다른 응답자끼리는 영향이 없으므로 "
+                 "최종 통과 인원수는 달라지지 않습니다.")
+        c_int = st.selectbox("intval 컬럼", df_survey.columns) if use_intval else None
+        if not use_intval:
+            rand_pick = st.checkbox(
+                "동일 조건 응답자 무작위 선택", value=True,
+                help="끄면 데이터 순서대로 뽑아 결과가 완전히 재현됩니다.")
+        else:
+            rand_pick = False
     with c2:
         if use_ilp:
             time_limit = st.number_input("시간 제한(초)", 5, 600, 60, 5)
@@ -396,6 +404,20 @@ if data_file:
                 pick_rng = np.random.default_rng(0) if rand_pick else None
                 ilp_sol = None
 
+                # --- intval 타이브레이크 ---
+                tiebreak = None
+                if use_intval and c_int:
+                    tiebreak, n_ok, n_bad = utils.build_tiebreak(df_survey, c_int)
+                    if n_ok == 0:
+                        st.error(
+                            f"`{c_int}` 컬럼에서 숫자를 하나도 읽지 못했습니다. "
+                            "intval 최적화를 끄거나 숫자 컬럼을 선택하세요.")
+                        st.stop()
+                    if n_bad:
+                        st.warning(
+                            f"⚠️ `{c_int}` 컬럼에 숫자가 아닌 값/결측이 {n_bad:,}건 "
+                            "있습니다. 해당 응답자는 **가장 먼저 탈락**합니다.")
+
             # ======================================================================
             # 실행 (A) 정확해 : 정수계획법
             # ======================================================================
@@ -404,7 +426,7 @@ if data_file:
                     ilp_sol = quota_ilp.solve_quota_ilp(
                         m_keys, ex_keys_list, main_map, ex_maps, indices,
                         balance=balance, time_limit=time_limit,
-                        workers=n_cores, rng=pick_rng)
+                        workers=n_cores, rng=pick_rng, tiebreak=tiebreak)
                 g_best_cnt, g_best_idxs = ilp_sol.total, ilp_sol.selected
 
             # ======================================================================
@@ -462,7 +484,7 @@ if data_file:
                     delayed(utils.simulation_worker)(
                         seed, ipc, indices, final_scarcity_scores, m_keys, ex_keys_list,
                         main_map, [c['map'] for c in ex_configs],
-                        soft_target, target_total, jitter
+                        soft_target, target_total, jitter, tiebreak
                     ) for seed in range(n_cores)
                 )
 
@@ -592,6 +614,27 @@ if data_file:
             c3.metric("📈 달성률", f"{rate:.1f}%",
                       delta=f"{g_best_cnt - target_total}명" if is_fail else "목표 달성",
                       delta_color="inverse" if is_fail else "normal")
+
+            # ------------------------------------------------------------------
+            # intval 적용 검증 : 통과자의 intval 이 실제로 더 높은지 확인
+            # ------------------------------------------------------------------
+            if tiebreak is not None and fin_idxs:
+                tb_all = pd.Series(tiebreak, index=df_survey.index).replace(
+                    [-np.inf, np.inf], np.nan)
+                tb_pass = tb_all.loc[fin_idxs].dropna()
+                tb_drop = tb_all.drop(index=fin_idxs).dropna()
+                if len(tb_pass) and len(tb_drop):
+                    i1, i2, i3 = st.columns(3)
+                    i1.metric(f"통과자 {c_int} 평균", f"{tb_pass.mean():,.1f}")
+                    i2.metric(f"탈락자 {c_int} 평균", f"{tb_drop.mean():,.1f}",
+                              delta=f"{tb_drop.mean() - tb_pass.mean():,.1f}")
+                    i3.metric(f"통과자 {c_int} 최소", f"{tb_pass.min():,.1f}")
+                    st.caption(
+                        f"쿼터 조건이 같은 응답자 중 `{c_int}` 값이 낮은 쪽을 먼저 "
+                        "탈락시킨 결과입니다. 조건이 다른 응답자끼리는 비교하지 않으므로 "
+                        "통과자 평균이 항상 더 높다고 보장되지는 않습니다 "
+                        "(희소한 셀에서는 값이 낮아도 뽑아야 합니다)."
+                    )
 
             if is_fail:
                 st.error("⚠️ 목표 인원을 달성하지 못했습니다. 아래 분석을 확인하세요.")
