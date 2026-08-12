@@ -143,6 +143,22 @@ def build_grid_keys(df, cols):
     return [[t] for t in build_tuple_keys(df, cols)]
 
 
+def build_tiebreak(df, col):
+    """
+    intval 타이브레이크용 배열을 만든다.
+
+    "쿼터 조건이 같으면 값이 낮은 응답자를 먼저 제외" 규칙이므로
+    **값이 큰 쪽을 먼저 선택**하는 실수 배열을 반환한다.
+    숫자로 변환할 수 없는 값과 결측은 -inf 로 두어 가장 먼저 탈락시킨다.
+
+    반환: (배열, 유효 개수, 무효/결측 개수)
+    """
+    s = pd.to_numeric(pd.Series(df[col]).replace('', np.nan), errors='coerce')
+    bad = int(s.isna().sum())
+    arr = s.fillna(-np.inf).to_numpy(dtype=float)
+    return arr, int(len(s) - bad), bad
+
+
 # ==============================================================================
 # 2. 텍스트 / 파일 유틸
 # ==============================================================================
@@ -319,10 +335,17 @@ def check_password():
 # 5. 시뮬레이션 워커
 # ==============================================================================
 def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys_list,
-                      main_map, ex_maps, soft_target, target_total=None, jitter=0.15):
+                      main_map, ex_maps, soft_target, target_total=None, jitter=0.15,
+                      tiebreak=None):
     """
     희소성 점수 순으로 응답자를 그리디 선택하되, 매 반복마다 점수에 지터를 주어
     서로 다른 해를 탐색한다. 최선의 (선택 인원수, 인덱스 리스트) 를 반환.
+
+    tiebreak : 행별 실수 배열. 쿼터 조건이 완전히 같은 응답자들 사이에서
+               **값이 큰 쪽을 먼저 선택**한다 (= 값이 작은 쪽이 먼저 탈락).
+               결측은 -inf 로 넣어 가장 먼저 탈락시킨다.
+               쿼터 조건이 다른 응답자끼리는 영향을 주지 않으므로
+               최종 인원수는 이 값과 무관하다.
 
     변경점
       - np.random.default_rng(seed) : 스레드마다 독립 RNG.
@@ -330,6 +353,9 @@ def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys
       - 곱셈 지터 : scarcity_scores 의 절대 스케일(추가 쿼터 수, 999 페널티)에
         관계없이 일정한 탐색 강도를 유지한다.
         기존 `+ uniform(0, 0.5)` 는 점수가 수백대면 순서를 전혀 못 바꿨다.
+      - 지터를 행 단위가 아니라 **프로파일(동일 쿼터 조건) 단위**로 뽑는다.
+        같은 조건 응답자는 서로 교환 가능하므로 그들 사이를 무작위로 섞는 것은
+        탐색에 아무 도움이 안 되고, tiebreak 순서만 망가뜨린다.
       - 목표 인원 도달 시 내부 루프 즉시 종료.
       - 목표가 0인 메인 키에 속한 행은 정렬 대상에서 사전 제외.
     """
@@ -353,11 +379,28 @@ def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys
     ex_keys_e = [[ex_keys_list[j][i] for i in pos] for j, _ in active]
     n = pos.size
 
+    tb = None
+    if tiebreak is not None:
+        tb = np.asarray(tiebreak, dtype=float)[pos]
+
+    # --- 프로파일 id : 쿼터 조건이 완전히 같은 행끼리 같은 번호 ---
+    # 지터를 프로파일 단위로 주고, 프로파일 내부는 tiebreak 순서를 유지한다.
+    sig_to_id, prof = {}, np.empty(n, dtype=np.int64)
+    for a in range(n):
+        sig = (m_keys_e[a],
+               tuple(tuple(ex_keys_e[g][a]) for g in range(len(active))))
+        prof[a] = sig_to_id.setdefault(sig, len(sig_to_id))
+    n_prof = len(sig_to_id)
+
     best_cnt, best_idxs = 0, []
 
     for _ in range(num_iters):
-        scores = base_scores * rng.uniform(1.0 - jitter, 1.0 + jitter, size=n)
-        order = np.argsort(scores, kind='stable')
+        scores = base_scores * rng.uniform(1.0 - jitter, 1.0 + jitter, size=n_prof)[prof]
+        if tb is None:
+            order = np.argsort(scores, kind='stable')
+        else:
+            # lexsort 는 마지막 키가 1차 기준. 점수 오름차순 → tiebreak 내림차순
+            order = np.lexsort((-tb, scores))
 
         m_cnt = collections.defaultdict(int)
         ex_cnts = [collections.defaultdict(int) for _ in active]
