@@ -339,9 +339,23 @@ if data_file:
     with c2:
         if use_ilp:
             time_limit = st.number_input("시간 제한(초)", 5, 600, 60, 5)
+            ilp_priority = st.checkbox(
+                "희소 쿼터 우선 채우기", value=True,
+                help="통과 인원을 최대로 확정한 뒤, 대체 인원이 없는 희소한 셀을 "
+                     "먼저 채웁니다. 총 인원은 줄지 않습니다. 끄면 어느 셀을 "
+                     "채울지 임의로 결정됩니다.")
+            min_fill = st.slider(
+                "셀별 최소 달성률", 0.0, 1.0, 0.7, 0.05, format="%.0f%%",
+                disabled=not ilp_priority,
+                help="희소 셀을 우선하더라도 어떤 셀도 이 비율 미만으로 떨어지지 "
+                     "않게 합니다. 0%로 두면 흔한 셀이 0명이 될 수 있습니다. "
+                     "만족 불가능하면 자동으로 하한 없이 재계산하고 알려줍니다."
+            ) if ilp_priority else 0.0
             balance = st.checkbox(
                 "부족분 고르게 분산", value=True,
-                help="총 부족 인원을 최소화한 뒤, 특정 셀에 부족이 몰리지 않도록 재조정합니다.")
+                help="희소 셀 우선 배분이 끝난 뒤, 남은 부족이 특정 셀에 몰리지 "
+                     "않도록 재조정합니다. 희소 쿼터 우선보다 뒤 단계이므로 "
+                     "희소 셀의 자리를 빼앗지 않습니다.")
             iters, backend, jitter = 0, None, 0.0
         else:
             iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
@@ -353,7 +367,7 @@ if data_file:
                       "않습니다. 데이터가 매우 크면 직렬화 비용 때문에 스레드가 "
                       "나을 수도 있습니다.")
             )
-            time_limit, balance = 0, False
+            time_limit, balance, ilp_priority, min_fill = 0, False, False, 0.0
 
     if st.button("🚀 매칭 시작", type="primary"):
         if not main_map:
@@ -425,7 +439,8 @@ if data_file:
                 with st.spinner("정수계획법으로 최적해 탐색 중..."):
                     ilp_sol = quota_ilp.solve_quota_ilp(
                         m_keys, ex_keys_list, main_map, ex_maps, indices,
-                        balance=balance, time_limit=time_limit,
+                        priority=ilp_priority, balance=balance,
+                        min_fill=min_fill, time_limit=time_limit,
                         workers=n_cores, rng=pick_rng, tiebreak=tiebreak)
                 g_best_cnt, g_best_idxs = ilp_sol.total, ilp_sol.selected
 
@@ -657,6 +672,9 @@ if data_file:
                         f"(상태: {ilp_sol.status}). 현재 해는 유효하지만 더 나은 해가 "
                         f"있을 수 있습니다. 시간 제한을 늘려보세요."
                     )
+
+                for _n in getattr(ilp_sol, "notes", []):
+                    st.warning(f"⚠️ {_n}")
 
                 d = ilp_sol.diagnosis
                 if is_fail:
