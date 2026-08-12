@@ -1,141 +1,572 @@
+"""
+2___쿼터_솔루션.py  (patched)
+
+주요 변경점
+-----------
+1. 로컬 normalize_val / clean_series 삭제 -> utils.norm_val / norm_series 로 통일
+2. 키 생성을 설정 화면과 실행 시점이 같은 함수(utils.build_*_keys)로 공유
+   -> 화면에 보이는 집계와 실제 매칭 대상이 어긋나던 문제 해소
+   -> df_proc 사본 자체가 불필요해져 제거
+3. @st.cache_data 로 리런마다 반복되던 전처리/집계 제거
+4. 목표값 입력 오류를 조용히 삼키지 않고 경고로 표시
+5. 실행 전 정합성 프리플라이트 : 데이터에 아예 없는 쿼터 셀을 미리 경고
+6. 인덱스 int 강제 캐스팅 제거 (문자열 ID 인덱스에서 죽던 문제)
+7. 시트명 충돌 방지, Main_Status index=False, 0 나누기 가드
+8. joblib 백엔드 선택 옵션 + 시도 횟수 올림 분배
+"""
+
 import streamlit as st
 import pandas as pd
-import chardet
 import io
-import re
-import numpy as np
 import collections
+import numpy as np
+import altair as alt
+from joblib import Parallel, delayed, cpu_count
+import sys
+import os
+import traceback
 
-# 1. 텍스트 정제 함수
-def clean_text(text):
-    """줄바꿈, 탭, 불필요한 공백을 제거합니다."""
-    if pd.isna(text): return ""
-    text = str(text).strip()
-    return text.replace("\n", "").replace("\r", "").replace("\t", "")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import utils
 
-def extract_base_name(text):
-    """질문 라벨에서 마침표(.) 앞부분만 추출합니다."""
-    text = clean_text(text)
-    if "." in text:
-        return text.split(".")[0].strip()
-    return text.strip()
+st.set_page_config(page_title="쿼터 솔루션", layout="wide")
 
-def sanitize_var_name(text):
-    """SPSS 변수명 규칙에 맞게 특수문자를 제거합니다."""
-    text = str(text)
-    text = text.replace("-", "_").replace(" ", "_")
-    text = re.sub(r"[^a-zA-Z0-9_]", "", text)
-    text = re.sub(r"__+", "_", text)
-    return text
+if not utils.check_password():
+    st.stop()
 
-# 2. 파일 로드 함수
-def load_df(file):
-    if file is None: return None
+st.title("📊 쿼터 자동 할당 솔루션")
+n_cores = cpu_count()
+st.sidebar.caption(f"🖥️ CPU 코어: {n_cores}개")
+
+MAX_GRID_CELLS = 20000   # 교차표 폭발 방지 임계치
+
+
+# ==============================================================================
+# 캐시 래퍼 : 설정 화면과 실행 시점이 같은 결과를 공유하도록 보장한다
+# ==============================================================================
+@st.cache_data(show_spinner=False)
+def cached_simple_keys(df, cols):
+    return utils.build_simple_keys(df, list(cols))
+
+
+@st.cache_data(show_spinner=False)
+def cached_tuple_keys(df, cols):
+    return utils.build_tuple_keys(df, list(cols))
+
+
+@st.cache_data(show_spinner=False)
+def cached_grid_keys(df, cols):
+    return utils.build_grid_keys(df, list(cols))
+
+
+@st.cache_data(show_spinner=False)
+def cached_pivot(df, row_cols, col_name):
+    """교차표(행 변수 × 열 변수) 집계. 값은 전부 norm_val 로 정규화된 상태."""
+    cols = list(row_cols) + [col_name]
+    base = pd.DataFrame({c: utils.norm_series(df[c]) for c in cols})
+    for c in cols:
+        uv = sorted(base[c].unique(), key=utils.natural_key)
+        base[c] = pd.Categorical(base[c], categories=uv, ordered=True)
+    return base.groupby(cols, observed=False).size().unstack(fill_value=0)
+
+
+def parse_target(v):
+    """목표값 파싱. 유효하지 않으면 None."""
     try:
-        if file.name.endswith('.csv'):
-            raw = file.read(); enc = chardet.detect(raw)['encoding']
-            return pd.read_csv(io.BytesIO(raw), encoding=enc if enc else 'utf-8')
-        return pd.read_excel(file)
-    except Exception as e:
-        st.error(f"파일 로드 실패: {e}"); return None
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(f) or f < 0 or f != int(f):
+        return None
+    return int(f)
 
-# 3. 쿼터/데이터 처리 관련 함수
-def clean_val(v):
-    if pd.isna(v): return "NaN"
-    return str(v).strip().split('.')[0]
 
-def collect_values_from_cols(row, columns):
-    values = set()
-    for c in columns:
-        val = row[c]
-        if pd.notna(val) and str(val).strip() != "":
-            values.add(str(val).strip().split('.')[0])
-    return sorted(list(values))
+def warn_bad(bad_labels, where):
+    if bad_labels:
+        head = ", ".join(str(b) for b in bad_labels[:5])
+        more = f" 외 {len(bad_labels) - 5}건" if len(bad_labels) > 5 else ""
+        st.warning(
+            f"⚠️ {where}: 목표값이 올바르지 않아 **{len(bad_labels)}개 항목을 건너뛰었습니다** "
+            f"({head}{more}). 0 이상의 정수를 입력하세요."
+        )
 
-def natural_key(string_):
-    target = str(string_)
-    return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', target)]
 
-def transform_pivoted_quota(df_raw):
-    try:
-        qt3_labels = [clean_val(x) for x in df_raw.iloc[1, 2:].dropna().values]
-        data_rows = df_raw.iloc[2:].copy()
-        data_rows.iloc[:, 0] = data_rows.iloc[:, 0].ffill()
-        data_rows.columns = ['qt1', 'qt2'] + qt3_labels
-        flat = data_rows.melt(id_vars=['qt1', 'qt2'], var_name='qt3', value_name='target')
-        for col in ['qt1', 'qt2', 'qt3']: flat[col] = flat[col].apply(clean_val)
-        flat['target'] = pd.to_numeric(flat['target'], errors='coerce').fillna(0).astype(int)
-        return flat
-    except: return None
+# ==============================================================================
+# 1. 데이터 업로드
+# ==============================================================================
+st.subheader("1. 데이터 업로드")
+data_file = st.file_uploader("설문 데이터", type=['csv', 'xlsx'], key="quota_up")
 
-def sanitize_sheet_name(name):
-    safe_name = re.sub(r'[\\/*?:\[\]]', '_', str(name))
-    if len(safe_name) > 30:
-        return safe_name[:28] + ".."
-    return safe_name
+if data_file:
+    df_survey = utils.load_df(data_file)
 
-# 4. 비밀번호 체크 함수 (모든 페이지 상단에 붙일 것)
-def check_password():
-    """Returns `True` if the user had the correct password."""
-    def password_entered():
-        if st.session_state["password"] == st.secrets["password"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
+    # [수정] load_df 는 실패 시 None 을 반환한다. 곧바로 len() 하면 TypeError.
+    if df_survey is None:
+        st.stop()
+    if df_survey.empty:
+        st.error("데이터가 비어 있습니다.")
+        st.stop()
+    if not df_survey.index.is_unique:
+        st.warning("인덱스에 중복이 있어 0부터 다시 매깁니다.")
+        df_survey = df_survey.reset_index(drop=True)
+
+    st.success(f"로드 완료: {len(df_survey)}명")
+    st.divider()
+
+    # ==========================================================================
+    # 2. 쿼터 설정
+    # ==========================================================================
+    st.subheader("2. 쿼터 설정")
+    use_main = st.checkbox("✅ 메인 쿼터 사용", value=True)
+    main_map = {}
+    algo_main_cols = []
+    main_mode = 'grid'
+
+    if use_main:
+        q_mode = st.radio("메인 쿼터 방식", ["엑셀 업로드", "화면 설계"], horizontal=True)
+
+        if q_mode == "엑셀 업로드":
+            qf = st.file_uploader("쿼터 파일", type=['xlsx'])
+            c1, c2, c3 = st.columns(3)
+            with c1: q1 = st.selectbox("qt1", df_survey.columns)
+            with c2: q2 = st.selectbox("qt2", df_survey.columns)
+            with c3: q3 = st.selectbox("qt3", df_survey.columns)
+            if qf:
+                algo_main_cols = [q1, q2, q3]
+                try:
+                    raw = pd.read_excel(qf, 0, header=None)
+                    flat = utils.transform_pivoted_quota(raw)
+                    # 키는 utils.norm_val 로 이미 정규화되어 있다
+                    main_map = {
+                        (r.qt1, r.qt2, r.qt3): int(r.target)
+                        for r in flat.itertuples()
+                    }
+                    st.caption(f"쿼터 셀 {len(main_map)}개 / 목표 합계 {sum(main_map.values()):,}명")
+                except Exception as e:
+                    # [수정] bare except 제거. 원인을 그대로 보여준다.
+                    st.error(f"쿼터 엑셀 파싱 실패 — {type(e).__name__}: {e}")
+                    with st.expander("상세 오류"):
+                        st.code(traceback.format_exc())
+
         else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
-
-    if not st.session_state["password_correct"]:
-        st.title("🔒 접속 제한")
-        st.text_input("비밀번호를 입력하세요", type="password", on_change=password_entered, key="password")
-        st.error("지인들만 사용 가능한 비공개 프로그램입니다.")
-        return False
+            rv = st.multiselect("행(Row) 변수", df_survey.columns)
+            cv = st.selectbox("열(Col) 변수", ["(선택)"] + list(df_survey.columns))
+            if rv and cv != "(선택)":
+                if cv in rv:
+                    st.error("열 변수는 행 변수와 달라야 합니다.")
+                else:
+                    algo_main_cols = rv + [cv]
+                    pi = cached_pivot(df_survey, tuple(rv), cv)
+                    if pi.size > MAX_GRID_CELLS:
+                        st.error(f"교차표 셀이 {pi.size:,}개로 너무 많습니다. 변수를 줄이세요.")
+                    else:
+                        ed = st.data_editor(pi.reset_index(), use_container_width=True, disabled=rv)
+                        mlt = ed.melt(id_vars=rv, var_name=cv, value_name='target')
+                        bad = []
+                        for _, r in mlt.iterrows():
+                            key = tuple(utils.norm_val(r[c]) for c in algo_main_cols)
+                            t = parse_target(r['target'])
+                            if t is None:
+                                bad.append(" / ".join(key))
+                                continue
+                            if t > 0:
+                                main_map[key] = t
+                        warn_bad(bad, "메인 쿼터")
+                        st.caption(f"쿼터 셀 {len(main_map)}개 / 목표 합계 {sum(main_map.values()):,}명")
     else:
-        return True
+        main_map = {('All',): st.number_input("전체 목표", 1, 1000000, 1000)}
+        algo_main_cols = []
 
-# 5. 시뮬레이션 워커 (쿼터용)
-def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys_list, main_map, ex_maps, soft_target):
-    np.random.seed(seed)
-    local_best_cnt = 0
-    local_best_idxs = []
-    n_rows = len(indices)
-    
-    for _ in range(num_iters):
-        noise = np.random.uniform(0, 0.5, size=n_rows)
-        scores = scarcity_scores + noise
-        sorted_arg = np.argsort(scores) 
-        
-        m_cnt = collections.defaultdict(int)
-        ex_cnts = [collections.defaultdict(int) for _ in range(len(ex_maps))]
-        curr_idx = []
-        curr_c = 0
-        
-        for i in sorted_arg:
-            mk = m_keys[i]
-            limit = main_map.get(mk, 0)
-            if limit > 0 and m_cnt[mk] < limit:
-                all_extras_ok = True
-                for j, e_map in enumerate(ex_maps):
-                    if not e_map: continue 
-                    keys = ex_keys_list[j][i]
-                    for k in keys:
-                        if k in e_map and ex_cnts[j][k] >= e_map[k]:
-                            all_extras_ok = False; break
-                    if not all_extras_ok: break
-                
-                if all_extras_ok:
-                    m_cnt[mk] += 1
-                    for j, e_map in enumerate(ex_maps):
-                        if e_map:
-                            for k in ex_keys_list[j][i]: ex_cnts[j][k] += 1
-                    curr_idx.append(indices[i])
-                    curr_c += 1
-        
-        if curr_c > local_best_cnt:
-            local_best_cnt = curr_c
-            local_best_idxs = list(curr_idx)
-            if local_best_cnt >= soft_target: break
-                
-    return local_best_cnt, local_best_idxs
+    # --------------------------------------------------------------------------
+    # 추가 쿼터
+    # --------------------------------------------------------------------------
+    ex_configs = []
+    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4"])
+
+    for i, tab in enumerate(tabs):
+        with tab:
+            ex_mode = st.radio(
+                f"설정 방식 (그룹 {i+1})",
+                ["단순형 (변수 값별 할당)", "조합형 (행/열 교차 할당)"],
+                key=f"ex_mode_{i}", horizontal=True
+            )
+            config = {'cols': [], 'map': {}, 'name': f"Extra_{i+1}", 'mode': 'simple'}
+
+            if ex_mode.startswith("단순형"):
+                config['mode'] = 'simple'
+                cols = st.multiselect(f"변수 선택 (그룹 {i+1})", df_survey.columns, key=f"ms{i}")
+                if cols:
+                    config['cols'] = cols
+                    config['name'] = "_".join(str(c) for c in cols)
+
+                    # [핵심 수정] 실행 시점과 완전히 동일한 함수로 키를 만든다.
+                    # 예전 코드는 여기서 collect_values_from_cols(중복제거·결측제외)를 쓰고
+                    # 실행 시점엔 [str(r[c]) for c in cols] 를 써서 결과가 어긋났다.
+                    keys_setup = cached_simple_keys(df_survey, tuple(cols))
+                    counter = collections.Counter(v for ks in keys_setup for v in ks)
+
+                    if not counter:
+                        st.info("유효한 값이 없습니다 (전부 결측).")
+                    else:
+                        cnt = pd.DataFrame(
+                            sorted(counter.items(), key=lambda kv: utils.natural_key(kv[0])),
+                            columns=['값', '현재']
+                        )
+                        cnt['목표'] = cnt['현재']
+                        ed = st.data_editor(cnt, use_container_width=True,
+                                            disabled=['값', '현재'], key=f"ed{i}", hide_index=True)
+                        bad = []
+                        for _, r in ed.iterrows():
+                            t = parse_target(r['목표'])
+                            if t is None:
+                                bad.append(r['값'])
+                                continue
+                            if t > 0:
+                                config['map'][str(r['값'])] = t
+                        warn_bad(bad, f"추가 쿼터 {i+1}")
+
+            else:
+                config['mode'] = 'grid'
+                st.caption("행과 열을 교차하여 상세 목표를 설정합니다.")
+                ex_rv = st.multiselect(f"행(Row) 변수 (그룹 {i+1})", df_survey.columns, key=f"ex_rv_{i}")
+                ex_cv = st.selectbox(f"열(Col) 변수 (그룹 {i+1})",
+                                     ["(선택)"] + list(df_survey.columns), key=f"ex_cv_{i}")
+
+                if ex_rv and ex_cv != "(선택)":
+                    if ex_cv in ex_rv:
+                        st.error("열 변수는 행 변수와 달라야 합니다.")
+                    else:
+                        target_cols = ex_rv + [ex_cv]
+                        config['cols'] = target_cols
+                        config['name'] = "_".join(str(c) for c in target_cols)
+
+                        pi = cached_pivot(df_survey, tuple(ex_rv), ex_cv)
+                        if pi.size > MAX_GRID_CELLS:
+                            st.error(f"교차표 셀이 {pi.size:,}개로 너무 많습니다.")
+                        else:
+                            ed = st.data_editor(pi.reset_index(), use_container_width=True,
+                                                disabled=ex_rv, key=f"ex_ed_grid_{i}")
+                            mlt = ed.melt(id_vars=ex_rv, var_name=ex_cv, value_name='target')
+                            bad = []
+                            for _, r in mlt.iterrows():
+                                key = tuple(utils.norm_val(r[c]) for c in target_cols)
+                                t = parse_target(r['target'])
+                                if t is None:
+                                    bad.append(" / ".join(key))
+                                    continue
+                                if t > 0:
+                                    config['map'][key] = t
+                            warn_bad(bad, f"추가 쿼터 {i+1}")
+
+            ex_configs.append(config)
+
+    # ==========================================================================
+    # 3. 실행 옵션
+    # ==========================================================================
+    st.divider()
+    st.subheader("3. 실행 옵션")
+    c1, c2 = st.columns(2)
+    with c1:
+        c_no = st.selectbox("ID 컬럼", df_survey.columns)
+        tol = st.number_input("허용 오차", 0, 100, 0)
+        jitter = st.slider("탐색 폭 (지터)", 0.0, 0.5, 0.15, 0.05,
+                           help="클수록 다양한 조합을 시도합니다. 0이면 항상 같은 해만 나옵니다.")
+    with c2:
+        iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
+        backend = st.selectbox(
+            "병렬 방식", ["프로세스 (loky)", "스레드 (threading)"],
+            help=("워커가 파이썬 루프 위주라 스레드는 GIL 때문에 거의 빨라지지 않습니다. "
+                  "기본은 프로세스이며, 데이터가 매우 크면 직렬화 비용 때문에 "
+                  "스레드가 나을 수도 있습니다.")
+        )
+
+    if st.button("🚀 매칭 시작", type="primary"):
+        if not main_map:
+            st.error("목표가 설정되지 않았습니다.")
+            st.stop()
+        if use_main and not algo_main_cols:
+            st.error("메인 쿼터 변수를 선택하세요.")
+            st.stop()
+
+        try:
+            with st.spinner("희소성 계산 및 병렬 연산 중..."):
+                # ------------------------------------------------------------------
+                # 키 생성 : 설정 화면과 동일한 캐시 함수를 호출한다 (df_proc 불필요)
+                # ------------------------------------------------------------------
+                if use_main:
+                    m_keys = cached_tuple_keys(df_survey, tuple(algo_main_cols))
+                else:
+                    m_keys = [('All',)] * len(df_survey)
+
+                ex_keys_list = []
+                for cfg in ex_configs:
+                    if not cfg['cols']:
+                        ex_keys_list.append([[] for _ in range(len(df_survey))])
+                    elif cfg['mode'] == 'simple':
+                        ex_keys_list.append(cached_simple_keys(df_survey, tuple(cfg['cols'])))
+                    else:
+                        ex_keys_list.append(cached_grid_keys(df_survey, tuple(cfg['cols'])))
+
+                target_total = sum(main_map.values())
+                soft_target = max(0, target_total - tol)
+                m_cnt = collections.Counter(m_keys)
+
+                # ------------------------------------------------------------------
+                # 프리플라이트 : 데이터에 아예 존재하지 않는 쿼터 키 경고
+                # (정규화 불일치를 실행 전에 잡아내는 안전망)
+                # ------------------------------------------------------------------
+                ghosts = [k for k in main_map if m_cnt.get(k, 0) == 0]
+                if ghosts:
+                    st.warning(
+                        f"⚠️ 메인 쿼터 {len(ghosts)}개 셀이 데이터에 한 명도 없습니다. "
+                        f"목표 {sum(main_map[k] for k in ghosts):,}명은 달성 불가입니다.\n\n"
+                        + ", ".join(" / ".join(k) for k in ghosts[:10])
+                        + (" ..." if len(ghosts) > 10 else "")
+                    )
+
+                # ------------------------------------------------------------------
+                # 희소성 점수 : 보유/목표 비율이 낮을수록 먼저 뽑는다
+                # ------------------------------------------------------------------
+                if use_main:
+                    score_main = np.array([
+                        m_cnt.get(k, 0) / main_map[k] if main_map.get(k, 0) > 0
+                        else utils.MISS_PENALTY
+                        for k in m_keys
+                    ], dtype=float)
+                else:
+                    score_main = np.ones(len(df_survey), dtype=float)
+
+                score_extras = np.zeros(len(df_survey), dtype=float)
+                n_active_ex = sum(1 for c in ex_configs if c['cols'])
+                for j, cfg in enumerate(ex_configs):
+                    if not cfg['cols']:
+                        continue
+                    ex_cnt_total = collections.Counter(
+                        v for keys in ex_keys_list[j] for v in keys
+                    )
+                    ex_map = cfg['map']
+                    row_scores = np.empty(len(df_survey), dtype=float)
+                    for ridx, keys in enumerate(ex_keys_list[j]):
+                        if not keys:
+                            row_scores[ridx] = 1.0
+                            continue
+                        best = utils.MISS_PENALTY
+                        for k in keys:
+                            cap = ex_map.get(k, 0)
+                            s = ex_cnt_total[k] / cap if cap > 0 else utils.MISS_PENALTY
+                            if s < best:
+                                best = s
+                        row_scores[ridx] = best
+                    score_extras += row_scores
+
+                # [수정] 추가 그룹 수만큼 점수가 커져 메인 쿼터 영향력이 희석되던 문제.
+                # 그룹 평균을 써서 메인:추가 = 1:1 스케일로 맞춘다.
+                if n_active_ex:
+                    score_extras /= n_active_ex
+                final_scarcity_scores = score_main + score_extras
+
+                # ------------------------------------------------------------------
+                # 병렬 실행
+                # ------------------------------------------------------------------
+                jl_backend = "loky" if backend.startswith("프로세스") else "threading"
+                ipc = max(1, -(-int(iters) // n_cores))    # 올림 분배
+                indices = df_survey.index.to_numpy()
+
+                res = Parallel(n_jobs=n_cores, backend=jl_backend)(
+                    delayed(utils.simulation_worker)(
+                        seed, ipc, indices, final_scarcity_scores, m_keys, ex_keys_list,
+                        main_map, [c['map'] for c in ex_configs],
+                        soft_target, target_total, jitter
+                    ) for seed in range(n_cores)
+                )
+
+                g_best_cnt, g_best_idxs = 0, []
+                for c, ixs in res:
+                    if c > g_best_cnt:
+                        g_best_cnt, g_best_idxs = c, ixs
+
+            is_fail = g_best_cnt < soft_target
+
+            # ==================================================================
+            # 결과 집계
+            # ==================================================================
+            # [수정] int() 강제 캐스팅 제거. indices 는 원본 인덱스 라벨 그대로다.
+            fin_idxs = list(g_best_idxs)
+            pos_of = {lbl: p for p, lbl in enumerate(df_survey.index)}
+
+            final_m = collections.Counter()
+            final_exs = [collections.Counter() for _ in ex_configs]
+            for lbl in fin_idxs:
+                p = pos_of[lbl]
+                final_m[m_keys[p]] += 1
+                for j, cfg in enumerate(ex_configs):
+                    if cfg['cols']:
+                        for k in ex_keys_list[j][p]:
+                            final_exs[j][k] += 1
+
+            # ------------------------------------------------------------------
+            # 부족분 진단
+            # ------------------------------------------------------------------
+            recs = []
+            if is_fail:
+                if use_main:
+                    for k, tgt in main_map.items():
+                        act = final_m.get(k, 0)
+                        diff = tgt - act
+                        if diff > 0:
+                            raw_avail = m_cnt.get(k, 0)
+                            reason = "⚠️ 물리적 부족" if raw_avail < tgt else "⚔️ 경합 부족"
+                            recs.append({'순서': 0, '구분': '메인 쿼터', '항목': " / ".join(k),
+                                         '목표': tgt, '현재': act, '부족': diff,
+                                         '진단': reason, '전체보유': raw_avail})
+
+                for j, cfg in enumerate(ex_configs):
+                    if not cfg['cols']:
+                        continue
+                    raw_cnt_map = collections.Counter(
+                        v for keys in ex_keys_list[j] for v in keys
+                    )
+                    for k, tgt in cfg['map'].items():
+                        act = final_exs[j].get(k, 0)
+                        diff = tgt - act
+                        if diff > 0:
+                            raw_avail = raw_cnt_map.get(k, 0)
+                            reason = "⚠️ 물리적 부족" if raw_avail < tgt else "⚔️ 경합 부족"
+                            label = " / ".join(k) if isinstance(k, tuple) else str(k)
+                            recs.append({'순서': j + 1, '구분': cfg['name'], '항목': label,
+                                         '목표': tgt, '현재': act, '부족': diff,
+                                         '진단': reason, '전체보유': raw_avail})
+
+            # ------------------------------------------------------------------
+            # 엑셀 저장
+            # ------------------------------------------------------------------
+            df_out = df_survey.copy()
+            df_out['Chk'] = "제외"
+            df_out.loc[fin_idxs, 'Chk'] = "통과"
+
+            df_all = df_out.sort_values(by=c_no, ascending=True)
+            df_pass = df_out[df_out['Chk'] == "통과"].sort_values(c_no, ascending=True)
+
+            out = io.BytesIO()
+            used_sheets = set()
+            sheet_names = {}
+            with pd.ExcelWriter(out, engine='xlsxwriter') as w:
+                df_all.to_excel(w, index=False, sheet_name='Result_All')
+                df_pass.to_excel(w, index=False, sheet_name='Result_Pass')
+
+                if recs:
+                    df_excel = pd.DataFrame(recs)
+                    df_excel['sort_val'] = df_excel['항목'].map(lambda x: tuple(utils.natural_key(x)))
+                    df_excel = df_excel.sort_values(by=['순서', 'sort_val'])
+                    df_excel.drop(columns=['순서', 'sort_val']).to_excel(
+                        w, index=False, sheet_name='Shortage_Analysis')
+
+                if use_main:
+                    pd.DataFrame([
+                        {'Group': " / ".join(k), 'Target': v, 'Actual': final_m[k],
+                         'Diff': v - final_m[k]}
+                        for k, v in main_map.items()
+                    ]).to_excel(w, index=False, sheet_name='Main_Status')
+
+                for j, cfg in enumerate(ex_configs):
+                    if not cfg['cols']:
+                        continue
+                    # [수정] 같은 컬럼 조합이면 시트명이 충돌해 xlsxwriter 가 죽었다
+                    sname = utils.unique_sheet_name(cfg['name'], used_sheets)
+                    sheet_names[j] = sname
+                    data_e = [
+                        {'Value': " / ".join(k) if isinstance(k, tuple) else str(k),
+                         'Target': t, 'Actual': final_exs[j][k], 'Diff': t - final_exs[j][k]}
+                        for k, t in cfg['map'].items()
+                    ]
+                    if data_e:
+                        pd.DataFrame(data_e).sort_values(
+                            'Value', key=lambda c: c.map(utils.natural_key)
+                        ).to_excel(w, sheet_name=sname, index=False)
+
+            # ==================================================================
+            # 결과 표시
+            # ==================================================================
+            st.divider()
+            st.subheader("📊 할당 결과")
+
+            total_rows, pass_rows = len(df_out), len(df_pass)
+            st.info(f"💾 총 **{total_rows:,}명** "
+                    f"(통과 {pass_rows:,}명 + 제외 {total_rows - pass_rows:,}명) 저장 완료")
+
+            st.download_button(
+                "📥 결과 파일 다운로드" if not is_fail else "⚠️ 실패한 결과라도 다운로드",
+                out.getvalue(), "result.xlsx", type="primary", use_container_width=True
+            )
+
+            rate = (g_best_cnt / target_total * 100) if target_total else 0.0   # 0 나누기 가드
+            c1, c2, c3 = st.columns(3)
+            c1.metric("📌 전체 목표", f"{target_total:,}명")
+            c2.metric("✅ 매칭 성공", f"{g_best_cnt:,}명")
+            c3.metric("📈 달성률", f"{rate:.1f}%",
+                      delta=f"{g_best_cnt - target_total}명" if is_fail else "목표 달성",
+                      delta_color="inverse" if is_fail else "normal")
+
+            if is_fail:
+                st.error("⚠️ 목표 인원을 달성하지 못했습니다. 아래 분석을 확인하세요.")
+            else:
+                st.success("🎉 목표 인원을 모두 달성했습니다!")
+
+            # ------------------------------------------------------------------
+            # 차트
+            # ------------------------------------------------------------------
+            def draw_chart(pairs, height_hint):
+                """pairs: [(라벨, 목표, 달성), ...]"""
+                if not pairs:
+                    st.info("표시할 항목이 없습니다.")
+                    return
+                rows = []
+                for label, tgt, act in pairs:
+                    rows.append({'Label': label, 'Type': '1.목표', 'Value': tgt})
+                    rows.append({'Label': label, 'Type': '2.달성', 'Value': act})
+                dfc = pd.DataFrame(rows)
+                dfc['sort_val'] = dfc['Label'].map(lambda x: tuple(utils.natural_key(x)))
+                dfc = dfc.sort_values('sort_val')
+                order = dfc['Label'].unique().tolist()
+                chart = alt.Chart(dfc.drop(columns=['sort_val'])).mark_bar().encode(
+                    y=alt.Y('Label:N', axis=alt.Axis(title=None), sort=order),
+                    x=alt.X('Value:Q', axis=alt.Axis(title='인원수')),
+                    color=alt.Color('Type:N',
+                                    scale=alt.Scale(domain=['1.목표', '2.달성'],
+                                                    range=['#e0e0e0', '#4c78a8']),
+                                    legend=alt.Legend(title="구분")),
+                    yOffset='Type:N'
+                ).properties(height=min(4000, max(300, height_hint * 25)))
+                st.altair_chart(chart, use_container_width=True)
+
+            st.markdown("### 🔍 쿼터별 상세 현황")
+            active_ex = [(j, cfg) for j, cfg in enumerate(ex_configs) if cfg['cols']]
+            v_tabs = st.tabs(["메인 쿼터"] + [sheet_names.get(j, cfg['name']) for j, cfg in active_ex])
+
+            with v_tabs[0]:
+                if use_main:
+                    draw_chart([(" / ".join(k), t, final_m[k]) for k, t in main_map.items()],
+                               len(main_map))
+                else:
+                    st.info("메인 쿼터 설정이 없습니다.")
+
+            for idx, (j, cfg) in enumerate(active_ex):
+                with v_tabs[idx + 1]:
+                    draw_chart(
+                        [(" / ".join(k) if isinstance(k, tuple) else str(k), t, final_exs[j][k])
+                         for k, t in cfg['map'].items()],
+                        len(cfg['map'])
+                    )
+
+            if recs:
+                st.divider()
+                st.subheader("📉 부족 쿼터 분석 및 진단")
+                df_recs = pd.DataFrame(recs)
+                df_recs['sort_val'] = df_recs['항목'].map(lambda x: tuple(utils.natural_key(x)))
+                df_recs = df_recs.sort_values(by=['순서', 'sort_val'])
+                st.dataframe(df_recs.drop(columns=['순서', 'sort_val']),
+                             use_container_width=True, hide_index=True)
+
+        except Exception:
+            st.error("오류 발생")
+            st.code(traceback.format_exc())
