@@ -209,7 +209,7 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
 
 def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
                     weights=None, balance=False, time_limit=30.0, workers=8,
-                    diagnose=True, max_value_probes=8, rng=None):
+                    diagnose=True, max_value_probes=8, rng=None, tiebreak=None):
     """
     쿼터 할당 최적화.
 
@@ -219,6 +219,12 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
       main_map     : {메인 키: 목표}
       ex_maps      : [{추가 키: 상한}, ...]
       indices      : 행별 인덱스 라벨 (df.index.to_numpy())
+      tiebreak     : 행별 실수 배열 (utils.build_tiebreak 결과).
+                     프로파일 내부에서 **값이 큰 쪽을 먼저 선택**한다
+                     (= 값이 낮은 응답자가 먼저 탈락).
+                     프로파일 구성원은 서로 완전히 교환 가능하므로
+                     이 순서는 최적 인원수에 영향을 주지 않는다.
+                     지정하면 rng(무작위 선택)보다 우선한다.
 
     반환: IlpSolution
     """
@@ -257,13 +263,29 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
 
     # ------------------------------------------------------------------
     # 해를 개인 단위로 펼치기
+    #
+    # 프로파일 구성원은 서로 완전히 교환 가능하므로, 누구를 뽑을지는
+    # 최적 인원수와 무관하다. 따라서 여기서 자유롭게 순서를 정할 수 있다.
+    #   tiebreak 지정 → 값이 큰 쪽부터 (= 낮은 쪽이 먼저 탈락)
+    #   rng 지정      → 무작위
+    #   둘 다 없으면  → 데이터 순서
     # ------------------------------------------------------------------
+    tb = None
+    if tiebreak is not None:
+        import numpy as _np
+        tb = _np.asarray(tiebreak, dtype=float)
+
     selected = []
     for idx, (_sig, rows) in enumerate(profiles):
         take = solver.Value(n_vars[idx])
         if take <= 0:
             continue
-        if rng is not None and take < len(rows):
+        if take >= len(rows):
+            pick = rows
+        elif tb is not None:
+            # 안정 정렬 : intval 이 같으면 데이터 순서를 유지
+            pick = sorted(rows, key=lambda i: -tb[i])[:take]
+        elif rng is not None:
             pick = list(rng.choice(rows, size=take, replace=False))
         else:
             pick = rows[:take]
