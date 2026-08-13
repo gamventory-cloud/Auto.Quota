@@ -28,11 +28,11 @@ utils.py — 쿼터 솔루션 공용 모듈
    - 목표 0인 메인 키의 행은 정렬 전에 사전 제외
 4. transform_pivoted_quota : bare except 제거, 실패 원인을 예외로 전달
 5. check_password : hmac 비교, secrets 누락 대응, 첫 진입 시 오류 미표시
+7. [2.0.1] check_password 의 비ASCII 크래시 수정
+   - 비밀번호 칸에 한글을 입력하면 hmac.compare_digest 가 TypeError 를 내며
+     앱 전체가 죽었다. 양쪽을 utf-8 bytes 로 인코딩해 비교하도록 변경.
+   - 이 파일에서 바뀐 것은 위 한 곳뿐이며, 다른 함수는 손대지 않았다.
 6. unique_sheet_name : 시트명 충돌 방지
-7. [2.1] long_to_wide / find_duplicate_cells / AGG_FUNCS 추가
-   - pages/7___세로_가로_변환.py 에서 사용
-   - key_col 정규화는 norm_val 을 재사용하므로 앱 전체와 열 이름이 일관됨
-   - 기존 함수는 하나도 수정하지 않았다 (섹션 6만 추가)
 """
 
 import streamlit as st
@@ -47,7 +47,7 @@ import collections
 # 이 파일이 진짜 utils.py 인지 호출부에서 확인하는 표식.
 # 파일 내용이 뒤섞이는 사고를 즉시 잡아낸다.
 MODULE_ROLE = "utils"
-__version__ = "2.1-longwide"
+__version__ = "2.0.1-hmacfix"
 
 # 결측/공백을 나타내는 단일 토큰. 화면·엑셀·매칭 전부 이 값을 공유한다.
 NA_TOKEN = "(무응답)"
@@ -312,8 +312,12 @@ def check_password():
             )
             return
 
-        entered = str(st.session_state.get("password", ""))
-        if hmac.compare_digest(entered, str(secret)):
+        # compare_digest 는 비ASCII 문자열을 그대로 넘기면
+        #   TypeError: comparing strings with non-ASCII characters is not supported
+        # 를 낸다. 사용자가 비밀번호 칸에 한글을 입력하면 "틀렸습니다" 가 아니라
+        # 앱이 그대로 죽었다. 양쪽 모두 bytes 로 인코딩해서 비교한다.
+        entered = str(st.session_state.get("password", "")).encode("utf-8")
+        if hmac.compare_digest(entered, str(secret).encode("utf-8")):
             st.session_state["password_correct"] = True
             st.session_state["password_msg"] = None
             del st.session_state["password"]
@@ -446,171 +450,3 @@ def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys
                 break
 
     return best_cnt, best_idxs
-
-
-# ==============================================================================
-# 6. Long → Wide 변환 (세로로 쌓인 데이터를 가로로 펼치기)
-# ==============================================================================
-# 중복값(같은 ID + 같은 변수가 2회 이상) 처리 방법.
-# 화면의 selectbox 와 이 dict 하나만 공유하도록 한다.
-AGG_FUNCS = {
-    "첫 번째 값만": "first",
-    "마지막 값만": "last",
-    "평균": "mean",
-    "합계": "sum",
-    "최댓값": "max",
-    "최솟값": "min",
-    "개수": "count",
-    "쉼표로 이어붙이기": lambda s: ", ".join(str(v) for v in s.dropna()),
-}
-
-
-def _restore_ints(df):
-    """
-    소수점이 필요 없는 실수 열을 정수(Int64)로 되돌린다.
-    pivot 이 int 열을 float 로 승격시켜 '170.0' 처럼 보이는 문제를 없앤다.
-    Int64(nullable) 를 쓰므로 결측은 <NA> 로 남고 엑셀에서 빈 칸이 된다.
-    """
-    for c in df.columns:
-        s = df[c]
-        if s.dtype.kind == "f":
-            nn = s.dropna()
-            if not nn.empty and (nn % 1 == 0).all():
-                try:
-                    df[c] = s.astype("Int64")
-                except (TypeError, ValueError):
-                    pass
-    return df
-
-
-def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
-                 aggfunc="first", name_sep="_", normalize_keys=True):
-    """
-    세로(long) 데이터를 가로(wide)로 펼친다.
-
-        ID  항목    값                ID  키   몸무게
-        1   키      170     ──▶       1   170  65
-        1   몸무게  65                2   160  50
-        2   키      160
-        2   몸무게  50
-
-    파라미터
-    --------
-    id_cols        : 한 행을 식별하는 열 목록 (예: ["ID"], ["학번", "이름"])
-    key_col        : 가로로 펼칠 변수명이 담긴 열 (예: "항목", "시점")
-    value_cols     : 실제 값이 담긴 열 목록. 2개 이상이면 열 이름이
-                     "값열{name_sep}변수명" 으로 조합된다 (점수_1차, 시간_1차 …)
-    keep_keys      : 펼칠 변수 목록. None 이면 전체.
-                     여기 준 순서가 결과 열 순서가 된다.
-    aggfunc        : 중복 발생 시 집계 방법. AGG_FUNCS 의 값을 넘긴다.
-    normalize_keys : key_col 을 norm_val 로 정규화한다. 1.0 -> "1",
-                     공백 -> NA_TOKEN 이 되어 열 이름이 앱 전체와 일관해진다.
-
-    실패 시 ValueError 를 raise 한다. 호출부에서 st.error 로 보여줄 것.
-    """
-    if df is None or df.empty:
-        raise ValueError("데이터가 비어 있습니다.")
-
-    id_cols = list(id_cols)
-    value_cols = list(value_cols)
-
-    if not id_cols:
-        raise ValueError("ID 열을 1개 이상 선택해야 합니다.")
-    if not value_cols:
-        raise ValueError("값 열을 1개 이상 선택해야 합니다.")
-    if not key_col:
-        raise ValueError("기준 열을 선택해야 합니다.")
-
-    overlap = (set(id_cols) | set(value_cols)) & {key_col}
-    if overlap:
-        raise ValueError(f"기준 열 '{key_col}' 이 ID 열 또는 값 열과 겹칩니다.")
-    both = set(id_cols) & set(value_cols)
-    if both:
-        raise ValueError(f"ID 열과 값 열에 같은 열이 들어갔습니다: {sorted(both)}")
-
-    missing = [c for c in id_cols + value_cols + [key_col] if c not in df.columns]
-    if missing:
-        raise ValueError(f"데이터에 없는 열입니다: {missing}")
-
-    work = df.loc[:, id_cols + [key_col] + value_cols].copy()
-    # 열 이름이 될 값이므로 항상 문자열로 통일한다. 정규화를 끄더라도
-    # astype("string") 을 거치지 않으면 int 1 과 화면에서 고른 "1" 이 어긋난다.
-    if normalize_keys:
-        work[key_col] = norm_series(work[key_col])
-    else:
-        work[key_col] = work[key_col].astype("string")
-
-    # 펼칠 변수 선택
-    if keep_keys is None:
-        keep_keys = list(pd.unique(work[key_col].dropna()))
-    else:
-        keep_keys = [norm_val(k) if normalize_keys else str(k) for k in keep_keys]
-        # 순서 유지 중복 제거
-        keep_keys = list(dict.fromkeys(keep_keys))
-        work = work[work[key_col].isin(keep_keys)]
-        if work.empty:
-            raise ValueError("선택한 변수에 해당하는 행이 없습니다.")
-
-    # ID 조합의 원래 등장 순서 보존 (pivot 은 정렬해 버린다)
-    order = df.loc[:, id_cols].drop_duplicates().reset_index(drop=True)
-
-    try:
-        wide = pd.pivot_table(
-            work,
-            index=id_cols,
-            columns=key_col,
-            values=value_cols,
-            aggfunc=aggfunc,
-            dropna=True,      # False 로 두면 정수가 불필요하게 실수로 승격된다
-            observed=True,
-        )
-    except Exception as e:
-        raise ValueError(
-            f"피벗 실패 ({type(e).__name__}: {e})\n"
-            "값 열에 숫자가 아닌 값이 섞여 있는데 평균/합계를 고른 경우일 수 있습니다. "
-            "중복값 처리를 '첫 번째 값만' 으로 바꿔 보세요."
-        )
-
-    # 열 이름 정리
-    if isinstance(wide.columns, pd.MultiIndex):
-        if len(value_cols) == 1:
-            wide.columns = [str(c[-1]) for c in wide.columns]
-            desired = [str(k) for k in keep_keys]
-        else:
-            wide.columns = [f"{c[0]}{name_sep}{c[1]}" for c in wide.columns]
-            desired = [f"{v}{name_sep}{k}" for v in value_cols for k in keep_keys]
-    else:
-        wide.columns = [str(c) for c in wide.columns]
-        desired = [str(k) for k in keep_keys]
-
-    wide = wide.reset_index()
-
-    # 값이 전부 비어 사라진 변수도 빈 열로 되살린다 (열 개수를 예측 가능하게)
-    for c in desired:
-        if c not in wide.columns:
-            wide[c] = pd.NA
-
-    cols = id_cols + list(desired)
-    cols += [c for c in wide.columns if c not in cols]
-    wide = wide.loc[:, cols]
-
-    # ID 원래 순서 복원
-    wide = order.merge(wide, on=id_cols, how="left")
-    return _restore_ints(wide)
-
-
-def find_duplicate_cells(df, id_cols, key_col, value_cols=None,
-                         normalize_keys=True, limit=200):
-    """
-    long_to_wide 실행 전에 '같은 ID + 같은 변수' 가 2회 이상 있는지 미리 찾는다.
-    중복이 있으면 집계 방법에 따라 값이 조용히 바뀌므로, 화면에서 먼저 경고한다.
-
-    반환: (중복 건수 DataFrame, 영향받은 행 총 개수)
-    """
-    key = norm_series(df[key_col]) if normalize_keys else df[key_col].astype("string")
-    tmp = df.loc[:, id_cols].copy()
-    tmp[key_col] = key
-    g = tmp.groupby(id_cols + [key_col], dropna=False, observed=True).size()
-    dup = g[g > 1].reset_index(name="중복 횟수")
-    total = int(dup["중복 횟수"].sum()) if not dup.empty else 0
-    return dup.head(limit), total
