@@ -414,7 +414,7 @@ DUP_MODES = [EXPAND_LABEL] + list(AGG_FUNCS.keys())
 # 없으면 그냥 비워 두므로, 다른 형식의 파일도 문제없이 쓸 수 있다.
 # 자주 쓰는 형식이 바뀌면 이 세 줄만 고치면 된다.
 DEFAULT_ID_COLS = ["panel_id"]      # ① ID 열
-DEFAULT_VALUE_COLS = ["intval"]     # ② 값 열
+DEFAULT_VALUE_COLS = ["intVal"]     # ② 값 열
 DEFAULT_KEY_COL = "page_name"       # ③ 기준 열
 NO_KEY = "(선택하세요)"
 
