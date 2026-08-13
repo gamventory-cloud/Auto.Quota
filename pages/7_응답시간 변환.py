@@ -49,6 +49,11 @@ v1.4  8) DEFAULT_ID_COLS / DEFAULT_VALUE_COLS / DEFAULT_KEY_COL 로 기본 선�
          열 지정. 해당 이름의 열이 있으면 자동 선택하고 없으면 비워 둔다.
          겸사겸사, 다른 파일을 올렸을 때 이전 선택값이 새 옵션에 없어
          multiselect 가 죽던 문제도 함께 막힌다 (lw_colsig 로 감지).
+v1.5  9) 변수 이름 바꾸기 추가 (rename_map). 변수 단위로 바꾸므로 펼침 모드에서는
+         바뀐 이름 뒤에 순번이 붙는다 (Q3_추천 -> 추천 이면 추천_1, 추천_2).
+         서로 같은 이름을 넣거나 ID 열 이름과 같게 바꾸면 _dedupe_names 가
+         _2, _3 을 붙여 살리고 경고를 띄운다.
+     10) DEFAULT_VALUE_COLS 를 intVal 로 정정.
 """
 
 import hmac
@@ -233,7 +238,7 @@ def _dedupe_names(names, reserved=()):
 def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
                  aggfunc="first", name_sep="_", normalize_keys=True,
                  expand_duplicates=False, always_suffix=False,
-                 max_occurrences=0, max_result_cols=2000):
+                 max_occurrences=0, max_result_cols=2000, rename_map=None):
     """
     세로(long) → 가로(wide) 변환. 실패 시 ValueError 를 raise 한다.
 
@@ -241,6 +246,9 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
     key_col    : 가로로 펼칠 변수명이 담긴 열 (예: "항목", "시점")
     value_cols : 값이 담긴 열. 2개 이상이면 "점수_1차" 처럼 조합된다
     keep_keys  : 펼칠 변수 목록. 준 순서가 결과 열 순서가 된다
+    rename_map : {원본 변수값: 결과 열 이름}. 지정한 변수만 이름이 바뀐다.
+                 펼침 모드에서는 바뀐 이름 뒤에 순번이 붙는다 (만족도_1, 만족도_2).
+                 이름이 서로 겹치면 _dedupe_names 가 _2, _3 을 붙여 살린다.
 
     중복(같은 ID + 같은 변수가 2번 이상) 처리 방식 두 가지
     ------------------------------------------------------
@@ -268,6 +276,18 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
     missing = [c for c in id_cols + value_cols + [key_col] if c not in df.columns]
     if missing:
         raise ValueError(f"데이터에 없는 열입니다: {missing}")
+
+    # 이름 바꾸기 표. 빈 문자열은 '안 바꿈' 으로 취급한다.
+    rmap = {}
+    for k, v in (rename_map or {}).items():
+        v = "" if v is None else str(v).strip()
+        if v:
+            rmap[str(k)] = v
+
+    def _base_name(v_col, key):
+        """결과 열의 기본 이름. 값 열이 2개 이상이면 값 열 이름과 조합한다."""
+        nm = rmap.get(str(key), str(key))
+        return nm if len(value_cols) == 1 else f"{v_col}{name_sep}{nm}"
 
     work = df.loc[:, id_cols + [key_col] + value_cols].copy()
     # 열 이름이 될 값이므로 항상 문자열로 통일. 이걸 빠뜨리면 int 1 과
@@ -329,7 +349,7 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
         for v in value_cols:
             for k in keep_keys:
                 mx = max(int(occ_max.get(k, 1)), 1)
-                base = str(k) if len(value_cols) == 1 else f"{v}{name_sep}{k}"
+                base = _base_name(v, k)
                 for o in range(1, mx + 1):
                     pairs.append((v, k, o))
                     # 중복이 없는 변수는 이름을 깨끗하게 둔다
@@ -350,8 +370,7 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
                 "중복값 처리를 '첫 번째 값만' 으로 바꿔 보세요.")
 
         pairs = [(v, k) for v in value_cols for k in keep_keys]
-        raw_names = [str(k) if len(value_cols) == 1 else f"{v}{name_sep}{k}"
-                     for v, k in pairs]
+        raw_names = [_base_name(v, k) for v, k in pairs]
 
     # ── 결과 열 이름 확정 ────────────────────────────────────────────
     # (값 열, 변수[, 순번]) 쌍을 표준 식별자로 삼고 이름은 마지막에 붙인다.
@@ -605,6 +624,52 @@ with sc2:
         "가로로 펼칠 변수 (선택한 순서대로 열이 배치됩니다)", all_labels, key="lw_keys")
     keep_keys = [labels[l] for l in picked_labels if l in labels]
 
+# ── 변수 이름 바꾸기 ────────────────────────────────────────────────
+# 변수 단위로 바꾸므로, 펼침 모드에서는 바뀐 이름 뒤에 순번이 붙는다.
+# (Q3_추천 -> 추천 으로 바꾸면 추천_1, 추천_2 …)
+rename_map = {}
+if keep_keys:
+    _saved = st.session_state.get("lw_rename", {})
+    with st.expander(
+            f"변수 이름 바꾸기 (선택)"
+            + (f" — {len([k for k in keep_keys if _saved.get(str(k))])}개 변경됨"
+               if any(_saved.get(str(k)) for k in keep_keys) else "")):
+        st.caption("'결과 열 이름' 칸만 고치면 됩니다. 비워 두면 원본 이름을 씁니다. "
+                   "여기서 바꾼 이름이 엑셀 첫 행에 들어갑니다.")
+
+        _rows = pd.DataFrame({
+            "변수": [str(k) for k in keep_keys],
+            "결과 열 이름": [_saved.get(str(k), "") for k in keep_keys],
+        })
+
+        if hasattr(st, "data_editor"):
+            _edited = st.data_editor(
+                _rows, hide_index=True, num_rows="fixed",
+                column_config={
+                    "변수": st.column_config.TextColumn("변수 (원본)", disabled=True),
+                    "결과 열 이름": st.column_config.TextColumn(
+                        "결과 열 이름", help="비워 두면 원본 이름 사용"),
+                })
+            _new = dict(zip(_edited["변수"], _edited["결과 열 이름"]))
+        else:
+            # 아주 오래된 Streamlit 대비 (data_editor 이전 버전)
+            _new = {}
+            for _k in keep_keys:
+                _new[str(_k)] = st.text_input(
+                    str(_k), value=_saved.get(str(_k), ""), key=f"lw_rn_{_k}")
+
+        rename_map = {k: str(v).strip() for k, v in _new.items()
+                      if v is not None and str(v).strip()}
+        st.session_state["lw_rename"] = rename_map
+
+        if rename_map:
+            st.caption("적용될 이름: "
+                       + ", ".join(f"`{k}` → `{v}`"
+                                   for k, v in list(rename_map.items())[:10])
+                       + (" …" if len(rename_map) > 10 else ""))
+            st.button("이름 전부 초기화",
+                      on_click=lambda: st.session_state.update(lw_rename={}))
+
 if id_cols and keep_keys:
     try:
         dup, dup_total = find_duplicate_cells(
@@ -668,7 +733,8 @@ else:
 # 화면의 설정과 표/다운로드 내용이 어긋난 채로 남아 옛 파일을 받게 된다.
 _SIG = str((up.name, len(raw), sheet, int(header_row), tuple(id_cols), key_col,
             tuple(value_cols), tuple(keep_keys), agg_label, bool(norm_keys),
-            bool(always_sfx), int(max_occ)))
+            bool(always_sfx), int(max_occ),
+            tuple(sorted(rename_map.items()))))
 _KEYS = ("lw_result", "lw_xlsx", "lw_csv", "lw_sig", "lw_base")
 
 
@@ -699,7 +765,8 @@ if st.button("변환 실행", type="primary"):
                 normalize_keys=norm_keys,
                 expand_duplicates=expand_dup,
                 always_suffix=always_sfx,
-                max_occurrences=max_occ)
+                max_occurrences=max_occ,
+                rename_map=rename_map)
         # 다운로드 파일은 여기서 딱 한 번만 만든다. 버튼 밖에서 만들면
         # 체크박스 하나 누를 때마다 xlsx 를 처음부터 다시 쓴다.
         with st.spinner("다운로드 파일 준비 중…"):
@@ -736,7 +803,8 @@ if result is not None:
     if _multi:
         _top = sorted(_multi.items(), key=lambda x: -x[1])
         st.info("여러 열로 펼쳐진 변수: "
-                + ", ".join(f"`{k}` → {v}개" for k, v in _top[:15])
+                + ", ".join(f"`{rename_map.get(str(k), str(k))}` → {v}개"
+                            for k, v in _top[:15])
                 + (f" 외 {len(_top) - 15}개" if len(_top) > 15 else ""))
 
     _tr = result.attrs.get("truncated_rows") or 0
@@ -750,8 +818,9 @@ if result is not None:
         st.warning(
             f"열 이름이 겹쳐서 {len(_rn)}개를 자동으로 바꿨습니다: {_shown}"
             + (f" 외 {len(_rn) - 20}건" if len(_rn) > 20 else "")
-            + "\n\nID 열 이름과 같은 변수가 있거나, 값 열 2개 이상을 고를 때 "
-              "조합된 이름이 같아지면 발생합니다. 데이터는 손실되지 않았습니다.")
+            + "\n\n이름 바꾸기에서 서로 같은 이름을 넣었거나, ID 열 이름과 같은 "
+              "변수가 있거나, 값 열 2개 이상을 고를 때 조합된 이름이 같아지면 "
+              "발생합니다. 데이터는 손실되지 않았습니다.")
 
     base = st.session_state.get("lw_base", "result")
     d1, d2 = st.columns(2)
