@@ -38,6 +38,13 @@ v1.2  4) 결과 열 이름이 겹칠 때 _2, _3 을 붙여 자동 해소 (_dedup
          목록으로 표시. 기존 중복 경고만으로는 원인을 알 수 없었다.
       6) 표시용 _arrow_safe 추가. 기준 열에 숫자와 문자가 섞이면 st.dataframe
          이 매번 Arrow 변환에 실패해 로그에 에러를 대량으로 남겼다.
+v1.3  7) 중복값 처리에 "여러 열로 펼치기" 모드 추가 (expand_duplicates).
+         같은 ID + 같은 변수가 N번 나오면 취미_1, 취미_2 … 로 펼친다.
+         값을 버리지 않으므로 이 모드가 기본값이다.
+         v1.2 의 _dedupe_names 는 '열 이름 충돌' 만 다루므로 별개다.
+           · always_suffix   : 중복 없는 변수에도 _1 을 붙일지
+           · max_occurrences : 변수당 최대 개수 (0 = 제한 없음)
+           · max_result_cols : ID 열을 잘못 지정해 열이 폭발하는 것을 막는 상한
 """
 
 import hmac
@@ -220,7 +227,9 @@ def _dedupe_names(names, reserved=()):
 
 
 def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
-                 aggfunc="first", name_sep="_", normalize_keys=True):
+                 aggfunc="first", name_sep="_", normalize_keys=True,
+                 expand_duplicates=False, always_suffix=False,
+                 max_occurrences=0, max_result_cols=2000):
     """
     세로(long) → 가로(wide) 변환. 실패 시 ValueError 를 raise 한다.
 
@@ -228,6 +237,14 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
     key_col    : 가로로 펼칠 변수명이 담긴 열 (예: "항목", "시점")
     value_cols : 값이 담긴 열. 2개 이상이면 "점수_1차" 처럼 조합된다
     keep_keys  : 펼칠 변수 목록. 준 순서가 결과 열 순서가 된다
+
+    중복(같은 ID + 같은 변수가 2번 이상) 처리 방식 두 가지
+    ------------------------------------------------------
+    expand_duplicates=False : aggfunc 으로 하나만 남긴다 (값이 버려짐)
+    expand_duplicates=True  : 등장 순서대로 취미_1, 취미_2, 취미_3 … 으로
+                              여러 열에 펼친다 (값이 보존됨)
+        always_suffix   : 중복이 없는 변수에도 _1 을 붙일지
+        max_occurrences : 변수당 최대 몇 개까지 펼칠지 (0 = 제한 없음)
     """
     if df is None or df.empty:
         raise ValueError("데이터가 비어 있습니다.")
@@ -266,40 +283,92 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
     # ID 조합의 원래 등장 순서 보존 (pivot 은 정렬해 버린다)
     order = df.loc[:, id_cols].drop_duplicates().reset_index(drop=True)
 
-    try:
-        wide = pd.pivot_table(
-            work, index=id_cols, columns=key_col, values=value_cols,
-            aggfunc=aggfunc,
-            dropna=True,     # False 로 두면 정수가 불필요하게 실수로 승격된다
-            observed=True,
-        )
-    except Exception as e:
-        raise ValueError(
-            f"피벗 실패 ({type(e).__name__}: {e})\n"
-            "값 열에 숫자가 아닌 값이 섞여 있는데 평균/합계를 고른 경우일 수 있습니다. "
-            "중복값 처리를 '첫 번째 값만' 으로 바꿔 보세요.")
+    occ_max, truncated = {}, 0
+
+    if expand_duplicates:
+        # 같은 ID + 같은 변수 안에서 등장 순번(1,2,3…)을 매긴다.
+        # 이 순번을 열 축에 함께 넣으면 중복이 열로 펼쳐진다.
+        work["__occ"] = work.groupby(id_cols + [key_col], dropna=False,
+                                     observed=True).cumcount() + 1
+
+        if max_occurrences and max_occurrences > 0:
+            over = int((work["__occ"] > max_occurrences).sum())
+            if over:
+                truncated = over
+                work = work[work["__occ"] <= max_occurrences]
+
+        occ_max = {k: int(v) for k, v in
+                   work.groupby(key_col, dropna=False, observed=True)["__occ"]
+                   .max().items()}
+
+        n_cols = len(value_cols) * sum(max(occ_max.get(k, 1), 1) for k in keep_keys)
+        if n_cols > max_result_cols:
+            worst = sorted(occ_max.items(), key=lambda x: -x[1])[:3]
+            raise ValueError(
+                f"펼치면 열이 {n_cols:,}개가 됩니다 (상한 {max_result_cols:,}개).\n"
+                f"가장 많이 중복된 변수: "
+                + ", ".join(f"{k}({v}회)" for k, v in worst)
+                + "\nID 열 지정이 잘못되었을 가능성이 높습니다. "
+                  "'변수당 최대 개수' 를 지정하거나 ID 열을 다시 확인하세요.")
+
+        try:
+            wide = pd.pivot_table(
+                work, index=id_cols, columns=[key_col, "__occ"],
+                values=value_cols,
+                aggfunc="first",   # (ID, 변수, 순번) 은 유일하므로 집계가 아니다
+                dropna=True, observed=True,
+            )
+        except Exception as e:
+            raise ValueError(f"피벗 실패 ({type(e).__name__}: {e})")
+
+        pairs, raw_names = [], []
+        for v in value_cols:
+            for k in keep_keys:
+                mx = max(int(occ_max.get(k, 1)), 1)
+                base = str(k) if len(value_cols) == 1 else f"{v}{name_sep}{k}"
+                for o in range(1, mx + 1):
+                    pairs.append((v, k, o))
+                    # 중복이 없는 변수는 이름을 깨끗하게 둔다
+                    raw_names.append(base if (mx == 1 and not always_suffix)
+                                     else f"{base}{name_sep}{o}")
+    else:
+        try:
+            wide = pd.pivot_table(
+                work, index=id_cols, columns=key_col, values=value_cols,
+                aggfunc=aggfunc,
+                dropna=True,     # False 로 두면 정수가 불필요하게 실수로 승격된다
+                observed=True,
+            )
+        except Exception as e:
+            raise ValueError(
+                f"피벗 실패 ({type(e).__name__}: {e})\n"
+                "값 열에 숫자가 아닌 값이 섞여 있는데 평균/합계를 고른 경우일 수 있습니다. "
+                "중복값 처리를 '첫 번째 값만' 으로 바꿔 보세요.")
+
+        pairs = [(v, k) for v in value_cols for k in keep_keys]
+        raw_names = [str(k) if len(value_cols) == 1 else f"{v}{name_sep}{k}"
+                     for v, k in pairs]
 
     # ── 결과 열 이름 확정 ────────────────────────────────────────────
-    # (값 열, 변수) 쌍을 표준 식별자로 삼고 이름은 마지막에 붙인다.
+    # (값 열, 변수[, 순번]) 쌍을 표준 식별자로 삼고 이름은 마지막에 붙인다.
     # 이름이 겹쳐도 어느 칸인지 잃지 않기 위한 것이다.
     if not isinstance(wide.columns, pd.MultiIndex):
         wide.columns = pd.MultiIndex.from_tuples(
             [(value_cols[0], c) for c in wide.columns])
 
-    pairs = [(v, k) for v in value_cols for k in keep_keys]
     # 값이 전부 비어 사라진 칸도 빈 열로 되살리고, 선택 순서대로 정렬한다
     wide = wide.reindex(columns=pd.MultiIndex.from_tuples(pairs))
 
-    raw_names = [str(k) if len(value_cols) == 1 else f"{v}{name_sep}{k}"
-                 for v, k in pairs]
     final_names, renamed = _dedupe_names(raw_names, reserved=id_cols)
     wide.columns = final_names
 
     wide = wide.reset_index()
     wide = order.merge(wide, on=id_cols, how="left")   # ID 원래 순서 복원
     wide = _restore_ints(wide)
-    # 이름이 바뀐 열은 화면에서 경고로 알리기 위해 함께 넘긴다
+    # 화면에서 경고로 알리기 위한 부가 정보
     wide.attrs["renamed_columns"] = renamed
+    wide.attrs["occ_max"] = occ_max
+    wide.attrs["truncated_rows"] = truncated
     return wide
 
 
@@ -331,6 +400,10 @@ def _arrow_safe(d):
         if out[c].dtype == object:
             out[c] = out[c].astype(str)
     return out
+
+
+EXPAND_LABEL = "여러 열로 펼치기 (변수_1, 변수_2 …)"
+DUP_MODES = [EXPAND_LABEL] + list(AGG_FUNCS.keys())
 
 
 st.set_page_config(page_title="세로 → 가로 변환", page_icon="↔️", layout="wide")
@@ -433,8 +506,25 @@ with left:
 with right:
     value_cols = st.multiselect("② 값 열 — 실제 값이 담긴 열", cols, key="lw_val",
                                 help="2개 이상이면 '점수_1차' 형태로 조합됩니다.")
-    agg_label = st.selectbox("④ 중복값 처리 — 같은 ID에 같은 변수가 2번 이상일 때",
-                             list(AGG_FUNCS.keys()), key="lw_agg")
+    agg_label = st.selectbox(
+        "④ 중복값 처리 — 같은 ID에 같은 변수가 2번 이상일 때",
+        DUP_MODES, key="lw_agg",
+        help="'여러 열로 펼치기' 는 값을 버리지 않습니다. 나머지는 하나만 남깁니다.")
+
+expand_dup = (agg_label == EXPAND_LABEL)
+always_sfx, max_occ = False, 0
+if expand_dup:
+    e1, e2 = st.columns([1, 1])
+    with e1:
+        always_sfx = st.checkbox(
+            "중복이 없는 변수에도 _1 붙이기", value=False, key="lw_sfx",
+            help="끄면 중복이 있는 변수만 취미_1, 취미_2 … 가 되고 "
+                 "나머지는 성별 처럼 그대로 남습니다.")
+    with e2:
+        max_occ = int(st.number_input(
+            "변수당 최대 개수 (0 = 제한 없음)", min_value=0, max_value=500,
+            value=0, step=1, key="lw_maxocc",
+            help="예: 3 으로 두면 취미_1~취미_3 까지만 만들고 나머지는 버립니다."))
 
 if key_col == "(선택하세요)":
     st.info("③ 기준 열을 선택하면 펼칠 변수 목록이 나타납니다.")
@@ -499,8 +589,13 @@ if id_cols and keep_keys:
     except Exception:
         dup, dup_total = pd.DataFrame(), 0
     if dup_total:
-        st.warning(f"같은 ID에 같은 변수가 중복된 칸이 {len(dup):,}곳 있습니다 "
-                   f"(총 {dup_total:,}행). 현재 설정은 **{agg_label}** 로 처리합니다.")
+        if expand_dup:
+            st.info(f"같은 ID에 같은 변수가 중복된 칸이 {len(dup):,}곳 있습니다 "
+                    f"(총 {dup_total:,}행). **여러 열로 펼쳐지며 값은 보존됩니다.**")
+        else:
+            st.warning(f"같은 ID에 같은 변수가 중복된 칸이 {len(dup):,}곳 있습니다 "
+                       f"(총 {dup_total:,}행). 현재 설정은 **{agg_label}** 이므로 "
+                       f"각 칸에서 하나만 남고 나머지는 버려집니다.")
         with st.expander("중복 내역 보기"):
             st.dataframe(_arrow_safe(dup))
 
@@ -518,7 +613,8 @@ if norm_keys and keep_keys:
         st.warning(
             f"서로 다른 값 {sum(len(v) for _, v in _merged)}개가 정규화되어 "
             f"{len(_merged)}개 열로 합쳐집니다. 합쳐진 값들은 위의 중복값 처리 "
-            f"규칙(**{agg_label}**)에 따라 하나만 남습니다.")
+            + ("설정에 따라 **여러 열로 펼쳐집니다.**" if expand_dup
+               else f"규칙(**{agg_label}**)에 따라 하나만 남습니다."))
         with st.expander("합쳐지는 값 보기"):
             st.dataframe(_arrow_safe(pd.DataFrame({
                 "결과 열 이름": [str(k) for k, _ in _merged],
@@ -535,14 +631,20 @@ if not id_cols or not value_cols or not keep_keys:
     st.info("ID 열, 값 열, 펼칠 변수를 모두 지정하면 변환 버튼이 활성화됩니다.")
     st.stop()
 
-st.caption(f"예상 결과: ID {len(id_cols)}열 + 값 {len(value_cols)}개 × "
-           f"변수 {len(keep_keys)}개 = 총 {len(id_cols) + len(value_cols) * len(keep_keys)}열")
+if expand_dup:
+    st.caption(f"예상 결과: ID {len(id_cols)}열 + 값 {len(value_cols)}개 × "
+               f"변수 {len(keep_keys)}개 (중복이 있는 변수는 개수만큼 늘어납니다)")
+else:
+    st.caption(f"예상 결과: ID {len(id_cols)}열 + 값 {len(value_cols)}개 × "
+               f"변수 {len(keep_keys)}개 = 총 "
+               f"{len(id_cols) + len(value_cols) * len(keep_keys)}열")
 
 # 결과에 영향을 주는 모든 설정의 지문. 변환 시점의 지문을 함께 저장해 두고
 # 현재 지문과 다르면 결과를 폐기한다. 이게 없으면 변환 후 설정을 바꿨을 때
 # 화면의 설정과 표/다운로드 내용이 어긋난 채로 남아 옛 파일을 받게 된다.
 _SIG = str((up.name, len(raw), sheet, int(header_row), tuple(id_cols), key_col,
-            tuple(value_cols), tuple(keep_keys), agg_label, bool(norm_keys)))
+            tuple(value_cols), tuple(keep_keys), agg_label, bool(norm_keys),
+            bool(always_sfx), int(max_occ)))
 _KEYS = ("lw_result", "lw_xlsx", "lw_csv", "lw_sig", "lw_base")
 
 
@@ -568,8 +670,12 @@ if st.button("변환 실행", type="primary"):
         with st.spinner("변환 중…"):
             res = long_to_wide(
                 df, id_cols=id_cols, key_col=key_col, value_cols=value_cols,
-                keep_keys=keep_keys, aggfunc=AGG_FUNCS[agg_label],
-                normalize_keys=norm_keys)
+                keep_keys=keep_keys,
+                aggfunc=AGG_FUNCS.get(agg_label, "first"),
+                normalize_keys=norm_keys,
+                expand_duplicates=expand_dup,
+                always_suffix=always_sfx,
+                max_occurrences=max_occ)
         # 다운로드 파일은 여기서 딱 한 번만 만든다. 버튼 밖에서 만들면
         # 체크박스 하나 누를 때마다 xlsx 를 처음부터 다시 쓴다.
         with st.spinner("다운로드 파일 준비 중…"):
@@ -600,6 +706,19 @@ if result is not None:
     empty_cols = [c for c in result.columns if result[c].isna().all()]
     if empty_cols:
         st.warning(f"값이 전부 비어 있는 열: {empty_cols}")
+
+    _occ = result.attrs.get("occ_max") or {}
+    _multi = {k: v for k, v in _occ.items() if v > 1}
+    if _multi:
+        _top = sorted(_multi.items(), key=lambda x: -x[1])
+        st.info("여러 열로 펼쳐진 변수: "
+                + ", ".join(f"`{k}` → {v}개" for k, v in _top[:15])
+                + (f" 외 {len(_top) - 15}개" if len(_top) > 15 else ""))
+
+    _tr = result.attrs.get("truncated_rows") or 0
+    if _tr:
+        st.warning(f"'변수당 최대 개수' 제한으로 {_tr:,}개 값이 버려졌습니다. "
+                   "모두 살리려면 제한을 0으로 두세요.")
 
     _rn = result.attrs.get("renamed_columns") or []
     if _rn:
