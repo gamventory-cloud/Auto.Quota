@@ -20,7 +20,8 @@
     2   몸무게  50
 
 필요 패키지: streamlit, pandas, openpyxl, XlsxWriter, chardet
-(모두 기존 requirements.txt 에 이미 포함되어 있음)
+             pyreadstat  ← SPSS(.sav) 저장용. requirements.txt 에 추가해야 함.
+                            없어도 앱은 정상 동작하며 sav 버튼만 비활성화된다.
 
 수정 이력
 ---------
@@ -54,10 +55,19 @@ v1.5  9) 변수 이름 바꾸기 추가 (rename_map). 변수 단위로 바꾸므
          서로 같은 이름을 넣거나 ID 열 이름과 같게 바꾸면 _dedupe_names 가
          _2, _3 을 붙여 살리고 경고를 띄운다.
      10) DEFAULT_VALUE_COLS 를 intVal 로 정정.
+v1.6 11) SPSS .sav 다운로드 추가 (build_sav / _spss_safe_names).
+         SPSS 변수명 규칙은 실측으로 확인했다.
+           · 한글은 되지만 길이 한도가 64'바이트' 라 한글은 21자까지
+           · 공백·괄호·- 등 특수문자 불가 (기본 결측표기 '(무응답)' 도 거부됨)
+           · 첫 글자는 반드시 문자. 밑줄로 시작해도 거부된다
+             (readstat 에러 메시지는 밑줄이 허용되는 것처럼 안내하지만 아니다)
+         바꾼 이름은 경고로 알리고 원래 이름은 SPSS 변수 라벨로 보존한다.
+         엑셀·CSV 는 원래 이름을 그대로 쓴다.
 """
 
 import hmac
 import io
+import os
 import re
 
 import pandas as pd
@@ -393,6 +403,95 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
     wide.attrs["occ_max"] = occ_max
     wide.attrs["truncated_rows"] = truncated
     return wide
+
+
+def _spss_safe_names(cols, limit_bytes=64):
+    """
+    SPSS 변수명 규칙에 맞게 열 이름을 손질한다.
+
+    실측한 제약 (pyreadstat/readstat)
+      · 한글은 허용된다. 단 길이 한도는 문자 수가 아니라 **64바이트** 이므로
+        UTF-8 한글은 21자까지다.
+      · 공백, 괄호, -, % 같은 특수문자는 거부된다.
+        기본 결측 표기인 '(무응답)' 도 괄호 때문에 그대로는 저장되지 않는다.
+      · 숫자로 시작하면 거부된다. 밑줄로 시작해도 거부된다.
+        (readstat 의 에러 메시지는 밑줄이 허용되는 것처럼 안내하지만
+         실제로 저장을 시도하면 거부된다. 실측으로 확인했다.)
+      · 허용: 문자·숫자·밑줄, 그리고 . @ # $ (단 첫 글자는 문자만)
+
+    반환: (안전한 이름 목록, [(원래 이름, 바뀐 이름), …])
+    바뀐 이름은 호출부에서 경고로 보여주고, 원래 이름은 변수 라벨로 보존한다.
+    """
+    out, changed, used = [], [], set()
+    for c in cols:
+        orig = str(c)
+        # 허용되지 않는 문자를 밑줄로. \w 는 유니코드 문자·숫자·밑줄을 포함한다.
+        name = re.sub(r"[^\w.@#$]", "_", orig, flags=re.UNICODE)
+        # 첫 글자가 문자가 아니면 접두사를 붙인다 (밑줄·숫자·기호 모두 해당)
+        if not name or not name[0].isalpha():
+            name = "V" + name
+        # 64바이트로 자른다 (한글이 잘려 깨지지 않도록 바이트 단위로 확인)
+        while len(name.encode("utf-8")) > limit_bytes:
+            name = name[:-1]
+        # 자르거나 치환한 뒤 겹칠 수 있으므로 유일하게 만든다
+        base, i = name, 2
+        while name in used:
+            suffix = f"_{i}"
+            name = base
+            while len((name + suffix).encode("utf-8")) > limit_bytes:
+                name = name[:-1]
+            name = name + suffix
+            i += 1
+        used.add(name)
+        out.append(name)
+        if name != orig:
+            changed.append((orig, name))
+    return out, changed
+
+
+def build_sav(result, sanitize=True):
+    """
+    변환 결과를 SPSS .sav 바이트로 만든다.
+
+    반환: (bytes, [(원래 이름, 바뀐 이름), …])
+    pyreadstat 이 없으면 ImportError 를 그대로 올린다 (호출부에서 안내).
+    """
+    import tempfile
+
+    import pyreadstat
+
+    d = result.copy()
+
+    # pandas 확장 dtype(Int64, string)은 그대로도 대체로 쓰이지만,
+    # 버전에 따라 실패하므로 numpy/object 로 내려서 안전하게 만든다.
+    for c in d.columns:
+        s = d[c]
+        if isinstance(s.dtype, pd.CategoricalDtype):
+            d[c] = s.astype(object)
+        elif str(s.dtype) in ("Int64", "Int32", "Float64"):
+            d[c] = s.astype("float64")
+        elif str(s.dtype).startswith("string") or s.dtype == object:
+            d[c] = s.apply(lambda v: None if pd.isna(v) else str(v))
+        elif str(s.dtype) == "boolean":
+            d[c] = s.astype("float64")
+
+    labels = [str(c) for c in d.columns]      # 원래 이름을 변수 라벨로 보존
+    changed = []
+    if sanitize:
+        safe, changed = _spss_safe_names(d.columns)
+        d.columns = safe
+
+    with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tmp:
+        path = tmp.name
+    try:
+        pyreadstat.write_sav(d, path, column_labels=labels)
+        with open(path, "rb") as f:
+            return f.read(), changed
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def find_duplicate_cells(df, id_cols, key_col, normalize_keys=True, limit=200):
@@ -735,7 +834,8 @@ _SIG = str((up.name, len(raw), sheet, int(header_row), tuple(id_cols), key_col,
             tuple(value_cols), tuple(keep_keys), agg_label, bool(norm_keys),
             bool(always_sfx), int(max_occ),
             tuple(sorted(rename_map.items()))))
-_KEYS = ("lw_result", "lw_xlsx", "lw_csv", "lw_sig", "lw_base")
+_KEYS = ("lw_result", "lw_xlsx", "lw_csv", "lw_sav", "lw_savmsg",
+         "lw_sig", "lw_base")
 
 
 def _clear_result():
@@ -773,6 +873,18 @@ if st.button("변환 실행", type="primary"):
             st.session_state["lw_result"] = res
             st.session_state["lw_xlsx"] = _build_xlsx(res)
             st.session_state["lw_csv"] = res.to_csv(index=False).encode("utf-8-sig")
+            # SPSS .sav 는 pyreadstat 이 있을 때만. 없으면 안내만 남기고
+            # 엑셀/CSV 는 정상적으로 제공한다.
+            try:
+                _sav, _savch = build_sav(res, sanitize=True)
+                st.session_state["lw_sav"] = _sav
+                st.session_state["lw_savmsg"] = _savch
+            except ImportError:
+                st.session_state["lw_sav"] = None
+                st.session_state["lw_savmsg"] = "no_pyreadstat"
+            except Exception as _e:
+                st.session_state["lw_sav"] = None
+                st.session_state["lw_savmsg"] = f"error:{type(_e).__name__}: {_e}"
             st.session_state["lw_sig"] = _SIG
             st.session_state["lw_base"] = up.name.rsplit(".", 1)[0]
     except ValueError as e:
@@ -823,7 +935,10 @@ if result is not None:
               "발생합니다. 데이터는 손실되지 않았습니다.")
 
     base = st.session_state.get("lw_base", "result")
-    d1, d2 = st.columns(2)
+    _sav = st.session_state.get("lw_sav")
+    _savmsg = st.session_state.get("lw_savmsg")
+
+    d1, d2, d3 = st.columns(3)
     d1.download_button(
         "엑셀 다운로드", data=st.session_state["lw_xlsx"],
         file_name=f"{base}_wide.xlsx",
@@ -831,3 +946,25 @@ if result is not None:
     d2.download_button(
         "CSV 다운로드", data=st.session_state["lw_csv"],
         file_name=f"{base}_wide.csv", mime="text/csv")
+    if _sav:
+        d3.download_button(
+            "SPSS(.sav) 다운로드", data=_sav,
+            file_name=f"{base}_wide.sav", mime="application/octet-stream")
+    else:
+        d3.button("SPSS(.sav) 다운로드", disabled=True)
+
+    if _savmsg == "no_pyreadstat":
+        st.info("SPSS 파일을 만들려면 pyreadstat 이 필요합니다. "
+                "requirements.txt 에 `pyreadstat` 한 줄을 추가하고 앱을 "
+                "다시 배포(Reboot)하세요. 엑셀·CSV 는 그대로 사용할 수 있습니다.")
+    elif isinstance(_savmsg, str) and _savmsg.startswith("error:"):
+        st.warning(f"SPSS 파일 생성에 실패했습니다 ({_savmsg[6:]}). "
+                   "엑셀·CSV 는 정상입니다.")
+    elif _savmsg:
+        _sh = ", ".join(f"`{a}` → `{b}`" for a, b in _savmsg[:10])
+        st.caption(
+            f"SPSS 변수명 규칙(공백·특수문자 불가, 문자로 시작, 64바이트 이내)에 "
+            f"맞춰 {len(_savmsg)}개 이름을 바꿨습니다: {_sh}"
+            + (" …" if len(_savmsg) > 10 else "")
+            + " · 원래 이름은 SPSS 변수 라벨에 그대로 남아 있습니다. "
+              "(엑셀·CSV 는 원래 이름을 씁니다)")
