@@ -45,6 +45,10 @@ v1.3  7) 중복값 처리에 "여러 열로 펼치기" 모드 추가 (expand_dup
            · always_suffix   : 중복 없는 변수에도 _1 을 붙일지
            · max_occurrences : 변수당 최대 개수 (0 = 제한 없음)
            · max_result_cols : ID 열을 잘못 지정해 열이 폭발하는 것을 막는 상한
+v1.4  8) DEFAULT_ID_COLS / DEFAULT_VALUE_COLS / DEFAULT_KEY_COL 로 기본 선택
+         열 지정. 해당 이름의 열이 있으면 자동 선택하고 없으면 비워 둔다.
+         겸사겸사, 다른 파일을 올렸을 때 이전 선택값이 새 옵션에 없어
+         multiselect 가 죽던 문제도 함께 막힌다 (lw_colsig 로 감지).
 """
 
 import hmac
@@ -405,6 +409,15 @@ def _arrow_safe(d):
 EXPAND_LABEL = "여러 열로 펼치기 (변수_1, 변수_2 …)"
 DUP_MODES = [EXPAND_LABEL] + list(AGG_FUNCS.keys())
 
+# ── 기본으로 선택될 열 이름 ──────────────────────────────────────────
+# 올린 파일에 아래 이름의 열이 있으면 자동으로 선택해 둔다.
+# 없으면 그냥 비워 두므로, 다른 형식의 파일도 문제없이 쓸 수 있다.
+# 자주 쓰는 형식이 바뀌면 이 세 줄만 고치면 된다.
+DEFAULT_ID_COLS = ["panel_id"]      # ① ID 열
+DEFAULT_VALUE_COLS = ["intval"]     # ② 값 열
+DEFAULT_KEY_COL = "page_name"       # ③ 기준 열
+NO_KEY = "(선택하세요)"
+
 
 st.set_page_config(page_title="세로 → 가로 변환", page_icon="↔️", layout="wide")
 
@@ -493,6 +506,17 @@ with st.expander("원본 미리보기", expanded=False):
 
 cols = list(df.columns)
 
+# 열 구성이 바뀌면(= 다른 파일/시트) 기본값을 다시 적용한다.
+# 위젯 생성 전이라 session_state 대입이 허용된다.
+# 이 초기화는 이전 파일의 선택값이 새 파일 옵션에 없어 위젯이 죽는 것도 막아준다.
+_colsig = str(cols)
+if st.session_state.get("lw_colsig") != _colsig:
+    st.session_state["lw_colsig"] = _colsig
+    st.session_state["lw_id"] = [c for c in DEFAULT_ID_COLS if c in cols]
+    st.session_state["lw_val"] = [c for c in DEFAULT_VALUE_COLS if c in cols]
+    st.session_state["lw_key"] = DEFAULT_KEY_COL if DEFAULT_KEY_COL in cols else NO_KEY
+    st.session_state.pop("lw_keys", None)      # 변수 선택은 기준 열에 딸린 것이라 초기화
+
 st.divider()
 st.subheader("1. 열 지정")
 
@@ -501,7 +525,7 @@ with left:
     id_cols = st.multiselect("① ID 열 — 한 행을 식별하는 기준", cols, key="lw_id",
                              help="응답자ID, 학번 등. 여러 개면 조합으로 식별합니다.")
     key_col = st.selectbox("③ 기준 열 — 가로로 펼칠 변수명이 담긴 열",
-                           ["(선택하세요)"] + cols, key="lw_key",
+                           [NO_KEY] + cols, key="lw_key",
                            help="'항목', '문항번호', '시점' 처럼 변수 이름이 쌓인 열")
 with right:
     value_cols = st.multiselect("② 값 열 — 실제 값이 담긴 열", cols, key="lw_val",
@@ -526,7 +550,7 @@ if expand_dup:
             value=0, step=1, key="lw_maxocc",
             help="예: 3 으로 두면 취미_1~취미_3 까지만 만들고 나머지는 버립니다."))
 
-if key_col == "(선택하세요)":
+if key_col == NO_KEY:
     st.info("③ 기준 열을 선택하면 펼칠 변수 목록이 나타납니다.")
     st.stop()
 
