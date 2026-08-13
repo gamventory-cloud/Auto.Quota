@@ -30,7 +30,7 @@ utils.py — 쿼터 솔루션 공용 모듈
 5. check_password : hmac 비교, secrets 누락 대응, 첫 진입 시 오류 미표시
 6. unique_sheet_name : 시트명 충돌 방지
 7. [2.1] long_to_wide / find_duplicate_cells / AGG_FUNCS 추가
-   - pages/3___세로_가로_변환.py 에서 사용
+   - pages/7___세로_가로_변환.py 에서 사용
    - key_col 정규화는 norm_val 을 재사용하므로 앱 전체와 열 이름이 일관됨
    - 기존 함수는 하나도 수정하지 않았다 (섹션 6만 추가)
 """
