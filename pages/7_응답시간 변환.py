@@ -30,6 +30,14 @@ v1.1  1) 변환 후 설정을 바꾸면 옛 결과가 남아 화면과 다운로
          때마다 xlsx 를 처음부터 다시 써서 큰 데이터에서 매번 수 초씩 멈췄다.
       3) @st.cache_data 에 max_entries 지정. 큰 파일을 여러 개 올렸을 때
          캐시가 무한히 쌓여 메모리를 다 쓰는 것을 막는다.
+v1.2  4) 결과 열 이름이 겹칠 때 _2, _3 을 붙여 자동 해소 (_dedupe_names).
+         이전에는 판다스 내부 에러가 그대로 노출됐다.
+           · ID='학번' 인데 기준 열에 '학번' 값 -> cannot insert 학번
+           · 값 열 2개 조합이 같아짐      -> AttributeError: no attribute 'dtype'
+      5) 정규화로 서로 다른 값이 한 열로 합쳐질 때 어떤 값들이 합쳐지는지
+         목록으로 표시. 기존 중복 경고만으로는 원인을 알 수 없었다.
+      6) 표시용 _arrow_safe 추가. 기준 열에 숫자와 문자가 섞이면 st.dataframe
+         이 매번 Arrow 변환에 실패해 로그에 에러를 대량으로 남겼다.
 """
 
 import hmac
@@ -179,6 +187,38 @@ def _restore_ints(df):
     return df
 
 
+def _dedupe_names(names, reserved=()):
+    """
+    결과 열 이름이 겹치면 _2, _3 … 을 붙여 유일하게 만든다.
+
+    겹치는 경로가 두 가지 있다.
+      ③ 기준 열의 값이 ID 열 이름과 같은 경우
+         (ID='학번' 인데 항목 열에 '학번' 이라는 값이 있음)
+      ④ 값 열이 2개 이상일 때 조합된 이름이 서로 같아지는 경우
+         ('점수' + '_' + '1_차' 와 '점수_1' + '_' + '차' 가 모두 '점수_1_차')
+    처리하지 않으면 판다스 내부 에러가 그대로 사용자에게 노출된다.
+
+    reserved : ID 열 이름. 여기에도 겹치면 안 된다.
+    반환     : (확정된 이름 목록, [(원래 이름, 바뀐 이름), …])
+    """
+    used = {str(r) for r in reserved}
+    out, renamed = [], []
+    for n in names:
+        n = str(n)
+        if n not in used:
+            used.add(n)
+            out.append(n)
+            continue
+        i = 2
+        while f"{n}_{i}" in used:
+            i += 1
+        new = f"{n}_{i}"
+        used.add(new)
+        out.append(new)
+        renamed.append((n, new))
+    return out, renamed
+
+
 def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
                  aggfunc="first", name_sep="_", normalize_keys=True):
     """
@@ -239,30 +279,28 @@ def long_to_wide(df, id_cols, key_col, value_cols, keep_keys=None,
             "값 열에 숫자가 아닌 값이 섞여 있는데 평균/합계를 고른 경우일 수 있습니다. "
             "중복값 처리를 '첫 번째 값만' 으로 바꿔 보세요.")
 
-    if isinstance(wide.columns, pd.MultiIndex):
-        if len(value_cols) == 1:
-            wide.columns = [str(c[-1]) for c in wide.columns]
-            desired = [str(k) for k in keep_keys]
-        else:
-            wide.columns = [f"{c[0]}{name_sep}{c[1]}" for c in wide.columns]
-            desired = [f"{v}{name_sep}{k}" for v in value_cols for k in keep_keys]
-    else:
-        wide.columns = [str(c) for c in wide.columns]
-        desired = [str(k) for k in keep_keys]
+    # ── 결과 열 이름 확정 ────────────────────────────────────────────
+    # (값 열, 변수) 쌍을 표준 식별자로 삼고 이름은 마지막에 붙인다.
+    # 이름이 겹쳐도 어느 칸인지 잃지 않기 위한 것이다.
+    if not isinstance(wide.columns, pd.MultiIndex):
+        wide.columns = pd.MultiIndex.from_tuples(
+            [(value_cols[0], c) for c in wide.columns])
+
+    pairs = [(v, k) for v in value_cols for k in keep_keys]
+    # 값이 전부 비어 사라진 칸도 빈 열로 되살리고, 선택 순서대로 정렬한다
+    wide = wide.reindex(columns=pd.MultiIndex.from_tuples(pairs))
+
+    raw_names = [str(k) if len(value_cols) == 1 else f"{v}{name_sep}{k}"
+                 for v, k in pairs]
+    final_names, renamed = _dedupe_names(raw_names, reserved=id_cols)
+    wide.columns = final_names
 
     wide = wide.reset_index()
-
-    # 값이 전부 비어 사라진 변수도 빈 열로 되살린다 (열 개수를 예측 가능하게)
-    for c in desired:
-        if c not in wide.columns:
-            wide[c] = pd.NA
-
-    cols = id_cols + list(desired)
-    cols += [c for c in wide.columns if c not in cols]
-    wide = wide.loc[:, cols]
-
     wide = order.merge(wide, on=id_cols, how="left")   # ID 원래 순서 복원
-    return _restore_ints(wide)
+    wide = _restore_ints(wide)
+    # 이름이 바뀐 열은 화면에서 경고로 알리기 위해 함께 넘긴다
+    wide.attrs["renamed_columns"] = renamed
+    return wide
 
 
 def find_duplicate_cells(df, id_cols, key_col, normalize_keys=True, limit=200):
@@ -280,6 +318,21 @@ def find_duplicate_cells(df, id_cols, key_col, normalize_keys=True, limit=200):
 # ==============================================================================
 # 2. 화면
 # ==============================================================================
+def _arrow_safe(d):
+    """
+    st.dataframe 표시용 변환.
+    한 열에 숫자와 문자가 섞여 있으면(예: 항목 열에 1 과 '국어') Arrow 변환이
+    실패하고 Streamlit 이 매번 자동 복구를 시도하면서 로그에 대량의
+    ArrowTypeError 를 남긴다. object 열만 문자열로 바꿔 미리 막는다.
+    (숫자 열은 그대로 두므로 정렬·서식은 유지된다. 표시용이며 원본은 안 건드린다.)
+    """
+    out = d.copy()
+    for c in out.columns:
+        if out[c].dtype == object:
+            out[c] = out[c].astype(str)
+    return out
+
+
 st.set_page_config(page_title="세로 → 가로 변환", page_icon="↔️", layout="wide")
 
 if not check_password():
@@ -363,7 +416,7 @@ if dup_cols:
 
 st.success(f"{len(df):,}행 × {len(df.columns)}열 읽음")
 with st.expander("원본 미리보기", expanded=False):
-    st.dataframe(df.head(20))
+    st.dataframe(_arrow_safe(df.head(20)))
 
 cols = list(df.columns)
 
@@ -449,7 +502,31 @@ if id_cols and keep_keys:
         st.warning(f"같은 ID에 같은 변수가 중복된 칸이 {len(dup):,}곳 있습니다 "
                    f"(총 {dup_total:,}행). 현재 설정은 **{agg_label}** 로 처리합니다.")
         with st.expander("중복 내역 보기"):
-            st.dataframe(dup)
+            st.dataframe(_arrow_safe(dup))
+
+# 정규화 때문에 서로 다른 원본 값이 한 열로 합쳐지는 경우를 명시적으로 알린다.
+# 위의 중복 경고만으로는 원인이 정규화라는 것을 알 수 없다.
+if norm_keys and keep_keys:
+    try:
+        _pair = pd.DataFrame({"o": df[key_col], "n": key_series})
+        _pair = _pair[_pair["n"].isin(keep_keys)]
+        _grp = _pair.groupby("n", dropna=False)["o"].unique()
+        _merged = [(k, v) for k, v in _grp.items() if len(v) > 1]
+    except Exception:
+        _merged = []
+    if _merged:
+        st.warning(
+            f"서로 다른 값 {sum(len(v) for _, v in _merged)}개가 정규화되어 "
+            f"{len(_merged)}개 열로 합쳐집니다. 합쳐진 값들은 위의 중복값 처리 "
+            f"규칙(**{agg_label}**)에 따라 하나만 남습니다.")
+        with st.expander("합쳐지는 값 보기"):
+            st.dataframe(_arrow_safe(pd.DataFrame({
+                "결과 열 이름": [str(k) for k, _ in _merged],
+                "합쳐지는 원본 값": [", ".join(repr(x) for x in v) for _, v in _merged],
+            })))
+            st.caption("따옴표와 공백까지 보이도록 원본 그대로 표시했습니다. "
+                       "의도한 것이 아니라면 '변수명 정규화'를 끄거나 "
+                       "엑셀에서 값을 통일한 뒤 다시 올려주세요.")
 
 st.divider()
 st.subheader("3. 변환")
@@ -516,13 +593,22 @@ if "lw_result" in st.session_state and st.session_state.get("lw_sig") != _SIG:
 result = st.session_state.get("lw_result")
 if result is not None:
     st.success(f"변환 완료 — {len(result):,}행 × {len(result.columns)}열")
-    st.dataframe(result.head(100))
+    st.dataframe(_arrow_safe(result.head(100)))
     if len(result) > 100:
         st.caption(f"위 표는 앞 100행만 표시합니다. 전체 {len(result):,}행은 파일로 받으세요.")
 
     empty_cols = [c for c in result.columns if result[c].isna().all()]
     if empty_cols:
         st.warning(f"값이 전부 비어 있는 열: {empty_cols}")
+
+    _rn = result.attrs.get("renamed_columns") or []
+    if _rn:
+        _shown = ", ".join(f"`{a}` → `{b}`" for a, b in _rn[:20])
+        st.warning(
+            f"열 이름이 겹쳐서 {len(_rn)}개를 자동으로 바꿨습니다: {_shown}"
+            + (f" 외 {len(_rn) - 20}건" if len(_rn) > 20 else "")
+            + "\n\nID 열 이름과 같은 변수가 있거나, 값 열 2개 이상을 고를 때 "
+              "조합된 이름이 같아지면 발생합니다. 데이터는 손실되지 않았습니다.")
 
     base = st.session_state.get("lw_base", "result")
     d1, d2 = st.columns(2)
