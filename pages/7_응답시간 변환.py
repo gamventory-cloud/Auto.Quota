@@ -21,6 +21,15 @@
 
 필요 패키지: streamlit, pandas, openpyxl, XlsxWriter, chardet
 (모두 기존 requirements.txt 에 이미 포함되어 있음)
+
+수정 이력
+---------
+v1.1  1) 변환 후 설정을 바꾸면 옛 결과가 남아 화면과 다운로드 내용이 어긋나던 문제
+         수정. 설정 지문(_SIG)을 결과와 함께 저장해 두고 달라지면 폐기한다.
+      2) 다운로드용 xlsx/csv 를 변환 시점에 1회만 생성. 이전에는 위젯을 건드릴
+         때마다 xlsx 를 처음부터 다시 써서 큰 데이터에서 매번 수 초씩 멈췄다.
+      3) @st.cache_data 에 max_entries 지정. 큰 파일을 여러 개 올렸을 때
+         캐시가 무한히 쌓여 메모리를 다 쓰는 것을 막는다.
 """
 
 import hmac
@@ -281,14 +290,16 @@ st.caption("한 응답자의 값이 여러 행에 세로로 쌓여 있는 데이
            "응답자 1명 = 1행 형태로 펼칩니다. 필요한 변수만 골라서 변환할 수 있습니다.")
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4)
 def list_sheets(data: bytes, name: str):
     if name.lower().endswith(".csv"):
         return ["(CSV)"]
     return pd.ExcelFile(io.BytesIO(data)).sheet_names
 
 
-@st.cache_data(show_spinner="파일을 읽는 중…")
+# max_entries 를 걸지 않으면 큰 파일을 여러 개 올릴 때 원본 바이트와
+# 데이터프레임이 캐시에 계속 쌓여 메모리를 다 쓴다 (Cloud 무료 플랜 1GB).
+@st.cache_data(show_spinner="파일을 읽는 중…", max_entries=2)
 def read_table(data: bytes, name: str, sheet: str, header: int):
     if name.lower().endswith(".csv"):
         try:
@@ -450,19 +461,57 @@ if not id_cols or not value_cols or not keep_keys:
 st.caption(f"예상 결과: ID {len(id_cols)}열 + 값 {len(value_cols)}개 × "
            f"변수 {len(keep_keys)}개 = 총 {len(id_cols) + len(value_cols) * len(keep_keys)}열")
 
+# 결과에 영향을 주는 모든 설정의 지문. 변환 시점의 지문을 함께 저장해 두고
+# 현재 지문과 다르면 결과를 폐기한다. 이게 없으면 변환 후 설정을 바꿨을 때
+# 화면의 설정과 표/다운로드 내용이 어긋난 채로 남아 옛 파일을 받게 된다.
+_SIG = str((up.name, len(raw), sheet, int(header_row), tuple(id_cols), key_col,
+            tuple(value_cols), tuple(keep_keys), agg_label, bool(norm_keys)))
+_KEYS = ("lw_result", "lw_xlsx", "lw_csv", "lw_sig", "lw_base")
+
+
+def _clear_result():
+    for k in _KEYS:
+        st.session_state.pop(k, None)
+
+
+def _build_xlsx(res):
+    buf = io.BytesIO()
+    try:
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
+            res.to_excel(w, sheet_name=sanitize_sheet_name("wide"), index=False)
+    except Exception:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            res.to_excel(w, sheet_name="wide", index=False)
+    return buf.getvalue()
+
+
 if st.button("변환 실행", type="primary"):
     try:
         with st.spinner("변환 중…"):
-            st.session_state["lw_result"] = long_to_wide(
+            res = long_to_wide(
                 df, id_cols=id_cols, key_col=key_col, value_cols=value_cols,
                 keep_keys=keep_keys, aggfunc=AGG_FUNCS[agg_label],
                 normalize_keys=norm_keys)
+        # 다운로드 파일은 여기서 딱 한 번만 만든다. 버튼 밖에서 만들면
+        # 체크박스 하나 누를 때마다 xlsx 를 처음부터 다시 쓴다.
+        with st.spinner("다운로드 파일 준비 중…"):
+            st.session_state["lw_result"] = res
+            st.session_state["lw_xlsx"] = _build_xlsx(res)
+            st.session_state["lw_csv"] = res.to_csv(index=False).encode("utf-8-sig")
+            st.session_state["lw_sig"] = _SIG
+            st.session_state["lw_base"] = up.name.rsplit(".", 1)[0]
     except ValueError as e:
+        _clear_result()
         st.error(str(e))
-        st.session_state.pop("lw_result", None)
     except Exception as e:
+        _clear_result()
         st.error(f"예상치 못한 오류: {type(e).__name__}: {e}")
-        st.session_state.pop("lw_result", None)
+
+# 변환 후 설정이 바뀌었으면 결과를 버린다
+if "lw_result" in st.session_state and st.session_state.get("lw_sig") != _SIG:
+    _clear_result()
+    st.info("설정이 바뀌었습니다. [변환 실행] 을 다시 눌러주세요.")
 
 result = st.session_state.get("lw_result")
 if result is not None:
@@ -475,20 +524,12 @@ if result is not None:
     if empty_cols:
         st.warning(f"값이 전부 비어 있는 열: {empty_cols}")
 
-    base = up.name.rsplit(".", 1)[0]
-    buf = io.BytesIO()
-    try:
-        with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
-            result.to_excel(w, sheet_name=sanitize_sheet_name("wide"), index=False)
-    except Exception:
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as w:
-            result.to_excel(w, sheet_name="wide", index=False)
-
+    base = st.session_state.get("lw_base", "result")
     d1, d2 = st.columns(2)
     d1.download_button(
-        "엑셀 다운로드", data=buf.getvalue(), file_name=f"{base}_wide.xlsx",
+        "엑셀 다운로드", data=st.session_state["lw_xlsx"],
+        file_name=f"{base}_wide.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     d2.download_button(
-        "CSV 다운로드", data=result.to_csv(index=False).encode("utf-8-sig"),
+        "CSV 다운로드", data=st.session_state["lw_csv"],
         file_name=f"{base}_wide.csv", mime="text/csv")
