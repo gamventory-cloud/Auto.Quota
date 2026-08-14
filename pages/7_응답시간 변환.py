@@ -63,8 +63,14 @@ v1.6 11) SPSS .sav 다운로드 추가 (build_sav / _spss_safe_names).
              (readstat 에러 메시지는 밑줄이 허용되는 것처럼 안내하지만 아니다)
          바꾼 이름은 경고로 알리고 원래 이름은 SPSS 변수 라벨로 보존한다.
          엑셀·CSV 는 원래 이름을 그대로 쓴다.
+v1.7 12) 변수 이름 바꾸기를 st.expander 밖으로 꺼내 항상 펼쳐진 표로 바꿨다.
+         expander 제목에 "N개 변경됨" 을 넣었더니 이름을 고칠 때마다 제목이
+         바뀌어 Streamlit 이 다른 위젯으로 인식하고 패널이 저절로 닫혔다.
+         data_editor 에는 변수 목록으로 만든 해시를 key 로 주어, 목록이
+         그대로인 동안 편집 상태가 유지되고 목록이 바뀌면 새 표로 시작한다.
 """
 
+import hashlib
 import hmac
 import io
 import os
@@ -724,50 +730,68 @@ with sc2:
     keep_keys = [labels[l] for l in picked_labels if l in labels]
 
 # ── 변수 이름 바꾸기 ────────────────────────────────────────────────
-# 변수 단위로 바꾸므로, 펼침 모드에서는 바뀐 이름 뒤에 순번이 붙는다.
-# (Q3_추천 -> 추천 으로 바꾸면 추천_1, 추천_2 …)
+# 항상 펼쳐진 표로 보여준다. 예전에는 st.expander 안에 넣고 제목에
+# "N개 변경됨" 을 표시했는데, 이름을 고칠 때마다 제목이 바뀌어
+# Streamlit 이 다른 위젯으로 인식해 패널이 저절로 닫혔다.
 rename_map = {}
 if keep_keys:
+    st.markdown("**변수 이름 바꾸기** (고칠 것만 수정하세요)")
+    st.caption("'결과 열 이름' 칸을 고치면 됩니다. 비워 두면 원본 이름을 그대로 씁니다. "
+               "펼침 모드에서는 바꾼 이름 뒤에 순번이 붙습니다 (추천 → 추천_1, 추천_2).")
+
     _saved = st.session_state.get("lw_rename", {})
-    with st.expander(
-            f"변수 이름 바꾸기 (선택)"
-            + (f" — {len([k for k in keep_keys if _saved.get(str(k))])}개 변경됨"
-               if any(_saved.get(str(k)) for k in keep_keys) else "")):
-        st.caption("'결과 열 이름' 칸만 고치면 됩니다. 비워 두면 원본 이름을 씁니다. "
-                   "여기서 바꾼 이름이 엑셀 첫 행에 들어갑니다.")
+    _rows = pd.DataFrame({
+        "변수": [str(k) for k in keep_keys],
+        "결과 열 이름": [_saved.get(str(k), "") for k in keep_keys],
+    })
 
-        _rows = pd.DataFrame({
-            "변수": [str(k) for k in keep_keys],
-            "결과 열 이름": [_saved.get(str(k), "") for k in keep_keys],
-        })
+    if hasattr(st, "data_editor"):
+        # 변수 목록이 그대로인 동안은 같은 key 를 써서 편집 상태를 유지하고,
+        # 목록이 바뀌면 key 가 달라져 새 표로 시작한다. (행 위치가 어긋난 채
+        # 이전 편집이 다른 변수에 잘못 적용되는 것을 막는다.)
+        _ed_key = "lw_rn_" + hashlib.md5(
+            "|".join(str(k) for k in keep_keys).encode("utf-8")).hexdigest()[:10]
 
-        if hasattr(st, "data_editor"):
-            _edited = st.data_editor(
-                _rows, hide_index=True, num_rows="fixed",
-                column_config={
-                    "변수": st.column_config.TextColumn("변수 (원본)", disabled=True),
-                    "결과 열 이름": st.column_config.TextColumn(
-                        "결과 열 이름", help="비워 두면 원본 이름 사용"),
-                })
-            _new = dict(zip(_edited["변수"], _edited["결과 열 이름"]))
-        else:
-            # 아주 오래된 Streamlit 대비 (data_editor 이전 버전)
-            _new = {}
+        def _reset_names(k=_ed_key):
+            st.session_state["lw_rename"] = {}
+            st.session_state.pop(k, None)
+
+        # height 는 None 을 허용하지 않으므로 필요할 때만 넘긴다
+        _ed_kw = {}
+        if len(_rows) > 8:
+            _ed_kw["height"] = min(420, 45 + 35 * len(_rows))
+
+        _edited = st.data_editor(
+            _rows, key=_ed_key, hide_index=True, num_rows="fixed",
+            column_config={
+                "변수": st.column_config.TextColumn("변수 (원본)", disabled=True),
+                "결과 열 이름": st.column_config.TextColumn(
+                    "결과 열 이름", help="비워 두면 원본 이름 사용"),
+            }, **_ed_kw)
+        _new = dict(zip(_edited["변수"], _edited["결과 열 이름"]))
+    else:
+        # 아주 오래된 Streamlit 대비 (data_editor 이전 버전)
+        def _reset_names():
+            st.session_state["lw_rename"] = {}
             for _k in keep_keys:
-                _new[str(_k)] = st.text_input(
-                    str(_k), value=_saved.get(str(_k), ""), key=f"lw_rn_{_k}")
+                st.session_state.pop(f"lw_rn_{_k}", None)
 
-        rename_map = {k: str(v).strip() for k, v in _new.items()
-                      if v is not None and str(v).strip()}
-        st.session_state["lw_rename"] = rename_map
+        _new = {}
+        for _k in keep_keys:
+            _new[str(_k)] = st.text_input(
+                str(_k), value=_saved.get(str(_k), ""), key=f"lw_rn_{_k}")
 
-        if rename_map:
-            st.caption("적용될 이름: "
-                       + ", ".join(f"`{k}` → `{v}`"
-                                   for k, v in list(rename_map.items())[:10])
-                       + (" …" if len(rename_map) > 10 else ""))
-            st.button("이름 전부 초기화",
-                      on_click=lambda: st.session_state.update(lw_rename={}))
+    rename_map = {k: str(v).strip() for k, v in _new.items()
+                  if v is not None and str(v).strip()}
+    st.session_state["lw_rename"] = rename_map
+
+    if rename_map:
+        rc1, rc2 = st.columns([4, 1])
+        rc1.caption("적용될 이름: "
+                    + ", ".join(f"`{k}` → `{v}`"
+                                for k, v in list(rename_map.items())[:10])
+                    + (" …" if len(rename_map) > 10 else ""))
+        rc2.button("이름 전부 초기화", on_click=_reset_names)
 
 if id_cols and keep_keys:
     try:
