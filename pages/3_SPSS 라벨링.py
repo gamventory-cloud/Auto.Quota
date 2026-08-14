@@ -22,9 +22,40 @@ import utils
 assert utils.MODULE_ROLE == "utils", "utils.py 가 아닌 파일이 import 되었습니다."
 assert sl.MODULE_ROLE == "spss_labels", "spss_labels.py 가 아닌 파일이 import 되었습니다."
 
+# 이 화면이 요구하는 최소 모듈 버전.
+# 파일을 교체했는데도 구버전이 돌아 문항이 누락되는 사고를 잡아낸다.
+# (Streamlit 은 import 된 모듈을 메모리에 유지하므로, 모듈 파일만 바꾸고
+#  서버를 재시작하지 않으면 예전 코드가 계속 실행된다.)
+REQUIRED_SL_VERSION = (1, 1)
+
+
+def _version_tuple(text):
+    parts = []
+    for chunk in str(text).split(".")[:2]:
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 2:
+        parts.append(0)
+    return tuple(parts)
+
 st.set_page_config(page_title="SPSS 라벨링", page_icon="📋", layout="wide")
 
 if not utils.check_password():
+    st.stop()
+
+if _version_tuple(sl.__version__) < REQUIRED_SL_VERSION:
+    st.error(
+        f"spss_labels.py 가 구버전입니다 (현재 {sl.__version__}, "
+        f"필요 {'.'.join(map(str, REQUIRED_SL_VERSION))} 이상).\n\n"
+        "구버전은 CS·IN·EQD·MV 같은 접두사 문항을 인식하지 못해 코드북에서 누락됩니다.\n"
+        "1) 최상단 spss_labels.py 를 새 파일로 교체했는지 확인\n"
+        "2) 앱을 **재시작** (로컬: 터미널에서 Ctrl+C 후 다시 실행 / "
+        "Streamlit Cloud: Manage app → Reboot app)\n"
+        "3) 아래 '캐시 비우고 다시 파싱' 버튼 클릭"
+    )
+    if st.button("캐시 비우고 다시 파싱"):
+        st.cache_data.clear()
+        st.rerun()
     st.stop()
 
 # 세션 키
@@ -58,8 +89,13 @@ WIDE = wide()
 # 0. 캐시 : 같은 파일을 다시 파싱하지 않는다
 # ==============================================================================
 @st.cache_data(show_spinner=False)
-def parse_cached(docx_bytes, base0_key, full_labels):
-    """base0_key 는 캐시 키로 쓰기 위해 tuple 로 받는다."""
+def parse_cached(docx_bytes, base0_key, full_labels, module_version):
+    """base0_key 는 캐시 키로 쓰기 위해 tuple 로 받는다.
+
+    module_version 은 함수 안에서 쓰지 않지만 캐시 키에 포함시킨다.
+    모듈을 새 버전으로 올렸을 때 예전 파싱 결과가 재사용되면 안 된다.
+    """
+    del module_version
     return sl.parse_upload(docx_bytes, base0=list(base0_key), full_labels=full_labels)
 
 
@@ -90,6 +126,7 @@ with st.sidebar:
              "SPSS 값라벨은 120바이트(한글 40자) 한도에서 잘립니다.",
     )
     st.divider()
+    st.caption(f"spss_labels {sl.__version__} · utils {utils.__version__}")
     st.markdown(
         "**처리 순서**\n\n"
         "1. 설문지 업로드 → 자동 파싱\n"
@@ -106,7 +143,7 @@ with c1:
     if up_docx is not None and st.button("설문지 파싱", type="primary"):
         with st.spinner("설문지를 읽고 있습니다…"):
             try:
-                variables = parse_cached(up_docx.getvalue(), base0, full_labels)
+                variables = parse_cached(up_docx.getvalue(), base0, full_labels, sl.__version__)
             except Exception as e:
                 st.error(f"파싱 실패: {type(e).__name__}: {e}")
                 st.stop()
