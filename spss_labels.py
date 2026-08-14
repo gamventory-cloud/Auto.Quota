@@ -40,6 +40,10 @@ utils.py 와의 관계
 5. SPSS 한도는 바이트 기준 : 값라벨 120B, 변수라벨 256B (한글 1자 = 3B)
    라벨이 한도를 넘으면 문항 서두를 버리고 항목 텍스트를 살린다 (compose_label)
 6. .sps 는 UTF-8 BOM 으로 내보낸다 (SPSS 유니코드 모드에서 한글 보존)
+7. 복수응답 저장 방식(multi_style)
+     category  : 열마다 선택한 보기 코드, 미선택은 공백 (기본) -> MRSETS MCGROUP
+     position  : 보기별 열이며 그 열은 자기 코드만 (1열=1, 2열=2 …) -> MCGROUP
+     dichotomy : 0=비선택 / 1=선택 더미 -> MRSETS MDGROUP
 """
 
 import io
@@ -64,7 +68,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 
@@ -383,7 +387,11 @@ class Var:
     missing: str = ""      # 사용자 결측 (예: "99" 또는 "90-99")
 
 
-def build_vars(q: Question, colon_split: bool = True) -> list[Var]:
+MULTI_STYLES = ("category", "position", "dichotomy")
+
+
+def build_vars(q: Question, colon_split: bool = True,
+               multi_style: str = "category") -> list[Var]:
     kind = detect_type(q)
     base = varname(q.qid)
     label_src = q.label
@@ -408,12 +416,26 @@ def build_vars(q: Question, colon_split: bool = True) -> list[Var]:
         out.append(Var(base, qlabel, "numeric", "nominal", vl(q.options), q.qid, kind))
 
     elif kind == "multi":
+        # 복수응답 데이터 저장 방식은 조사기관마다 다르다.
+        #   category   : 열마다 선택한 보기 코드가 들어가고 미선택은 공백
+        #                -> 전체 보기 값라벨을 붙인다. 열 배치(보기별/응답순서별)와
+        #                   무관하게 항상 맞으므로 기본값으로 쓴다.
+        #   position   : 보기별 열이며 그 열은 자기 코드만 갖는다 (1열=1, 2열=2 …)
+        #                -> 값라벨도 자기 코드 하나만
+        #   dichotomy  : 0=비선택 / 1=선택 더미
+        # SPSS 에서 category·position 은 MCGROUP, dichotomy 는 MDGROUP 으로 묶인다.
+        # 이 구분은 비고에 남겨 코드북을 거쳐도 유지된다 (export 가 이 문자열을 읽는다).
+        opts = vl(q.options)
         for code, opt in sorted(q.options.items()):
-            out.append(Var(
-                f"{base}_{code}", byte_trim(f"{qlabel} - {shorten(opt, colon_split)}", 256),
-                "numeric", "nominal", {0: "비선택", 1: "선택"}, q.qid, kind,
-                note="복수응답 더미",
-            ))
+            label = byte_trim(f"{qlabel} - {shorten(opt, colon_split)}", 256)
+            if multi_style == "dichotomy":
+                values, note = {0: "비선택", 1: "선택"}, "복수응답 더미(0/1)"
+            elif multi_style == "position":
+                values, note = {code: opts.get(code, "")}, "복수응답(보기코드)"
+            else:
+                values, note = opts, "복수응답(보기코드)"
+            out.append(Var(f"{base}_{code}", label, "numeric", "nominal",
+                           values, q.qid, kind, note=note))
 
     elif kind == "rank":
         ranks = next((t["items"] for t in q.tables if t["kind"] == "rank"), ["1순위", "2순위", "3순위"])
@@ -468,6 +490,8 @@ def build_vars(q: Question, colon_split: bool = True) -> list[Var]:
 
     # '모름/무응답' 류 보기는 사용자 결측으로 자동 제안 (코드북에서 수정 가능)
     for v in out:
+        if v.kind == "multi":
+            continue
         flags = [str(c) for c, lab in sorted(v.values.items())
                  if re.search(r"모름|무응답|응답\s*거부", lab)]
         if flags:
@@ -509,8 +533,12 @@ def dp_instruction_vars(blocks: list[Block], existing: set[str]) -> list[Var]:
     return out
 
 
-def parse_docx(path: str, colon_split: bool = True) -> list[Var]:
-    """워드 설문지 -> 변수 목록."""
+def parse_docx(path: str, colon_split: bool = True,
+               multi_style: str = "category") -> list[Var]:
+    """워드 설문지 -> 변수 목록.
+
+    multi_style: 복수응답 저장 방식. category / position / dichotomy 중 하나.
+    """
     blocks = read_blocks(path)
     questions = collect_questions(blocks)
     all_ids = {q.qid for q in questions}
@@ -525,7 +553,7 @@ def parse_docx(path: str, colon_split: bool = True) -> list[Var]:
     for q in questions:
         if is_section_header(q):
             continue
-        for v in build_vars(q, colon_split):
+        for v in build_vars(q, colon_split, multi_style):
             while v.name in used:
                 v.name += "b"
             used.add(v.name)
@@ -779,16 +807,30 @@ def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "") ->
             if len(members) < 2:
                 continue
             stem = members[0].label.split(" - ")[0]
-            L += [
-                "MRSETS",
-                f"  /MDGROUP NAME=${base}",
-                f"    LABEL={q(byte_trim(stem, MAX_VARLABEL_BYTES))}",
-                "    CATEGORYLABELS=VARLABELS",
-                f"    VARIABLES={' '.join(v.name for v in members)}",
-                "    VALUE=1",
-                f"  /DISPLAY NAME=[${base}].",
-                "",
-            ]
+            names = " ".join(v.name for v in members)
+            label = q(byte_trim(stem, MAX_VARLABEL_BYTES))
+            # 0/1 더미는 다중이분(MDGROUP), 보기코드 저장은 다중범주(MCGROUP).
+            # MCGROUP 은 VALUE·CATEGORYLABELS 를 받지 않는다.
+            if any("보기코드" in (v.note or "") for v in members):
+                L += [
+                    "MRSETS",
+                    f"  /MCGROUP NAME=${base}",
+                    f"    LABEL={label}",
+                    f"    VARIABLES={names}",
+                    f"  /DISPLAY NAME=[${base}].",
+                    "",
+                ]
+            else:
+                L += [
+                    "MRSETS",
+                    f"  /MDGROUP NAME=${base}",
+                    f"    LABEL={label}",
+                    "    CATEGORYLABELS=VARLABELS",
+                    f"    VARIABLES={names}",
+                    "    VALUE=1",
+                    f"  /DISPLAY NAME=[${base}].",
+                    "",
+                ]
 
     L.append("* 끝. (라벨 명령은 즉시 적용되므로 EXECUTE가 필요하지 않습니다.)")
     return "\n".join(L) + "\n"
@@ -906,12 +948,16 @@ FIELDS = ["변수명", "문항번호", "문항유형", "변수라벨", "유형",
 # ------------------------------------------------------------- 파싱
 
 def parse_upload(docx_bytes: bytes, base0: list[str] | None = None,
-                 full_labels: bool = False) -> list[Var]:
-    """업로드된 워드 파일 bytes -> 변수 목록."""
+                 full_labels: bool = False, multi_style: str = "category") -> list[Var]:
+    """업로드된 워드 파일 bytes -> 변수 목록.
+
+    multi_style: 복수응답 저장 방식 (category / position / dichotomy).
+    """
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=True) as tmp:
         tmp.write(docx_bytes)
         tmp.flush()
-        variables = parse_docx(tmp.name, colon_split=not full_labels)
+        variables = parse_docx(tmp.name, colon_split=not full_labels,
+                               multi_style=multi_style)
     if base0:
         rebase_values(variables, base0, start=0)
     return variables
