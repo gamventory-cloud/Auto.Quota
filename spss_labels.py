@@ -23,13 +23,22 @@ utils.py 와의 관계
   - 원자료(csv/xlsx) 로드는 화면 쪽에서 utils.load_df 를 쓴다.
     .sav 는 utils 가 다루지 않으므로 이 파일의 read_data_upload 가 처리한다.
 
+인식하는 문항 머리글
+------------------
+접두사는 문서마다 다르므로 대문자 조합을 폭넓게 받는다.
+  숫자가 붙는 형태 : Q13-3. / A5-1. / DQ2. / CS1. / IN2. / AC1. / SQ3.
+  숫자가 없는 형태 : EQD. / MV. / MS. / IR.   (블록 전체가 하나의 격자 문항)
+격자 항목이 자기 변수명을 갖고 있으면(`1) EQD1. 우리 사회에서는 …`) 그 이름을 쓴다.
+
 주요 규칙
 --------
-1. 문항 머리글 : `Q7-1.`, `A5-1.`, `DQ2.`, `SQ1.` (RE_QHEAD)
-2. 보기        : `1. 남성` / `2) 아니오`, 한 단락에 탭으로 여러 개도 인식
-3. 척도표      : 머리행의 `(1) … (7)`, `7 매우 신뢰한다`, `매우 진보↵(0)` 모두 해석
-4. 격자/순위/복수응답/슬라이더/주관식 자동 판정 (detect_type)
+1. 보기        : `1. 남성` / `2) 아니오`, 한 단락에 탭으로 여러 개도 인식
+2. 척도표      : 머리행의 `(1) … (7)`, `7 매우 신뢰한다`, `매우 진보↵(0)`,
+                 `전혀 그렇지 않다 1` 모두 해석
+3. 격자/순위/복수응답/슬라이더/주관식 자동 판정 (detect_type)
+4. 1x1 표는 입력 안내일 때만 주관식. 개념 정의 박스는 무시한다
 5. SPSS 한도는 바이트 기준 : 값라벨 120B, 변수라벨 256B (한글 1자 = 3B)
+   라벨이 한도를 넘으면 문항 서두를 버리고 항목 텍스트를 살린다 (compose_label)
 6. .sps 는 UTF-8 BOM 으로 내보낸다 (SPSS 유니코드 모드에서 한글 보존)
 """
 
@@ -55,7 +64,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 
@@ -66,8 +75,19 @@ __version__ = "1.0.0"
 
 # ---------------------------------------------------------------- 정규식 규칙
 
-# 문항 머리글. DQ2. / Q13-3. / A5-1. / SQ1. 등
-RE_QHEAD = re.compile(r"^\s*((?:DQ|SQ|Q|[A-F])\s*\d+(?:\s*[-‐–_]\s*\d+)*)\s*[.)]\s*(.*)$")
+# 문항 머리글. 접두사는 문서마다 다르므로 대문자 조합을 폭넓게 받는다.
+#   숫자가 붙는 형태 : Q13-3. / A5-1. / DQ2. / CS1. / IN2. / AC1.
+#   숫자가 없는 형태 : EQD. / MV. / MS. / IR.   (블록 전체가 하나의 격자 문항)
+# 단, 한 글자 + 숫자 없음(`A.`)은 오탐이 많아 제외한다.
+RE_QHEAD = re.compile(
+    r"^\s*("
+    r"[A-Z]{1,6}\s*\d+(?:\s*[-‐–_]\s*\d+)*"   # 문자+숫자
+    r"|[A-Z]{2,6}"                              # 문자만 (2글자 이상)
+    r")\s*[.)]\s*(.*)$"
+)
+
+# 격자 항목이 자기 변수명을 갖고 있는 경우: `1) EQD1. 우리 사회에서는 …`
+RE_ITEM_VAR = re.compile(r"^\s*(?:\d{1,3}\s*[.)]\s*)?([A-Z]{1,6}\d{1,3})\s*[.)]\s*(.+)$")
 
 # 보기 한 개. `1. 남성` / `2) 아니오` / `99. 모름`
 RE_OPTION = re.compile(r"^\s*(\d{1,3})\s*[.)]\s*(.+)$")
@@ -76,6 +96,9 @@ RE_OPTION = re.compile(r"^\s*(\d{1,3})\s*[.)]\s*(.+)$")
 RE_OPT_SPLIT = re.compile(r"(?:\t|\s{3,})(?=\d{1,3}\s*[.)]\s*\S)")
 
 RE_DIRECTIVE = re.compile(r"\[(?:PROG|prog)\s*:.*?\]|\[[^\[\]]*(?:랜덤|고정|선택|주관식|입력|자동표시|중단|드롭다운)[^\[\]]*\]")
+
+# 격자표 첫 열 머리글이 이런 값이면 구성개념명이 아니라 단순 안내이므로 라벨에 쓰지 않는다
+GENERIC_TITLES = {"문항 내용", "문항내용", "문항", "속성", "구분", "내용", "항목", ""}
 
 SEQ_NOTE = "확인필요: 설문지에 코드 미표기 -> 1부터 순차 부여"
 
@@ -97,7 +120,7 @@ def varname(qid: str) -> str:
     utils.sanitize_var_name 을 재사용해 변수명 규칙을 한 곳에서 관리한다.
     그 함수가 처리하지 않는 두 가지만 여기서 덧붙인다.
       - 소문자 통일 (SPSS 는 대소문자를 구분하지 않지만 코드북 매칭을 위해)
-      - 숫자로 시작하는 이름 방지 (SPSS 변수명은 영문/한글로 시작해야 함)
+      - 숫자로 시작하는 이름 방지 (SPSS 변수명은 영문으로 시작해야 함)
     """
     name = utils.sanitize_var_name(re.sub(r"[‐–]", "-", str(qid)).strip()).lower()
     name = re.sub(r"__+", "_", name).strip("_")
@@ -179,9 +202,12 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
         ranks = [clean(c) for c in first_col if re.match(r"^\d\s*순위", c)]
         return {"kind": "rank", "items": ranks, "scale": {}}
 
-    # 자유응답 안내만 있는 1x1 표
+    # 1x1 표. 입력 안내문일 때만 주관식으로 보고, 개념 정의·안내 박스는 무시한다.
     if len(rows) == 1 and len(rows[0]) == 1:
-        return {"kind": "textbox", "items": [], "scale": {}}
+        cell = rows[0][0]
+        if any(h in cell for h in TEXT_HINTS) or re.search(r"\d+\s*byte", cell):
+            return {"kind": "textbox", "items": [], "scale": {}}
+        return {"kind": "note", "items": [], "scale": {}}
 
     # 첫 열이 척도 앵커가 아니면 속성(문항) 열로 보고 척도 해석에서 제외
     first_is_anchor = parse_anchor(header[0]) is not None
@@ -212,8 +238,11 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
     # 격자형: 첫 열에 속성 텍스트가 있는 표
     items = [c for c in first_col if not is_numeric_row([c]) and len(c) > 1]
     if items and len(header) > 2 and not first_is_anchor:
+        title = clean(header[0])
+        if title in GENERIC_TITLES:
+            title = ""
         return {"kind": "grid", "items": [clean(i) for i in items], "scale": scale,
-                "seq_coded": seq_coded}
+                "seq_coded": seq_coded, "title": title}
 
     if scale:
         return {"kind": "scale", "items": [], "scale": scale, "seq_coded": seq_coded}
@@ -263,6 +292,8 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
             if cur is None:
                 continue
             # 번호 없는 속성문 + 척도표 조합 (A6, C6, D6 ... 형태)
+            if info["kind"] == "note":
+                continue
             if (info["kind"] == "scale" and pending_line and len(pending_line) > 8
                     and not pending_line.rstrip().endswith(("?", "？"))):
                 cur.orphan_items.append(pending_line)
@@ -302,6 +333,9 @@ def detect_type(q: Question) -> str:
 
 # ---------------------------------------------------------------- 코드북 생성
 
+MAX_VARLABEL_BYTES = 256   # SPSS 변수라벨 한도 (바이트)
+
+
 def shorten(text: str, colon_split: bool = True, limit: int = 120) -> str:
     """값 라벨용. `분노: 어쩌구...` -> `분노`. SPSS 값라벨은 120바이트 제한."""
     if colon_split and ":" in text:
@@ -317,6 +351,23 @@ def byte_trim(text: str, limit: int) -> str:
     if len(b) <= limit:
         return text
     return b[:limit].decode("utf-8", errors="ignore").rstrip()
+
+
+def compose_label(stem: str, item: str, title: str = "") -> str:
+    """격자 하위변수 라벨 조합.
+
+    문항 서두(stem)가 긴 설문지에서 `stem - item` 을 그대로 쓰면 256바이트 한도에
+    걸려 **항목 텍스트가 통째로 잘려나간다**. 그러면 하위변수 라벨이 전부 같아져
+    코드북이 쓸모없어진다. 그래서 다음 순서로 고른다.
+
+      1) `구성개념명 - 항목`   (표 첫 열 머리글이 있을 때. 짧고 정보량이 높다)
+      2) `문항서두 - 항목`     (한도 안에 들어갈 때만)
+      3) `항목`               (둘 다 넘치면 항목만. 항목은 절대 버리지 않는다)
+    """
+    for cand in ([f"{title} - {item}"] if title else []) + [f"{stem} - {item}", item]:
+        if len(cand.encode("utf-8")) <= MAX_VARLABEL_BYTES:
+            return cand
+    return byte_trim(item, MAX_VARLABEL_BYTES)
 
 
 @dataclass
@@ -376,14 +427,22 @@ def build_vars(q: Question, colon_split: bool = True) -> list[Var]:
         for t in q.tables:
             if t["kind"] == "grid":
                 for i, item in enumerate(t["items"], start=1):
-                    item_clean = re.sub(r"^\d{1,2}\s*[.)]\s*", "", item)
-                    out.append(Var(f"{base}_{i}", byte_trim(f"{qlabel} - {item_clean}", 256),
+                    # 설문지가 항목마다 변수명을 적어둔 경우 그 이름을 그대로 쓴다.
+                    # (`1) EQD1. …` -> 변수명 eqd1. 위치 기반 번호는 블록을 넘나들며
+                    #  이어지는 경우가 많아 신뢰할 수 없다.)
+                    hit = RE_ITEM_VAR.match(item)
+                    if hit:
+                        vname, item_clean = varname(hit.group(1)), hit.group(2).strip()
+                    else:
+                        vname = f"{base}_{i}"
+                        item_clean = re.sub(r"^\d{1,2}\s*[.)]\s*", "", item)
+                    out.append(Var(vname, compose_label(qlabel, item_clean, t.get("title", "")),
                                    "numeric", "ordinal", vl(t["scale"]), q.qid, "grid",
                                    note=SEQ_NOTE if t.get("seq_coded") else ""))
             elif t["kind"] == "scale_item":
                 si += 1
                 item = q.orphan_items[si - 1] if si <= len(q.orphan_items) else f"항목{si}"
-                out.append(Var(f"{base}_{si}", byte_trim(f"{qlabel} - {item}", 256),
+                out.append(Var(f"{base}_{si}", compose_label(qlabel, item),
                                "numeric", "ordinal", vl(t["scale"]), q.qid, "scale_item"))
             elif t["kind"] == "scale":
                 out.append(Var(base, qlabel, "numeric", "ordinal", vl(t["scale"]), q.qid, "scale",
@@ -398,7 +457,8 @@ def build_vars(q: Question, colon_split: bool = True) -> list[Var]:
     elif kind == "text":
         out.append(Var(base, qlabel, "string", "nominal", {}, q.qid, kind, note="주관식"))
 
-    elif "드롭다운" in " ".join(q.lines):
+    elif not q.options and not q.tables:
+        # 지도·드롭다운·리스트박스로 제시되어 보기가 문서에 없는 문항
         out.append(Var(base, qlabel, "numeric", "nominal", {}, q.qid, "single",
                        note="확인필요: 보기 목록이 설문지에 없음 (코드북에 직접 입력)"))
 
@@ -426,9 +486,33 @@ def build_vars(q: Question, colon_split: bool = True) -> list[Var]:
     return out
 
 
+RE_DP_VAR = re.compile(r"([A-Za-z][A-Za-z0-9_]{1,30})\s*(?:변수|변수를)\s*(?:만들|생성|추가)")
+
+
+def dp_instruction_vars(blocks: list[Block], existing: set[str]) -> list[Var]:
+    """`[DP: … IN1_FAIL 변수 만들어주세요]` 같은 지시로 생성될 변수를 수집한다.
+
+    설문 문항이 아니라 DP 작업 지시이므로 값라벨을 알 수 없다. 누락되는 것보다
+    코드북에 '확인필요'로 올려두는 편이 낫다.
+    """
+    out: list[Var] = []
+    for blk in blocks:
+        if blk.kind != "p" or "변수" not in blk.text:
+            continue
+        for hit in RE_DP_VAR.finditer(blk.text):
+            name = varname(hit.group(1))
+            if name in existing or name in {v.name for v in out}:
+                continue
+            out.append(Var(name, byte_trim(clean(blk.text), 256), "numeric", "nominal",
+                           {}, "", "dp_instruction",
+                           note="확인필요: DP 지시로 생성되는 변수 (값라벨 직접 입력)"))
+    return out
+
+
 def parse_docx(path: str, colon_split: bool = True) -> list[Var]:
     """워드 설문지 -> 변수 목록."""
-    questions = collect_questions(read_blocks(path))
+    blocks = read_blocks(path)
+    questions = collect_questions(blocks)
     all_ids = {q.qid for q in questions}
 
     def is_section_header(q: Question) -> bool:
@@ -446,6 +530,7 @@ def parse_docx(path: str, colon_split: bool = True) -> list[Var]:
                 v.name += "b"
             used.add(v.name)
             variables.append(v)
+    variables += dp_instruction_vars(blocks, used)
     return variables
 
 
@@ -603,7 +688,6 @@ def read_codebook(path: str | Path) -> list[Var]:
 # 3. SPSS 산출물 (.sps / .sav)
 # ==============================================================================
 
-MAX_VARLABEL_BYTES = 256   # SPSS 변수라벨 한도
 MAX_VALLABEL_BYTES = 120   # SPSS 값라벨 한도 (한글 1자 = 3바이트)
 
 
