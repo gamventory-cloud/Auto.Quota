@@ -26,7 +26,7 @@ assert sl.MODULE_ROLE == "spss_labels", "spss_labels.py 가 아닌 파일이 imp
 # 파일을 교체했는데도 구버전이 돌아 문항이 누락되는 사고를 잡아낸다.
 # (Streamlit 은 import 된 모듈을 메모리에 유지하므로, 모듈 파일만 바꾸고
 #  서버를 재시작하지 않으면 예전 코드가 계속 실행된다.)
-REQUIRED_SL_VERSION = (1, 2)
+REQUIRED_SL_VERSION = (1, 3)
 
 
 def _version_tuple(text):
