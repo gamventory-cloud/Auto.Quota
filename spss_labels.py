@@ -28,6 +28,8 @@ utils.py 와의 관계
 접두사는 문서마다 다르므로 대문자 조합을 폭넓게 받는다.
   숫자가 붙는 형태 : Q13-3. / A5-1. / DQ2. / CS1. / IN2. / AC1. / SQ3.
   숫자가 없는 형태 : EQD. / MV. / MS. / IR.   (블록 전체가 하나의 격자 문항)
+  문자 접미        : Q14-a. / Q14-b.
+보기는 `1.` `1)` 과 동그라미 숫자 `①…㉚` 를 모두 인식한다.
 격자 항목이 자기 변수명을 갖고 있으면(`1) EQD1. 우리 사회에서는 …`) 그 이름을 쓴다.
 
 주요 규칙
@@ -35,7 +37,9 @@ utils.py 와의 관계
 1. 보기        : `1. 남성` / `2) 아니오`, 한 단락에 탭으로 여러 개도 인식
 2. 척도표      : 머리행의 `(1) … (7)`, `7 매우 신뢰한다`, `매우 진보↵(0)`,
                  `전혀 그렇지 않다 1` 모두 해석
-3. 격자/순위/복수응답/슬라이더/주관식 자동 판정 (detect_type)
+3. 격자/순위/복수응답/슬라이더/주관식/입력란 자동 판정 (detect_type)
+   입력란 표(`(      )`, `[Range: …]`, 체크박스 `□`)는 척도표가 아니므로
+   열 제목을 코드로 오인하지 않고 숫자·문자 변수로 만든다
 4. 1x1 표는 입력 안내일 때만 주관식. 개념 정의 박스는 무시한다
 5. SPSS 한도는 바이트 기준 : 값라벨 120B, 변수라벨 256B (한글 1자 = 3B)
    라벨이 한도를 넘으면 문항 서두를 버리고 항목 텍스트를 살린다 (compose_label)
@@ -68,7 +72,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 
@@ -85,7 +89,7 @@ __version__ = "1.2.0"
 # 단, 한 글자 + 숫자 없음(`A.`)은 오탐이 많아 제외한다.
 RE_QHEAD = re.compile(
     r"^\s*("
-    r"[A-Z]{1,6}\s*\d+(?:\s*[-‐–_]\s*\d+)*"   # 문자+숫자
+    r"[A-Z]{1,6}\s*\d+(?:\s*[-‐–_]\s*[0-9a-zA-Z]+)*"   # 문자+숫자 (Q14-a, Q4-1-1-1 포함)
     r"|[A-Z]{2,6}"                              # 문자만 (2글자 이상)
     r")\s*[.)]\s*(.*)$"
 )
@@ -93,13 +97,39 @@ RE_QHEAD = re.compile(
 # 격자 항목이 자기 변수명을 갖고 있는 경우: `1) EQD1. 우리 사회에서는 …`
 RE_ITEM_VAR = re.compile(r"^\s*(?:\d{1,3}\s*[.)]\s*)?([A-Z]{1,6}\d{1,3})\s*[.)]\s*(.+)$")
 
-# 보기 한 개. `1. 남성` / `2) 아니오` / `99. 모름`
-RE_OPTION = re.compile(r"^\s*(\d{1,3})\s*[.)]\s*(.+)$")
+# 동그라미 숫자 -> 정수. DP 문서가 ①②③ 로 보기를 적는 경우가 많다.
+CIRCLED = {c: i for i, c in enumerate("①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳", start=1)}
+CIRCLED.update({c: i for i, c in enumerate("㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚", start=21)})
+CIRCLED_CHARS = "".join(CIRCLED)
+CIRCLED_CHARS_RE = re.compile(f"[{CIRCLED_CHARS}]")
+
+# 보기 한 개. `1. 남성` / `2) 아니오` / `99. 모름` / `① 남성`
+RE_OPTION = re.compile(
+    rf"^\s*(?:(\d{{1,3}})\s*[.)]|([{CIRCLED_CHARS}])\s*[.)]?)\s*(.+)$"
+)
+
+
+def option_code(match: re.Match) -> int:
+    """RE_OPTION 매치에서 보기 코드를 꺼낸다 (숫자형·동그라미형 공통)."""
+    return int(match.group(1)) if match.group(1) else CIRCLED[match.group(2)]
+
+
+def option_text(match: re.Match) -> str:
+    return match.group(3)
 
 # 한 단락 안에 여러 보기가 탭/다중공백으로 붙어있는 경우 분리용
-RE_OPT_SPLIT = re.compile(r"(?:\t|\s{3,})(?=\d{1,3}\s*[.)]\s*\S)")
+RE_OPT_SPLIT = re.compile(rf"(?:\t|\s{{3,}})(?=(?:\d{{1,3}}\s*[.)]|[{CIRCLED_CHARS}])\s*\S)")
 
-RE_DIRECTIVE = re.compile(r"\[(?:PROG|prog)\s*:.*?\]|\[[^\[\]]*(?:랜덤|고정|선택|주관식|입력|자동표시|중단|드롭다운)[^\[\]]*\]")
+# 라벨에서 제거할 지시문.
+#   - `[PROG: …]` 및 실무에서 흔한 오타 `[RROG:`, `[PROR:`, `[DP:`
+#   - `[Range: 1~100]`, `[1개 선택]`, `[모두 선택]`, `[직접 기입]` 등
+RE_DIRECTIVE = re.compile(
+    r"\[[A-Za-z]{2,6}\s*:.*?\]"
+    r"|\[[^\[\]]*(?:랜덤|고정|선택|주관식|입력|기입|자동표시|중단|드롭다운|드롭박스|제시|파이핑)[^\[\]]*\]"
+)
+
+# 문항 끝에 붙는 필수응답 표시(`* *`)와 ※ 안내문 꼬리
+RE_TAIL_NOISE = re.compile(r"[*\s]+$|\s*※.*$")
 
 # 격자표 첫 열 머리글이 이런 값이면 구성개념명이 아니라 단순 안내이므로 라벨에 쓰지 않는다
 GENERIC_TITLES = {"문항 내용", "문항내용", "문항", "속성", "구분", "내용", "항목", ""}
@@ -107,15 +137,19 @@ GENERIC_TITLES = {"문항 내용", "문항내용", "문항", "속성", "구분",
 SEQ_NOTE = "확인필요: 설문지에 코드 미표기 -> 1부터 순차 부여"
 
 MULTI_HINTS = ("모두 골라", "모두 선택", "중복", "복수")
-TEXT_HINTS = ("주관식", "최소 4byte", "직접 입력", "입력해야함", "입력하게")
+TEXT_HINTS = ("주관식", "최소 4byte", "직접 입력", "입력해야함", "입력하게",
+              "직접 기입", "자유롭게 적어", "자유롭게 작성")
+NUMERIC_HINTS = ("금액 기입", "숫자 기입", "숫자기입", "kWh 기입")
 SLIDER_HINTS = ("슬라이더", "(0-100)", "0~100", "0-100")
 
 
 def clean(text: str) -> str:
-    """지시문·중복 공백 제거."""
+    """지시문·안내문·중복 공백 제거."""
     text = RE_DIRECTIVE.sub(" ", text or "")
     text = text.replace("\u00a0", " ").replace("\n", " ")
-    return re.sub(r"\s+", " ", text).strip(" .")
+    text = RE_TAIL_NOISE.sub("", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .*")
 
 
 def varname(qid: str) -> str:
@@ -163,6 +197,16 @@ def read_blocks(path: str) -> list[Block]:
 
 # ---------------------------------------------------------------- 표 해석
 
+# 표 셀이 응답 입력란인지. `(        )`, `약 (   )만원`, `[Range: 1~100]`
+RE_ENTRY_CELL = re.compile(r"\(\s*\)|Range\s*:")
+RE_BLANK = re.compile(r"\(\s*\)")   # 괄호 입력란 하나
+RE_CHECKBOX = re.compile(r"[□☐▢]")
+
+
+def is_entry_cell(cell: str) -> bool:
+    return bool(RE_ENTRY_CELL.search(cell or "")) or bool(RE_CHECKBOX.search(cell or ""))
+
+
 def is_numeric_row(cells: list[str]) -> bool:
     vals = [c.strip() for c in cells if c.strip()]
     return bool(vals) and all(re.fullmatch(r"\d{1,3}", v) for v in vals)
@@ -177,6 +221,9 @@ def parse_anchor(cell: str) -> tuple[int, str] | None:
     cell = (cell or "").strip()
     if not cell:
         return None
+    # 동그라미 숫자 표기 (`① 매우 불만족`, `③`)
+    if m := re.match(rf"^([{CIRCLED_CHARS}])\s*[.)]?\s*(.*)$", cell, re.S):
+        return CIRCLED[m.group(1)], clean(m.group(2))
     if m := re.fullmatch(r"\(?\s*(\d{1,3})\s*\)?", cell):
         return int(m.group(1)), ""
     if m := re.match(r"^\(?\s*(\d{1,3})\s*\)?[\s:.]+(.+)$", cell, re.S):
@@ -215,7 +262,33 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
 
     # 첫 열이 척도 앵커가 아니면 속성(문항) 열로 보고 척도 해석에서 제외
     first_is_anchor = parse_anchor(header[0]) is not None
-    scale = anchors_from_header(header if first_is_anchor else header[1:])
+    # 두 번째 열 이후가 전부 비어 있고 첫 열에만 항목명이 있는 표 = 기입 양식
+    # (기관명 / 담당자 연락처 / 이메일 처럼 응답자가 직접 적는 칸)
+    if (len(rows) >= 2 and len(rows[0]) >= 2
+            and all(not c.strip() for r in rows for c in r[1:])
+            and all(r[0].strip() for r in rows)):
+        return {"kind": "entry", "items": [clean(r[0]) for r in rows],
+                "cols": [], "cells": [["" for _ in r[1:]] for r in rows], "scale": {}}
+
+    # 입력란 표(숫자·문자 기입)는 척도표가 아니다. 열 제목을 코드로 오인하면
+    # 값라벨이 조용히 잘못 붙으므로 먼저 걸러낸다.
+    if any(is_entry_cell(c) for r in body for c in r[1:]) or any(
+            is_entry_cell(c) for r in rows for c in r[1:]):
+        # 1행이 열 제목인지 판정: 입력란이 없고 내용이 있으면 머리행으로 본다.
+        first = rows[0]
+        has_header = (len(first) > 1
+                      and any(c.strip() for c in first[1:])
+                      and not any(is_entry_cell(c) for c in first[1:]))
+        cols = [clean(c) for c in first[1:]] if has_header else []
+        data = rows[1:] if has_header else rows
+        return {"kind": "entry", "items": [clean(r[0]) for r in data],
+                "cols": cols, "cells": [list(r[1:]) for r in data], "scale": {}}
+
+    # 본문에 항목 텍스트가 하나도 없으면(응답칸만 빈 표) 머리행 전체가 척도점이다.
+    # 이때 첫 열을 버리면 첫 척도점("매우 불만족")이 통째로 사라진다.
+    has_items = any(r[0].strip() for r in body)
+    use_full_header = first_is_anchor or not has_items
+    scale = anchors_from_header(header if use_full_header else header[1:])
 
     # 코드가 명시된 행이 있으면 그 행을 코드로 채택 (라벨은 머리행 오른쪽부터 매칭)
     for r in body:
@@ -234,14 +307,14 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
     # 코드가 전혀 표기되지 않은 척도표 -> 라벨 순서대로 1..n 부여 (검수 필요)
     seq_coded = False
     if not scale:
-        cand = [clean(h) for h in (header if first_is_anchor else header[1:]) if h.strip()]
+        cand = [clean(h) for h in (header if use_full_header else header[1:]) if h.strip()]
         if len(cand) >= 3:
             scale = {i: lab for i, lab in enumerate(cand, start=1)}
             seq_coded = True
 
     # 격자형: 첫 열에 속성 텍스트가 있는 표
     items = [c for c in first_col if not is_numeric_row([c]) and len(c) > 1]
-    if items and len(header) > 2 and not first_is_anchor:
+    if items and len(header) > 2 and not use_full_header:
         title = clean(header[0])
         if title in GENERIC_TITLES:
             title = ""
@@ -259,6 +332,7 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
 class Question:
     qid: str
     label: str
+    raw: str = ""          # 지시문을 제거하지 않은 머리글 원문 (유형 판정용)
     lines: list[str] = field(default_factory=list)      # 머리글 이후 일반 단락
     options: dict[int, str] = field(default_factory=dict)
     tables: list[dict[str, Any]] = field(default_factory=list)
@@ -275,7 +349,8 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
             raw = blk.text
             m = RE_QHEAD.match(raw)
             if m and not RE_OPTION.match(raw):
-                cur = Question(qid=re.sub(r"\s+", "", m.group(1)), label=clean(m.group(2)))
+                cur = Question(qid=re.sub(r"\s+", "", m.group(1)),
+                               label=clean(m.group(2)), raw=raw)
                 qs.append(cur)
                 pending_line = None
                 continue
@@ -286,7 +361,7 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
             hits = [RE_OPTION.match(p.strip()) for p in parts]
             if all(hits) and hits:
                 for h in hits:
-                    cur.options[int(h.group(1))] = clean(h.group(2))
+                    cur.options[option_code(h)] = clean(option_text(h))
                 pending_line = None
                 continue
             cur.lines.append(raw)
@@ -311,9 +386,12 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
 # ---------------------------------------------------------------- 유형 판정
 
 def detect_type(q: Question) -> str:
-    text = " ".join([q.label] + q.lines)
+    # 지시문([직접 기입], [금액 기입] 등)이 유형 판정의 핵심 근거이므로 원문을 함께 본다.
+    text = " ".join([q.raw, q.label] + q.lines)
     tkinds = [t["kind"] for t in q.tables]
 
+    if "entry" in tkinds:
+        return "entry"
     if "rank" in tkinds:
         return "rank"
     if any(h in text for h in TEXT_HINTS) or "textbox" in tkinds:
@@ -330,7 +408,7 @@ def detect_type(q: Question) -> str:
         return "single"
     if "scale" in tkinds:
         return "scale"
-    if "입력" in text or re.search(r"\(\s+\)\s*년", text):
+    if any(h in text for h in NUMERIC_HINTS) or "입력" in text or re.search(r"\(\s+\)\s*년", text):
         return "numeric"
     return "unknown"
 
@@ -470,6 +548,34 @@ def build_vars(q: Question, colon_split: bool = True,
                 out.append(Var(base, qlabel, "numeric", "ordinal", vl(t["scale"]), q.qid, "scale",
                                note=SEQ_NOTE if t.get("seq_coded") else ""))
 
+    elif kind == "entry":
+        for t in q.tables:
+            if t["kind"] != "entry":
+                continue
+            cols = t.get("cols") or [""]
+            for i, item in enumerate(t["items"], start=1):
+                cells = t["cells"][i - 1] if i - 1 < len(t["cells"]) else []
+                for j, col in enumerate(cols, start=1):
+                    cell = cells[j - 1] if j - 1 < len(cells) else ""
+                    name = f"{base}_{i}" if len(cols) == 1 else f"{base}_{i}_{j}"
+                    label = compose_label(qlabel, item if not col else f"{item} - {col}")
+                    if RE_CHECKBOX.search(cell):
+                        out.append(Var(name, label, "numeric", "nominal",
+                                       {0: "비선택", 1: "선택"}, q.qid, "entry_check",
+                                       note="체크박스 (선택/비선택)"))
+                        continue
+                    numeric = bool(RE_ENTRY_CELL.search(cell)) or any(
+                        RE_ENTRY_CELL.search(c or "") for c in cells)
+                    notes = ["숫자 기입" if numeric else "문자 기입(주관식)"]
+                    if len(RE_BLANK.findall(cell)) > 1 or CIRCLED_CHARS_RE.search(cell):
+                        # `① 지상 (  )층 ② 지하 (  )층`, `① (  )㎡ ② 모름` 처럼
+                        # 한 칸에 입력란이 둘 이상이거나 '모름/해당없음' 보기가 섞인 경우
+                        notes.append("확인필요: 한 칸에 입력란·보기가 둘 이상 "
+                                     "(변수 분리 및 코딩 방식 확인)")
+                    out.append(Var(name, label, "numeric" if numeric else "string",
+                                   "scale" if numeric else "nominal",
+                                   {}, q.qid, "entry", note=" / ".join(notes)))
+
     elif kind == "slider":
         out.append(Var(base, qlabel, "numeric", "scale", {}, q.qid, kind, note="0-100 슬라이더"))
 
@@ -485,8 +591,11 @@ def build_vars(q: Question, colon_split: bool = True,
                        note="확인필요: 보기 목록이 설문지에 없음 (코드북에 직접 입력)"))
 
     else:
+        why = ("파일 업로드·첨부 문항 (변수 필요 여부 확인)"
+               if re.search(r"첨부|업로드", " ".join([q.raw] + q.lines))
+               else "유형 판정 실패")
         out.append(Var(base, qlabel, "numeric", "nominal", vl(q.options), q.qid, "unknown",
-                       note="확인필요: 유형 판정 실패"))
+                       note=f"확인필요: {why}"))
 
     # '모름/무응답' 류 보기는 사용자 결측으로 자동 제안 (코드북에서 수정 가능)
     for v in out:
@@ -554,8 +663,16 @@ def parse_docx(path: str, colon_split: bool = True,
         if is_section_header(q):
             continue
         for v in build_vars(q, colon_split, multi_style):
-            while v.name in used:
-                v.name += "b"
+            if v.name in used:
+                # 설문지 번호 체계상 겹치는 경우(예: SQ2 격자 항목 vs SQ2-1 문항).
+                # 이름을 몰래 바꾸면 데이터와 어긋나므로 반드시 눈에 띄게 남긴다.
+                original = v.name
+                n = 2
+                while f"{original}_dup{n}" in used:
+                    n += 1
+                v.name = f"{original}_dup{n}"
+                v.note = (v.note + " / " if v.note else "") + (
+                    f"확인필요: 변수명 충돌 (원래 {original}) - 설문지 문항번호 체계 확인")
             used.add(v.name)
             variables.append(v)
     variables += dp_instruction_vars(blocks, used)
