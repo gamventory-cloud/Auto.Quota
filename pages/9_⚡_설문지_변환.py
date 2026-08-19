@@ -35,6 +35,8 @@ HELP_DP = """
 | `Q1. 문항 [행별 1개선택]` | 본 문항 |
 | `@행별: 전혀 그렇지 않다,...` | 행별 표의 열 라벨 |
 | `- 보기` | 보기 / 행별 표의 행 |
+| `@표: 셀,셀,셀` | 원본 표를 격자 그대로 (줄마다 한 행) |
+| `## 영역 이름` | 영역 배너(진한 바탕 한 칸 표) |
 | `%PROG: ...` | 파란색 프로그래밍 지시문 |
 | `%검증: ...` | 빨간색 데이터 검증 지시문 |
 | `~ 상자글` | 테두리 상자 |
@@ -53,6 +55,7 @@ HELP_PRINT = """
 | `- 보기` | 보기 (표 유형이면 표의 행) |
 | `-- 소제목` | 표 안 소제목 행 |
 | `! 지시문` | 문항 아래 작은 안내 |
+| `@표: 셀,셀,셀` | 원본 표를 격자 그대로 (줄마다 한 행) |
 
 유형 태그: `[단일]` `[복수]` `[단답]` `[장문]` `[척도:1-7]`
 `[표:① 전혀 그렇지 않다,②,③,④,⑤ 매우 그렇다]`
@@ -225,6 +228,8 @@ with right:
         e, f = st.columns(2)
         e.metric("행별 표", found["행별 표"])
         f.metric("PROG 지시문", found["PROG 지시문"])
+        st.metric("그대로 옮긴 표", found["일반 표"],
+                  help="분류되지 않은 원본 표(빈도 표, 기입 표)를 격자 그대로 옮긴 개수")
         empty = found["문항"] == 0
         docx_bytes = DPWriter(font=font, base_pt=base_pt,
                               row_label_cm=row_label_cm).write(doc).to_bytes()
@@ -238,6 +243,8 @@ with right:
         e, f = st.columns(2)
         e.metric("매트릭스 표", found["매트릭스 표"])
         f.metric("매트릭스 세부항목", found["매트릭스 세부항목"])
+        st.metric("그대로 옮긴 표", found["일반 표"],
+                  help="분류되지 않은 원본 표(빈도 표, 기입 표)를 격자 그대로 옮긴 개수")
         empty = found["문항"] == 0
         docx_bytes = SurveyWriter(
             font=font, base_pt=base_pt, single_mark=single_mark,
