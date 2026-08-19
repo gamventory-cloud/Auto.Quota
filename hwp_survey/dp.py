@@ -34,14 +34,16 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .parser import (CIRCLED, RE_OPT_SPLIT, RE_ROMAN_HEAD, header_matrix,
-                     matrix_rows, scale_columns)
+from .parser import (CIRCLED, RE_FIELDWORK, RE_FOOTNOTE, RE_LEADIN, RE_OPT_CODE,
+                     RE_OPT_SPLIT, RE_RESP_TAG, RE_ROMAN_HEAD, code_options,
+                     detect_label_style, grid_lines, header_matrix, is_banner,
+                     matrix_rows, scale_columns, screening_rows)
 
 # ---------------------------------------------------------------- 상수
 SCALE_5 = ["전혀 그렇지 않다", "그렇지 않다", "보통이다", "그렇다", "매우 그렇다"]
 MATRIX_HINT = "귀하의 의견과 가장 일치하는 정도에 체크해 주세요."
 
-RE_LABEL = re.compile(r"^\s*((?:SQ|Q|DQ|A)\s*\d+(?:-\d+)?)\s*[.)]\s*(.*)$", re.I)
+RE_LABEL = re.compile(r"^\s*((?:SQ|Q|DQ|A|문)\s*\d+(?:-\d+)?)\s*[.)]\s*(.*)$", re.I)
 RE_FIELD = re.compile(r"^@(제목|대상자|샘플수|쿼터|쿼터표|제외|행별)\s*:\s*(.*)$")
 RE_PROG_SRC = re.compile(r"^\s*\[?\s*PROG\s*[:：]\s*(.+?)\s*\]?\s*$", re.I)
 RE_TAG = re.compile(r"\[([^\[\]]+)\]\s*$")
@@ -68,6 +70,7 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
     quota_rows: list[list[str]] = []
     pending_scale: list[str] | None = None
     state = {"mode": None}
+    style = detect_label_style(items)      # '문1.'/'SQ1.' 표기를 쓰는 설문지인지
 
     flat = list(items)
     i = 0
@@ -79,6 +82,24 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
         if kind == "table":
             rows = payload
             joined = " ".join(c for r in rows for c in r)
+
+            if is_banner(rows):                     # '신문 이용' 같은 영역 배너
+                lines.append("")
+                lines.append(f"## {rows[0][0].strip()}")
+                continue
+
+            screening = screening_rows(rows)         # 'SQ1. 거주 | 1. 서울 2. 부산 …'
+            if screening:
+                for raw_label, body in screening:
+                    m = RE_LABEL.match(raw_label)
+                    label = re.sub(r"\s+", "", m.group(1)).upper() if m else "?"
+                    lead = (m.group(2).strip() if m else raw_label.strip())
+                    block, _ = read_question(
+                        [], 0, label, f"{lead} {body}".strip(),
+                        add_matrix_hint, add_alone_prog, style, inline_only=True)
+                    lines.append("")
+                    lines.extend(block)
+                continue
 
             cols = scale_columns(rows)                  # 척도 안내 표
             if cols:
@@ -93,11 +114,12 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
                     head, matrix = fallback
                     head = fill_scale(head)
             if matrix:
-                stem = pop_stem(lines) or "다음 각 항목에 대해 응답해 주십시오."
+                label, stem = pop_stem(lines)
+                stem = stem or "다음 각 항목에 대해 응답해 주십시오."
                 if add_matrix_hint and not re.search(r"체크|표시|응답", stem):
                     stem = f"{stem} {MATRIX_HINT}"
                 lines.append("")
-                lines.append(f"?. {stem} [{MATRIX_TAG}]")
+                lines.append(f"{label or '?'}. {stem} [{MATRIX_TAG}]")
                 lines.append(f"@행별: {','.join(head or SCALE_5)}")
                 lines.extend(strip_row_number(r) for r in matrix)
                 pending_scale = None
@@ -122,6 +144,10 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
 
             if state["mode"] == "쿼터" or is_quota_grid(rows):
                 quota_rows.extend([c for c in r] for r in rows)
+                continue
+
+            if len(rows) >= 2:                          # 빈도·기입 표는 격자 그대로
+                lines.extend(grid_lines(rows))
                 continue
 
             for r in rows:                              # 그 밖의 상자(표지/정의)
@@ -163,18 +189,27 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             lines.append(f"%PROG: {prog.group(1)}")
             continue
 
-        m = RE_LABEL.match(text) or RE_NUM_Q.match(text)
+        field = RE_FIELDWORK.match(text)               # ▷ 조사원: …
+        if field:
+            lines.append(f"%PROG: 조사원 - {field.group(1).strip()}")
+            continue
+        if RE_FOOTNOTE.match(text) or RE_LEADIN.match(text):
+            lines.append(f"! {text}")
+            continue
+
+        m = RE_LABEL.match(text) or (RE_NUM_Q.match(text) if style == "bare" else None)
         if m:
-            label = (m.group(1).upper().replace(" ", "")
+            label = (re.sub(r"\s+", "", m.group(1)).upper()
                      if RE_LABEL.match(text) else "?")
             block, i = read_question(flat, i, label, m.group(2).strip(),
-                                     add_matrix_hint, add_alone_prog)
+                                     add_matrix_hint, add_alone_prog, style)
             lines.append("")
             lines.extend(block)
             continue
 
         lines.extend(classify_free_line(text, lines))
 
+    retag_grid_questions(lines)
     promote_title(lines)
 
     if quota_rows:
@@ -188,7 +223,22 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
     return "\n".join(collapse(number_questions(lines))).strip()
 
 
+GRID_TAG = "표 응답"
 GENERIC_TITLES = ("설문지", "설 문 지", "질문지", "조사표")
+
+
+def retag_grid_questions(lines):
+    """보기가 없고 바로 뒤가 표인 문항은 응답을 표에서 받는다."""
+    for n, line in enumerate(lines):
+        if not RE_TAG.search(line) or MATRIX_TAG in line:
+            continue
+        if not (RE_LABEL.match(line) or line.startswith("?.")):
+            continue
+        nxt = next((l for l in lines[n + 1:]
+                    if l.strip() and not l.startswith("!")), "")
+        if nxt.startswith("@표:"):
+            lines[n] = RE_TAG.sub(f"[{GRID_TAG}]", line.rstrip())
+    return lines
 
 
 def promote_title(lines):
@@ -208,9 +258,11 @@ def promote_title(lines):
 
 
 def classify_free_line(text: str, lines) -> list[str]:
-    """문항이 아닌 줄: 제목 / 인사말·유의사항 상자 / 괄호 안내."""
+    """문항이 아닌 줄: 제목 / 영역 배너 / 인사말·유의사항 상자 / 괄호 안내."""
     if not lines and len(text) <= 40:
         return [f"@제목: {text}"]
+    if len(text) <= 12 and not re.search(r"[.?!:]$", text):
+        return [f"## {text}"]                      # '스크리닝' 같은 영역 이름
     paren = RE_PAREN_ONLY.match(text)
     if paren and len(text) <= 30:
         return [f"! {paren.group(1)}"]
@@ -239,22 +291,27 @@ def strip_row_number(line: str) -> str:
     return re.sub(r"^-\s*\d{1,2}\s*[.)]\s*", "- ", line)
 
 
-def pop_stem(lines) -> str | None:
-    """표 바로 앞의 안내문/문항을 행별 문항의 문장으로 끌어올린다."""
+def pop_stem(lines) -> tuple[str | None, str | None]:
+    """표 바로 앞의 문항/안내문을 행별 문항의 (번호, 문장)으로 끌어올린다."""
     for i in range(len(lines) - 1, -1, -1):
         s = lines[i].strip()
         if not s:
             continue
         if s.startswith("!") and len(s) > 6:
-            return lines.pop(i).lstrip("! ").strip()
+            return None, lines.pop(i).lstrip("! ").strip()
         if s.startswith("~") and len(s) > 12:
-            return lines.pop(i).lstrip("~ ").strip()
-        if RE_LABEL.match(s) or RE_NUM_Q.match(s):
-            body = RE_TAG.sub("", lines.pop(i)).strip()
-            m = RE_LABEL.match(body) or RE_NUM_Q.match(body)
-            return m.group(2).strip()
-        return None
-    return None
+            return None, lines.pop(i).lstrip("~ ").strip()
+        m = RE_LABEL.match(s)
+        if m:                                        # '문40. …' 번호를 지킨다
+            lines.pop(i)
+            return re.sub(r"\s+", "", m.group(1)).upper(), \
+                RE_TAG.sub("", m.group(2)).strip()
+        m = RE_NUM_Q.match(s)
+        if m:
+            lines.pop(i)
+            return None, RE_TAG.sub("", m.group(2)).strip()
+        return None, None
+    return None, None
 
 
 def is_quota_grid(rows) -> bool:
@@ -303,13 +360,30 @@ def looks_like_quota_row(text: str) -> bool:
     return all(len(c) <= 6 for c in cells)
 
 
-def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog):
+def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
+                  style="bare", inline_only=False):
     """문항 한 덩어리(보기·척도 안내·PROG)를 읽어 DP DSL 줄로."""
     options: list[str] = []
     progs: list[str] = []
     notes: list[str] = []
     scale: list[str] | None = None
     tag = None
+
+    resp = RE_RESP_TAG.search(stem)                 # '[복수 응답]' 같은 꼬리표
+    if resp:
+        keyword = resp.group(1)
+        stem = stem[: resp.start()].strip()
+        tag = MULTI_TAG if ("복수" in keyword or "중복" in keyword
+                            or "모두" in keyword) else SINGLE_TAG
+
+    if style == "prefixed":                         # 한 줄에 몰린 코드 보기 분리
+        codes = code_options(stem)
+        if len(codes) >= 2:
+            options += codes
+            stem = stem[: stem.index(codes[0])].strip()
+    if inline_only:
+        return finish_question(label, stem, tag, scale, options, notes, progs,
+                               add_matrix_hint, add_alone_prog), i
 
     while i < len(flat):
         kind, payload = flat[i]
@@ -319,8 +393,8 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog):
         if not text or set(text) <= {"-", "―", "—", "="}:
             i += 1
             continue
-        if RE_LABEL.match(text) or RE_NUM_Q.match(text):
-            break                                  # 다음 문항 시작
+        if RE_LABEL.match(text) or (style == "bare" and RE_NUM_Q.match(text)):
+            break            # 다음 문항 시작 ('문1.' 표기 문서에서 '1.'은 보기다)
 
         prog = RE_PROG_SRC.match(text)
         if prog:
@@ -328,9 +402,23 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog):
             i += 1
             continue
 
+        if RE_FIELDWORK.match(text):               # 조사원 지시문
+            progs.append(f"조사원 - {RE_FIELDWORK.match(text).group(1).strip()}")
+            i += 1
+            continue
+        if RE_FOOTNOTE.match(text) or RE_LEADIN.match(text):
+            notes.append(text)
+            i += 1
+            continue
+
         inline = [o.strip() for o in RE_OPT_SPLIT.findall(text)]
         if len(inline) >= 2:                       # '① 예   ② 아니오' 처럼 한 줄에 여럿
             options += [strip_circle(o) for o in inline if strip_circle(o)]
+            i += 1
+            continue
+        code = RE_OPT_CODE.match(text)
+        if code and style == "prefixed":            # 응답 코드는 그대로 살린다
+            options.append(f"{code.group(1)}. {code.group(2).strip()}")
             i += 1
             continue
         opt = RE_OPT_LINE.match(text)
@@ -340,6 +428,10 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog):
             continue
 
         paren = RE_PAREN_ONLY.match(text)
+        if paren is None and len(text) < 60 and not RE_PROG_SRC.match(text):
+            notes.append(text)                     # ': 신문 PDF판' 같은 짧은 부속 줄
+            i += 1
+            continue
         if paren:
             inner = paren.group(1)
             if "점 척도" in inner:
@@ -356,12 +448,21 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog):
             continue
         break                                   # 다음 문단은 문항 바깥(상자글 등)
 
+    return finish_question(label, stem, tag, scale, options, notes, progs,
+                           add_matrix_hint, add_alone_prog), i
+
+
+def finish_question(label, stem, tag, scale, options, notes, progs,
+                    add_matrix_hint, add_alone_prog) -> list[str]:
+    """문항 한 덩어리를 DP DSL 줄로 마무리한다."""
     if tag is None:
         if re.search(r"복수\s*응답|모두", stem):
             tag = MULTI_TAG
         elif len(options) >= 3 and any(o.strip().startswith(h)
                                        for o in options for h in MULTI_SIGNS):
             tag = MULTI_TAG          # 단독선택용 배타 보기를 둔 문항
+        elif scale:
+            tag = MATRIX_TAG
         else:
             tag = SINGLE_TAG
     stem = re.sub(r"[(（]\s*복수\s*응답\s*[)）]", "", stem).strip()
@@ -394,7 +495,7 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog):
     if tag == "지도에서 선택" and not progs:
         progs.append("17개시도 지도제시")
     out += [f"%PROG: {p}" for p in progs]
-    return out, i
+    return out
 
 
 def scale_labels(inner: str) -> list[str]:
@@ -441,6 +542,22 @@ def parse_dp(text: str) -> dict:
                 doc[name] = value
             continue
 
+        if s.startswith("@표:"):
+            row = [c.strip() for c in s.split(":", 1)[1].split(",")]
+            blocks = doc["blocks"]
+            if blocks and blocks[-1]["kind"] == "grid":
+                blocks[-1]["rows"].append(row)
+            else:
+                cur = None
+                blocks.append({"kind": "grid", "rows": [row]})
+            continue
+
+        if s.startswith("##"):
+            cur = None
+            doc["blocks"].append({"kind": "section",
+                                  "text": s.lstrip("#").strip()})
+            continue
+
         if s.startswith("%PROG:") or s.startswith("%prog:"):
             doc["blocks"].append({"kind": "prog", "text": s.split(":", 1)[1].strip()})
             continue
@@ -482,6 +599,7 @@ def summarize_dp(doc) -> dict:
     qs = [b for b in doc["blocks"] if b["kind"] == "question"]
     return {
         "문항": len(qs),
+        "일반 표": sum(1 for b in doc["blocks"] if b["kind"] == "grid"),
         "선정문항(SQ)": sum(1 for q in qs if q["label"].startswith("SQ")),
         "행별 표": sum(1 for q in qs if q["tag"] == MATRIX_TAG),
         "PROG 지시문": sum(1 for b in doc["blocks"] if b["kind"] == "prog"),
@@ -659,6 +777,40 @@ class DPWriter:
         self.fix_layout(table)
         self.para(after=6)
 
+    def section(self, text):
+        """'신문 이용' 같은 영역 배너: 진한 바탕의 한 칸 표."""
+        self.para()
+        table = self.doc.add_table(rows=1, cols=1)
+        table.style = "Table Grid"
+        cell = table.rows[0].cells[0]
+        cell.width = Cm(self.content_cm)
+        self.cell_text(cell, text, bold=True, color="FFFFFF",
+                       align=WD_ALIGN_PARAGRAPH.CENTER)
+        self.shade(cell, self.NAVY)
+        for col in table.columns:
+            col.width = Cm(self.content_cm)
+        self.fix_layout(table)
+        self.para()
+
+    def grid(self, rows):
+        """분류되지 않은 원본 표를 격자 그대로 옮긴다(빈도 표, 기입 표 등)."""
+        cols = max(len(r) for r in rows)
+        table = self.doc.add_table(rows=0, cols=cols)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+        width = Cm(self.content_cm / cols)
+        for n, row in enumerate(rows):
+            cells = table.add_row().cells
+            for c in range(cols):
+                self.cell_text(cells[c], row[c] if c < len(row) else "",
+                               bold=(n == 0), align=WD_ALIGN_PARAGRAPH.CENTER,
+                               size=Pt(9))
+                cells[c].width = width
+        for col in table.columns:
+            col.width = width
+        self.fix_layout(table)
+        self.para()
+
     def matrix(self, block):
         scale = block["scale"] or SCALE_5
         rows = block["options"] or [{"type": "row", "text": "항목"}]
@@ -714,6 +866,12 @@ class DPWriter:
 
             if b["kind"] == "box":
                 box_buffer.append(b["text"])
+            elif b["kind"] == "section":
+                self.section(b["text"])
+                pending_input = None
+            elif b["kind"] == "grid":
+                self.grid(b["rows"])
+                pending_input = None
             elif b["kind"] == "question":
                 self.para()
                 stem = self.para(f"{b['label']}. {b['text']} [{b['tag']}]".lstrip(". "))
@@ -730,6 +888,9 @@ class DPWriter:
                     for opt in b["options"]:
                         if opt["type"] == "group":
                             self.para(opt["text"], bold=True)
+                            continue
+                        if re.match(r"^\d{1,4}[.)]", opt["text"]):
+                            self.para(opt["text"])       # '9997. 기타' 같은 코드
                             continue
                         n += 1
                         self.para(f"{n}) {opt['text']}")
