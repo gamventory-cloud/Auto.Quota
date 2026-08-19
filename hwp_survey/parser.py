@@ -22,7 +22,9 @@ import re
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳➀➁➂➃➄➅➆➇➈➉"
 ROMAN = "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ"
 
-RE_Q = re.compile(r"^\s*(?:문\s*)?(\d{1,2})\s*[.)]\s*(.+)$")
+# '1.' '문1.' 뿐 아니라 리서치 표기인 'SQ1.' 'Q1.' 'DQ1.'도 문항으로 본다
+RE_Q = re.compile(r"^\s*(?:문\s*|SQ\s*|DQ\s*|Q\s*)?(\d{1,2})\s*[.)]\s*(.+)$",
+                  re.IGNORECASE)
 RE_OPT_SPLIT = re.compile(rf"[{CIRCLED}]\s*[^{CIRCLED}]*")
 RE_LEAD_MARK = re.compile(rf"^\s*(?:[{CIRCLED}]|\(\s*\d+\s*\)|\d\s*\)|[-•·▪])\s*")
 RE_TYPE_TAG = re.compile(r"\[([^\[\]]+)\]\s*$")
