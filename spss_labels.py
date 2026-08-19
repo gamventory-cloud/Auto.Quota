@@ -29,7 +29,10 @@ utils.py 와의 관계
   숫자가 붙는 형태 : Q13-3. / A5-1. / DQ2. / CS1. / IN2. / AC1. / SQ3.
   숫자가 없는 형태 : EQD. / MV. / MS. / IR.   (블록 전체가 하나의 격자 문항)
   문자 접미        : Q14-a. / Q14-b.
+  대소문자 혼용    : Com1. / Com1-2.
 보기는 `1.` `1)` 과 동그라미 숫자 `①…㉚` 를 모두 인식한다.
+문단 안의 소프트 리턴(shift+enter)은 공백으로 합쳐 한 문장으로 본다.
+구형 .doc(Word 97-2003) 은 LibreOffice 가 있으면 자동으로 .docx 로 변환한다.
 격자 항목이 자기 변수명을 갖고 있으면(`1) EQD1. 우리 사회에서는 …`) 그 이름을 쓴다.
 
 주요 규칙
@@ -72,7 +75,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 
@@ -89,8 +92,8 @@ __version__ = "1.3.0"
 # 단, 한 글자 + 숫자 없음(`A.`)은 오탐이 많아 제외한다.
 RE_QHEAD = re.compile(
     r"^\s*("
-    r"[A-Z]{1,6}\s*\d+(?:\s*[-‐–_]\s*[0-9a-zA-Z]+)*"   # 문자+숫자 (Q14-a, Q4-1-1-1 포함)
-    r"|[A-Z]{2,6}"                              # 문자만 (2글자 이상)
+    r"[A-Z][A-Za-z]{0,5}\s*\d+(?:\s*[-‐–_]\s*[0-9a-zA-Z]+)*"   # 문자+숫자 (Q14-a, Com1-2, Q4-1-1-1)
+    r"|[A-Z][A-Za-z]{1,5}"                      # 문자만 (2글자 이상: EQD, MV)
     r")\s*[.)]\s*(.*)$"
 )
 
@@ -137,6 +140,7 @@ GENERIC_TITLES = {"문항 내용", "문항내용", "문항", "속성", "구분",
 SEQ_NOTE = "확인필요: 설문지에 코드 미표기 -> 1부터 순차 부여"
 
 MULTI_HINTS = ("모두 골라", "모두 선택", "중복", "복수")
+RE_MULTI_MAX = re.compile(r"최대\s*\d+\s*개")
 TEXT_HINTS = ("주관식", "최소 4byte", "직접 입력", "입력해야함", "입력하게",
               "직접 기입", "자유롭게 적어", "자유롭게 작성")
 NUMERIC_HINTS = ("금액 기입", "숫자 기입", "숫자기입", "kWh 기입")
@@ -185,7 +189,8 @@ def read_blocks(path: str) -> list[Block]:
     for child in doc.element.body.iterchildren():
         tag = child.tag.split("}")[-1]
         if tag == "p":
-            t = Paragraph(child, doc).text.strip()
+            # 문단 내 소프트 리턴(shift+enter)은 한 문장의 일부이므로 공백으로 합친다.
+            t = re.sub(r"[\n\v\r]+", " ", Paragraph(child, doc).text).strip()
             if t and t.strip("\u00a0 "):
                 out.append(Block("p", text=t))
         elif tag == "tbl":
@@ -253,6 +258,19 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
         ranks = [clean(c) for c in first_col if re.match(r"^\d\s*순위", c)]
         return {"kind": "rank", "items": ranks, "scale": {}}
 
+    # 순위 기입 표: 머리행이 `1순위 | 2순위`, 본문은 빈 칸 (응답자가 직접 적음)
+    head_ranks = [c for c in header if re.fullmatch(r"\s*(\d)\s*순위\s*", c or "")]
+    if len(head_ranks) >= 2 and len(head_ranks) == len([c for c in header if c.strip()]):
+        return {"kind": "rank_entry", "items": [clean(c) for c in head_ranks], "scale": {}}
+
+    # Code 표: 머리행이 `Code1 … CodeN`, 본문 한 줄에 보기 라벨이 들어간다
+    codes = [parse_anchor(c) for c in header if re.match(r"\s*Code\s*\d+", c or "", re.I)]
+    if len(codes) >= 2 and len(body) == 1:
+        labels = [clean(c) for c in body[0][-len(codes):]]
+        opts = {code: lab for (code, _), lab in zip(codes, labels) if lab}
+        if opts:
+            return {"kind": "options", "items": [], "scale": {}, "options": opts}
+
     # 1x1 표. 입력 안내문일 때만 주관식으로 보고, 개념 정의·안내 박스는 무시한다.
     if len(rows) == 1 and len(rows[0]) == 1:
         cell = rows[0][0]
@@ -286,13 +304,14 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
 
     # 본문에 항목 텍스트가 하나도 없으면(응답칸만 빈 표) 머리행 전체가 척도점이다.
     # 이때 첫 열을 버리면 첫 척도점("매우 불만족")이 통째로 사라진다.
-    has_items = any(r[0].strip() for r in body)
+    has_items = any(r[0].strip() and not is_numeric_row([r[0]]) for r in body)
     use_full_header = first_is_anchor or not has_items
     scale = anchors_from_header(header if use_full_header else header[1:])
 
     # 코드가 명시된 행이 있으면 그 행을 코드로 채택 (라벨은 머리행 오른쪽부터 매칭)
     for r in body:
-        tail = r[1:] if len(r) > 1 else r
+        # 행 전체가 숫자면 첫 칸도 코드다. r[1:] 만 보면 코드 1 이 사라진다.
+        tail = r if is_numeric_row(r) else (r[1:] if len(r) > 1 else r)
         if is_numeric_row(tail):
             codes = [int(c) for c in tail if re.fullmatch(r"\d{1,3}", c.strip())]
             labels = [clean(h) for h in header][-len(codes):]
@@ -373,6 +392,10 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
             # 번호 없는 속성문 + 척도표 조합 (A6, C6, D6 ... 형태)
             if info["kind"] == "note":
                 continue
+            if info["kind"] == "options":
+                cur.options.update(info["options"])
+                pending_line = None
+                continue
             if (info["kind"] == "scale" and pending_line and len(pending_line) > 8
                     and not pending_line.rstrip().endswith(("?", "？"))):
                 cur.orphan_items.append(pending_line)
@@ -392,7 +415,14 @@ def detect_type(q: Question) -> str:
 
     if "entry" in tkinds:
         return "entry"
+    if "rank_entry" in tkinds:
+        return "rank_entry"
     if "rank" in tkinds:
+        return "rank"
+    # 표 없이 문구만으로 순위를 묻는 경우: "순서대로 선택해 주세요 [필수 4개 선택]"
+    if re.search(r"순서대로|순위대로", text) and re.search(r"\d+\s*(?:개|가지)\s*(?:선택|기입)", text):
+        return "rank"
+    if re.search(r"최대\s*\d+\s*순위", text) and q.options:
         return "rank"
     if any(h in text for h in TEXT_HINTS) or "textbox" in tkinds:
         return "text"
@@ -402,7 +432,7 @@ def detect_type(q: Question) -> str:
         return "grid"
     if "scale_item" in tkinds:
         return "scale_item"
-    if any(h in text for h in MULTI_HINTS) and q.options:
+    if (any(h in text for h in MULTI_HINTS) or RE_MULTI_MAX.search(text)) and q.options:
         return "multi"
     if q.options:
         return "single"
@@ -516,7 +546,13 @@ def build_vars(q: Question, colon_split: bool = True,
                            values, q.qid, kind, note=note))
 
     elif kind == "rank":
-        ranks = next((t["items"] for t in q.tables if t["kind"] == "rank"), ["1순위", "2순위", "3순위"])
+        ranks = next((t["items"] for t in q.tables if t["kind"] == "rank"), None)
+        if ranks is None:
+            joined = " ".join([q.raw, q.label] + q.lines)
+            m = (re.search(r"최대\s*(\d+)\s*순위", joined)
+                 or re.search(r"(\d+)\s*(?:개|가지)\s*(?:선택|기입)", joined))
+            n = int(m.group(1)) if m else 3
+            ranks = [f"{i}순위" for i in range(1, min(n, 20) + 1)]
         for i, rk in enumerate(ranks, start=1):
             out.append(Var(f"{base}_r{i}", byte_trim(f"{qlabel} - {rk}", 256),
                            "numeric", "nominal", vl(q.options), q.qid, kind,
@@ -526,7 +562,15 @@ def build_vars(q: Question, colon_split: bool = True,
         si = 0
         for t in q.tables:
             if t["kind"] == "grid":
+                # 설문지가 속성마다 번호를 적어둔 경우 그 번호를 변수 접미로 쓴다.
+                # 번호가 중간에 빠진 설문지(1,2,3,4,6,7…)에서 위치 기반으로 매기면
+                # DP 변수명과 어긋난다. 단, 번호가 일부 항목에만 있으면 위치 기반.
+                nums = [re.match(r"^\s*(\d{1,2})\s*[.)]", it) for it in t["items"]]
+                explicit = ([int(m.group(1)) for m in nums]
+                            if all(nums) and len({m.group(1) for m in nums}) == len(nums)
+                            else None)
                 for i, item in enumerate(t["items"], start=1):
+                    suffix = explicit[i - 1] if explicit else i
                     # 설문지가 항목마다 변수명을 적어둔 경우 그 이름을 그대로 쓴다.
                     # (`1) EQD1. …` -> 변수명 eqd1. 위치 기반 번호는 블록을 넘나들며
                     #  이어지는 경우가 많아 신뢰할 수 없다.)
@@ -534,7 +578,7 @@ def build_vars(q: Question, colon_split: bool = True,
                     if hit:
                         vname, item_clean = varname(hit.group(1)), hit.group(2).strip()
                     else:
-                        vname = f"{base}_{i}"
+                        vname = f"{base}_{suffix}"
                         item_clean = re.sub(r"^\d{1,2}\s*[.)]\s*", "", item)
                     out.append(Var(vname, compose_label(qlabel, item_clean, t.get("title", "")),
                                    "numeric", "ordinal", vl(t["scale"]), q.qid, "grid",
@@ -575,6 +619,12 @@ def build_vars(q: Question, colon_split: bool = True,
                     out.append(Var(name, label, "numeric" if numeric else "string",
                                    "scale" if numeric else "nominal",
                                    {}, q.qid, "entry", note=" / ".join(notes)))
+
+    elif kind == "rank_entry":
+        ranks = next((t["items"] for t in q.tables if t["kind"] == "rank_entry"), ["1순위", "2순위"])
+        for i, rk in enumerate(ranks, start=1):
+            out.append(Var(f"{base}_r{i}", compose_label(qlabel, rk), "string", "nominal",
+                           {}, q.qid, kind, note="주관식 순위 기입"))
 
     elif kind == "slider":
         out.append(Var(base, qlabel, "numeric", "scale", {}, q.qid, kind, note="0-100 슬라이더"))
@@ -1062,6 +1112,48 @@ def write_sav(variables: list[Var], path: str | Path,
 FIELDS = ["변수명", "문항번호", "문항유형", "변수라벨", "유형", "측도", "값라벨", "결측값", "비고"]
 
 
+# ------------------------------------------------------------- .doc 변환
+
+class LegacyDocError(RuntimeError):
+    """구형 .doc 파일을 변환할 수 없을 때."""
+
+
+def looks_like_legacy_doc(data: bytes, filename: str = "") -> bool:
+    """OLE2 복합문서(.doc) 서명 확인. 확장자만으로는 판별할 수 없다."""
+    return data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" or (
+        filename.lower().endswith(".doc") and data[:2] != b"PK")
+
+
+def convert_doc_to_docx(data: bytes) -> bytes:
+    """LibreOffice(soffice)로 .doc -> .docx 변환.
+
+    python-docx 는 Word 97-2003 이진 포맷을 읽지 못한다. 서버에 soffice 가
+    설치돼 있으면 자동 변환하고, 없으면 사용자에게 직접 변환을 안내한다.
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("soffice") or shutil.which("libreoffice")
+    if not exe:
+        raise LegacyDocError(
+            "구형 .doc 파일입니다. 서버에 LibreOffice 가 없어 자동 변환할 수 없습니다. "
+            "워드에서 '다른 이름으로 저장 > .docx' 로 변환한 뒤 올려 주세요."
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "input.doc"
+        src.write_bytes(data)
+        try:
+            subprocess.run([exe, "--headless", "--convert-to", "docx",
+                            "--outdir", tmp, str(src)],
+                           check=True, capture_output=True, timeout=180)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise LegacyDocError(f"LibreOffice 변환 실패: {exc}") from exc
+        out = Path(tmp) / "input.docx"
+        if not out.exists():
+            raise LegacyDocError("변환 결과 파일이 생성되지 않았습니다.")
+        return out.read_bytes()
+
+
 # ------------------------------------------------------------- 파싱
 
 def parse_upload(docx_bytes: bytes, base0: list[str] | None = None,
@@ -1070,6 +1162,8 @@ def parse_upload(docx_bytes: bytes, base0: list[str] | None = None,
 
     multi_style: 복수응답 저장 방식 (category / position / dichotomy).
     """
+    if looks_like_legacy_doc(docx_bytes):
+        docx_bytes = convert_doc_to_docx(docx_bytes)
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=True) as tmp:
         tmp.write(docx_bytes)
         tmp.flush()
