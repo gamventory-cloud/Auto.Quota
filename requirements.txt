@@ -12,3 +12,9 @@ pyreadstat
 python-docx>=1.1
 pyreadstat>=1.2
 openpyxl>=3.1
+streamlit>=1.36
+python-docx>=1.1.0
+pyhwp>=0.1b15
+lxml>=5.0
+beautifulsoup4>=4.12
+olefile>=0.47
