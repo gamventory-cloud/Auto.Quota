@@ -9,3 +9,6 @@ python-docx
 xlrd
 ortools
 pyreadstat
+python-docx>=1.1
+pyreadstat>=1.2
+openpyxl>=3.1
