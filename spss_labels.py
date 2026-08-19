@@ -30,7 +30,9 @@ utils.py 와의 관계
   숫자가 없는 형태 : EQD. / MV. / MS. / IR.   (블록 전체가 하나의 격자 문항)
   문자 접미        : Q14-a. / Q14-b.
   대소문자 혼용    : Com1. / Com1-2.
-보기는 `1.` `1)` 과 동그라미 숫자 `①…㉚` 를 모두 인식한다.
+  마침표 누락       : B6-2-2 (하이픈 번호에 한해 허용)
+보기는 `1.` `1)`, 동그라미 숫자 `①…㉚`, 표 안의 보기, 워드 자동 불릿을 모두 인식한다.
+(불릿 보기는 번호가 없으므로 순서대로 코드를 부여하고 '확인필요'로 표시한다)
 문단 안의 소프트 리턴(shift+enter)은 공백으로 합쳐 한 문장으로 본다.
 구형 .doc(Word 97-2003) 은 LibreOffice 가 있으면 자동으로 .docx 로 변환한다.
 격자 항목이 자기 변수명을 갖고 있으면(`1) EQD1. 우리 사회에서는 …`) 그 이름을 쓴다.
@@ -75,7 +77,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 
@@ -96,6 +98,11 @@ RE_QHEAD = re.compile(
     r"|[A-Z][A-Za-z]{1,5}"                      # 문자만 (2글자 이상: EQD, MV)
     r")\s*[.)]\s*(.*)$"
 )
+
+# 번호 뒤 마침표가 누락된 머리글. `B6-2-2 (B6-1-1 응답자만) 만약 …`
+# 하이픈이 들어간 번호에만 적용해 오탐을 줄인다.
+RE_QHEAD_NODOT = re.compile(
+    r"^\s*([A-Z][A-Za-z]{0,5}\s*\d+(?:\s*[-‐–_]\s*[0-9a-zA-Z]+)+)\s+(?=[(\[가-힣])(.*)$")
 
 # 격자 항목이 자기 변수명을 갖고 있는 경우: `1) EQD1. 우리 사회에서는 …`
 RE_ITEM_VAR = re.compile(r"^\s*(?:\d{1,3}\s*[.)]\s*)?([A-Z]{1,6}\d{1,3})\s*[.)]\s*(.+)$")
@@ -121,6 +128,7 @@ def option_text(match: re.Match) -> str:
     return match.group(3)
 
 # 한 단락 안에 여러 보기가 탭/다중공백으로 붙어있는 경우 분리용
+RE_OPT_SPLIT_LOOSE = re.compile(r"\s+(?=\d{1,2}\s*[.)]\s*\S)")
 RE_OPT_SPLIT = re.compile(rf"(?:\t|\s{{3,}})(?=(?:\d{{1,3}}\s*[.)]|[{CIRCLED_CHARS}])\s*\S)")
 
 # 라벨에서 제거할 지시문.
@@ -180,6 +188,7 @@ class Block:
     kind: str          # 'p' | 't'
     text: str = ""
     rows: list[list[str]] = field(default_factory=list)
+    is_list: bool = False   # 워드 자동 목록(불릿/번호) 항목인지
 
 
 def read_blocks(path: str) -> list[Block]:
@@ -190,9 +199,14 @@ def read_blocks(path: str) -> list[Block]:
         tag = child.tag.split("}")[-1]
         if tag == "p":
             # 문단 내 소프트 리턴(shift+enter)은 한 문장의 일부이므로 공백으로 합친다.
-            t = re.sub(r"[\n\v\r]+", " ", Paragraph(child, doc).text).strip()
+            para = Paragraph(child, doc)
+            t = re.sub(r"[\n\v\r]+", " ", para.text).strip()
             if t and t.strip("\u00a0 "):
-                out.append(Block("p", text=t))
+                # 워드 자동 목록(불릿/번호)은 본문 텍스트에 기호·번호가 남지 않는다.
+                # 보기를 불릿으로만 적은 설문지를 놓치지 않으려면 XML 속성을 봐야 한다.
+                is_list = bool(child.findall(
+                    ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numPr"))
+                out.append(Block("p", text=t, is_list=is_list))
         elif tag == "tbl":
             rows = [[c.text.strip() for c in r.cells] for r in Table(child, doc).rows]
             if rows:
@@ -212,9 +226,18 @@ def is_entry_cell(cell: str) -> bool:
     return bool(RE_ENTRY_CELL.search(cell or "")) or bool(RE_CHECKBOX.search(cell or ""))
 
 
+RE_BARE_CODE = re.compile(r"^\s*(\d{1,3})\s*[.)]?\s*$")
+
+
+def bare_code(cell: str) -> int | None:
+    """`3`, `3)`, `3.` 처럼 코드만 든 칸 -> 3. 아니면 None."""
+    m = RE_BARE_CODE.match(cell or "")
+    return int(m.group(1)) if m else None
+
+
 def is_numeric_row(cells: list[str]) -> bool:
     vals = [c.strip() for c in cells if c.strip()]
-    return bool(vals) and all(re.fullmatch(r"\d{1,3}", v) for v in vals)
+    return bool(vals) and all(bare_code(v) is not None for v in vals)
 
 
 def parse_anchor(cell: str) -> tuple[int, str] | None:
@@ -263,6 +286,14 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
     if len(head_ranks) >= 2 and len(head_ranks) == len([c for c in header if c.strip()]):
         return {"kind": "rank_entry", "items": [clean(c) for c in head_ranks], "scale": {}}
 
+    # 보기 표: 모든 칸이 `N) 라벨` 형태 (17개 시·도처럼 여러 줄에 걸쳐 있어도 모두 수집)
+    cells_all = [c.strip() for r in rows for c in r if c.strip()]
+    opt_hits = [RE_OPTION.match(c) for c in cells_all]
+    if len(cells_all) >= 3 and all(opt_hits):
+        opts = {option_code(m): clean(option_text(m)) for m in opt_hits}
+        if len(opts) == len(cells_all):
+            return {"kind": "options", "items": [], "scale": {}, "options": opts}
+
     # Code 표: 머리행이 `Code1 … CodeN`, 본문 한 줄에 보기 라벨이 들어간다
     codes = [parse_anchor(c) for c in header if re.match(r"\s*Code\s*\d+", c or "", re.I)]
     if len(codes) >= 2 and len(body) == 1:
@@ -304,7 +335,7 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
 
     # 본문에 항목 텍스트가 하나도 없으면(응답칸만 빈 표) 머리행 전체가 척도점이다.
     # 이때 첫 열을 버리면 첫 척도점("매우 불만족")이 통째로 사라진다.
-    has_items = any(r[0].strip() and not is_numeric_row([r[0]]) for r in body)
+    has_items = any(r[0].strip() and bare_code(r[0]) is None for r in body)
     use_full_header = first_is_anchor or not has_items
     scale = anchors_from_header(header if use_full_header else header[1:])
 
@@ -313,7 +344,7 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
         # 행 전체가 숫자면 첫 칸도 코드다. r[1:] 만 보면 코드 1 이 사라진다.
         tail = r if is_numeric_row(r) else (r[1:] if len(r) > 1 else r)
         if is_numeric_row(tail):
-            codes = [int(c) for c in tail if re.fullmatch(r"\d{1,3}", c.strip())]
+            codes = [bare_code(c) for c in tail if bare_code(c) is not None]
             labels = [clean(h) for h in header][-len(codes):]
             if codes and len(codes) == len(labels):
                 merged = dict(zip(codes, labels))
@@ -332,7 +363,7 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
             seq_coded = True
 
     # 격자형: 첫 열에 속성 텍스트가 있는 표
-    items = [c for c in first_col if not is_numeric_row([c]) and len(c) > 1]
+    items = [c for c in first_col if bare_code(c) is None and len(c) > 1]
     if items and len(header) > 2 and not use_full_header:
         title = clean(header[0])
         if title in GENERIC_TITLES:
@@ -347,11 +378,15 @@ def parse_table(rows: list[list[str]]) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- 문항 수집
 
+RE_DASH_OPTION = re.compile(r"^\s*[-–—•▪·]\s*(\S.*)$")
+
+
 @dataclass
 class Question:
     qid: str
     label: str
     raw: str = ""          # 지시문을 제거하지 않은 머리글 원문 (유형 판정용)
+    dash_options: list[str] = field(default_factory=list)   # 번호 없는 불릿 보기
     lines: list[str] = field(default_factory=list)      # 머리글 이후 일반 단락
     options: dict[int, str] = field(default_factory=dict)
     tables: list[dict[str, Any]] = field(default_factory=list)
@@ -366,7 +401,7 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
     for blk in blocks:
         if blk.kind == "p":
             raw = blk.text
-            m = RE_QHEAD.match(raw)
+            m = RE_QHEAD.match(raw) or RE_QHEAD_NODOT.match(raw)
             if m and not RE_OPTION.match(raw):
                 cur = Question(qid=re.sub(r"\s+", "", m.group(1)),
                                label=clean(m.group(2)), raw=raw)
@@ -378,9 +413,27 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
             # 보기 (한 줄에 여러 개일 수 있음)
             parts = RE_OPT_SPLIT.split(raw)
             hits = [RE_OPTION.match(p.strip()) for p in parts]
+            if not (hits and all(hits) and len(parts) > 1):
+                # 구분자가 공백 하나뿐인 경우(`1) 개선안A 2) 개선안B`).
+                # 코드가 연속된 번호일 때만 인정해 오탐을 막는다.
+                loose = RE_OPT_SPLIT_LOOSE.split(raw)
+                lhits = [RE_OPTION.match(p.strip()) for p in loose]
+                if len(loose) > 1 and all(lhits):
+                    codes = [option_code(h) for h in lhits]
+                    if codes == list(range(codes[0], codes[0] + len(codes))):
+                        parts, hits = loose, lhits
             if all(hits) and hits:
                 for h in hits:
                     cur.options[option_code(h)] = clean(option_text(h))
+                pending_line = None
+                continue
+            if blk.is_list and not cur.options and len(clean(raw)) <= 80:
+                cur.dash_options.append(clean(raw))
+                pending_line = None
+                continue
+            if (m := RE_DASH_OPTION.match(raw)) and not cur.options:
+                # 번호 없이 하이픈으로만 적힌 보기. 코드는 나중에 순서대로 부여한다.
+                cur.dash_options.append(clean(m.group(1)))
                 pending_line = None
                 continue
             cur.lines.append(raw)
@@ -408,6 +461,9 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
 
 # ---------------------------------------------------------------- 유형 판정
 
+DASH_NOTE = "확인필요: 보기에 번호가 없어 1부터 순차 부여 (설문지에 코드 명시 권장)"
+
+
 def detect_type(q: Question) -> str:
     # 지시문([직접 기입], [금액 기입] 등)이 유형 판정의 핵심 근거이므로 원문을 함께 본다.
     text = " ".join([q.raw, q.label] + q.lines)
@@ -424,21 +480,33 @@ def detect_type(q: Question) -> str:
         return "rank"
     if re.search(r"최대\s*\d+\s*순위", text) and q.options:
         return "rank"
+    # `[RANGE : 1~23]` 이 있으면 '직접 입력'이라도 숫자 문항이다.
+    if re.search(r"\bRANGE\s*[:：]", text, re.I) and not q.options:
+        return "numeric"
     if any(h in text for h in TEXT_HINTS) or "textbox" in tkinds:
         return "text"
     if any(h in text for h in SLIDER_HINTS):
         return "slider"
     if "grid" in tkinds:
-        return "grid"
+        # 보기 목록이 따로 있으면 그 표는 격자가 아니라 '설명표'다.
+        # (예: 개선안A/B/C 의 정의·특징을 비교한 표 + 아래에 1)2)3) 보기)
+        # 행별 응답을 지시한 문항만 진짜 격자로 본다.
+        if q.options and not re.search(r"행\s*별|행별|각\s*1개|항목별|항목 별", text):
+            pass
+        else:
+            return "grid"
     if "scale_item" in tkinds:
         return "scale_item"
-    if (any(h in text for h in MULTI_HINTS) or RE_MULTI_MAX.search(text)) and q.options:
+    opts = q.options or {i: t for i, t in enumerate(q.dash_options, start=1)}
+    if (any(h in text for h in MULTI_HINTS) or RE_MULTI_MAX.search(text)) and opts:
         return "multi"
-    if q.options:
+    if opts:
         return "single"
     if "scale" in tkinds:
         return "scale"
-    if any(h in text for h in NUMERIC_HINTS) or "입력" in text or re.search(r"\(\s+\)\s*년", text):
+    if (any(h in text for h in NUMERIC_HINTS) or "입력" in text
+            or re.search(r"\(\s+\)\s*년", text)
+            or re.search(r"_{3,}\s*(?:년|원|개|명|회|세|시간)?", text)):
         return "numeric"
     return "unknown"
 
@@ -520,8 +588,15 @@ def build_vars(q: Question, colon_split: bool = True,
     def vl(d: dict[int, str]) -> dict[int, str]:
         return {k: shorten(v, colon_split) for k, v in d.items() if v}
 
+    # 번호 없는 하이픈 보기는 순서대로 코드를 부여한다 (검수 필요).
+    dash_note = ""
+    if not q.options and q.dash_options:
+        q.options = {i: t for i, t in enumerate(q.dash_options, start=1)}
+        dash_note = DASH_NOTE
+
     if kind == "single":
-        out.append(Var(base, qlabel, "numeric", "nominal", vl(q.options), q.qid, kind))
+        out.append(Var(base, qlabel, "numeric", "nominal", vl(q.options), q.qid, kind,
+                       note=dash_note))
 
     elif kind == "multi":
         # 복수응답 데이터 저장 방식은 조사기관마다 다르다.
@@ -623,8 +698,15 @@ def build_vars(q: Question, colon_split: bool = True,
     elif kind == "rank_entry":
         ranks = next((t["items"] for t in q.tables if t["kind"] == "rank_entry"), ["1순위", "2순위"])
         for i, rk in enumerate(ranks, start=1):
-            out.append(Var(f"{base}_r{i}", compose_label(qlabel, rk), "string", "nominal",
-                           {}, q.qid, kind, note="주관식 순위 기입"))
+            if q.options:
+                # 순위 칸 표 + 보기 목록 -> 보기 코드를 담는 숫자 순위 변수
+                out.append(Var(f"{base}_r{i}", compose_label(qlabel, rk), "numeric", "nominal",
+                               vl(q.options), q.qid, "rank",
+                               note=" / ".join(n for n in ("순위형", dash_note) if n)))
+            else:
+                # 응답자가 직접 적는 순위 (사후 코딩 대상)
+                out.append(Var(f"{base}_r{i}", compose_label(qlabel, rk), "string", "nominal",
+                               {}, q.qid, kind, note="주관식 순위 기입"))
 
     elif kind == "slider":
         out.append(Var(base, qlabel, "numeric", "scale", {}, q.qid, kind, note="0-100 슬라이더"))
@@ -702,10 +784,20 @@ def parse_docx(path: str, colon_split: bool = True,
     questions = collect_questions(blocks)
     all_ids = {q.qid for q in questions}
 
+    # 의문형 어미만 본다. `주십시오`·`선택` 등은 블록 안내문에도 흔해 제외.
+    RE_QUESTIONISH = re.compile(r"\?|습니까|십니까|입니까|무엇|얼마나|어디|언제|어떻게")
+
     def is_section_header(q: Question) -> bool:
-        empty = not q.options and not q.tables
+        """하위문항만 갖는 블록 머리글인지.
+
+        `SQ2`(출생년도), `SQ4`(구매 시작 시기)처럼 보기가 표로 없거나 불릿이라
+        비어 보이는 실제 문항을 머리글로 오인해 버리면 문항이 통째로 사라진다.
+        질문문처럼 보이면 문항으로 유지한다.
+        """
+        empty = not q.options and not q.tables and not q.dash_options
         has_child = any(i != q.qid and i.startswith(q.qid + "-") for i in all_ids)
-        return empty and has_child
+        looks_like_question = bool(RE_QUESTIONISH.search(f"{q.label} {' '.join(q.lines)}"))
+        return empty and has_child and not looks_like_question
 
     variables: list[Var] = []
     used: set[str] = set()
