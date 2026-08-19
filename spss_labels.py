@@ -77,7 +77,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 
 
@@ -153,6 +153,17 @@ TEXT_HINTS = ("주관식", "최소 4byte", "직접 입력", "입력해야함", "
               "직접 기입", "자유롭게 적어", "자유롭게 작성")
 NUMERIC_HINTS = ("금액 기입", "숫자 기입", "숫자기입", "kWh 기입")
 SLIDER_HINTS = ("슬라이더", "(0-100)", "0~100", "0-100")
+
+
+def unwrap_brackets(text: str) -> str:
+    """`[DP: 최초 오답여부: IN1_FAIL 변수 만들어주세요.]` -> 내용만 남긴다.
+
+    clean() 은 지시문 대괄호를 통째로 지운다. 지시문 자체가 라벨이 되어야 하는
+    경우(DP 작업지시로 생성되는 변수)에는 내용을 살려야 한다.
+    """
+    t = re.sub(r"[\[\]]", " ", text or "")
+    t = t.replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", t).strip(" .*")
 
 
 def clean(text: str) -> str:
@@ -577,6 +588,8 @@ def build_vars(q: Question, colon_split: bool = True,
             if len(c) > 5:
                 label_src = c
                 break
+    if not (label_src or "").strip():
+        label_src = unwrap_brackets(q.raw) or q.qid
     if kind == "slider":
         asks = [clean(ln) for ln in q.lines
                 if clean(ln).rstrip(") ").endswith(("?", "？")) or "온도는" in ln]
@@ -768,7 +781,7 @@ def dp_instruction_vars(blocks: list[Block], existing: set[str]) -> list[Var]:
             name = varname(hit.group(1))
             if name in existing or name in {v.name for v in out}:
                 continue
-            out.append(Var(name, byte_trim(clean(blk.text), 256), "numeric", "nominal",
+            out.append(Var(name, byte_trim(unwrap_brackets(blk.text), 256), "numeric", "nominal",
                            {}, "", "dp_instruction",
                            note="확인필요: DP 지시로 생성되는 변수 (값라벨 직접 입력)"))
     return out
