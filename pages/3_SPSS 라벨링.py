@@ -29,6 +29,25 @@ assert sl.MODULE_ROLE == "spss_labels", "spss_labels.py 가 아닌 파일이 imp
 REQUIRED_SL_VERSION = (1, 4)
 
 
+def _module_origin(module):
+    """실제로 로드된 파일 경로와 수정시각. 어느 파일이 읽혔는지 확인하는 용도.
+
+    같은 이름의 파일이 여러 곳에 있거나(pages/ 안에 사본이 남은 경우 등)
+    __pycache__ 의 예전 .pyc 가 쓰이면 파일을 바꿔도 구버전이 로드된다.
+    """
+    import datetime
+    import os
+
+    path = getattr(module, "__file__", None)
+    if not path:
+        return "경로 확인 불가"
+    try:
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+        return f"{os.path.abspath(path)}  (수정: {mtime:%Y-%m-%d %H:%M})"
+    except OSError:
+        return os.path.abspath(path)
+
+
 def _version_tuple(text):
     parts = []
     for chunk in str(text).split(".")[:2]:
@@ -52,6 +71,13 @@ if _version_tuple(sl.__version__) < REQUIRED_SL_VERSION:
         "2) 앱을 **재시작** (로컬: 터미널에서 Ctrl+C 후 다시 실행 / "
         "Streamlit Cloud: Manage app → Reboot app)\n"
         "3) 아래 '캐시 비우고 다시 파싱' 버튼 클릭"
+    )
+    st.warning(
+        "**지금 실제로 로드된 파일**\n\n"
+        f"- spss_labels: `{_module_origin(sl)}`\n"
+        f"- utils: `{_module_origin(utils)}`\n\n"
+        "이 경로의 파일이 새 파일인지 확인하세요. 수정시각이 오늘이 아니면 교체가 안 된 것이고, "
+        "새 파일인데도 1.3.0 으로 표시되면 서버 재시작 또는 __pycache__ 삭제가 필요합니다."
     )
     if st.button("캐시 비우고 다시 파싱"):
         st.cache_data.clear()
@@ -141,6 +167,9 @@ with st.sidebar:
     )
     st.divider()
     st.caption(f"spss_labels {sl.__version__} · utils {utils.__version__}")
+    with st.expander("모듈 경로 확인"):
+        st.caption(f"spss_labels: {_module_origin(sl)}")
+        st.caption(f"utils: {_module_origin(utils)}")
     st.markdown(
         "**처리 순서**\n\n"
         "1. 설문지 업로드 → 자동 파싱\n"
