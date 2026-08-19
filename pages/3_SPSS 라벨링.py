@@ -26,7 +26,7 @@ assert sl.MODULE_ROLE == "spss_labels", "spss_labels.py 가 아닌 파일이 imp
 # 파일을 교체했는데도 구버전이 돌아 문항이 누락되는 사고를 잡아낸다.
 # (Streamlit 은 import 된 모듈을 메모리에 유지하므로, 모듈 파일만 바꾸고
 #  서버를 재시작하지 않으면 예전 코드가 계속 실행된다.)
-REQUIRED_SL_VERSION = (1, 3)
+REQUIRED_SL_VERSION = (1, 4)
 
 
 def _version_tuple(text):
@@ -154,12 +154,19 @@ multi_style = MULTI_CHOICES[multi_label]
 st.subheader("1. 파일 업로드")
 c1, c2 = st.columns(2)
 with c1:
-    up_docx = st.file_uploader("워드 설문지 (.docx)", type=["docx"], key="SL_up_docx")
+    up_docx = st.file_uploader(
+        "워드 설문지 (.docx / .doc)", type=["docx", "doc"], key="SL_up_docx",
+        help="구형 .doc(Word 97-2003)은 서버에 LibreOffice 가 있으면 자동 변환합니다. "
+             "없으면 워드에서 .docx 로 저장한 뒤 올려 주세요.",
+    )
     if up_docx is not None and st.button("설문지 파싱", type="primary"):
         with st.spinner("설문지를 읽고 있습니다…"):
             try:
                 variables = parse_cached(up_docx.getvalue(), base0, full_labels,
                                          multi_style, sl.__version__)
+            except sl.LegacyDocError as e:
+                st.error(str(e))
+                st.stop()
             except Exception as e:
                 st.error(f"파싱 실패: {type(e).__name__}: {e}")
                 st.stop()
