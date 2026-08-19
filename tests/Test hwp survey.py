@@ -5,6 +5,7 @@
 바이너리 픽스처를 저장소에 넣지 않아도 CI에서 전 과정을 돌려볼 수 있다.
 """
 
+import xml.sax.saxutils as sax
 import zipfile
 
 import pytest
@@ -18,7 +19,8 @@ NS = "http://www.hancom.co.kr/hwpml/2011/paragraph"
 
 
 def para(text):
-    return f"<hp:p><hp:run><hp:t>{text}</hp:t></hp:run></hp:p>"
+    # <제목> 처럼 꺾쇠가 들어간 본문도 있으므로 XML 이스케이프가 필요하다
+    return f"<hp:p><hp:run><hp:t>{sax.escape(text)}</hp:t></hp:run></hp:p>"
 
 
 def cell(text):
@@ -151,3 +153,123 @@ def test_unsupported_extension_raises(tmp_path):
     path.write_bytes(b"x")
     with pytest.raises(ValueError):
         read_survey(str(path))
+
+
+# ================================================================== DP 스크립트
+from hwp_survey.dp import (DPWriter, items_to_dp_dsl, parse_dp,  # noqa: E402
+                           summarize_dp)
+
+
+@pytest.fixture
+def dp_hwpx(tmp_path):
+    """리서치 초안 형태(문단만 있는 설문지) 샘플."""
+    body = [
+        para("<IT 리뷰 유튜버 설문지>"),
+        para("■ 조사 대상자: 전국 만 20~39세 남녀"),
+        para("■ 샘플 수: 250샘플"),
+        para("■ 쿼터:"),
+        para("20대 30대 합계"),
+        para("남 62 63 125"),
+        para("여 63 62 125"),
+        para("---"),
+        para("SQ1. 귀하의 성별은 무엇입니까?"),
+        para("① 남성"), para("② 여성"),
+        para("SQ2. 귀하의 연령은 어떻게 되십니까?"),
+        para("(출생년도 입력)"),
+        para("[PROG: 만20~39세만 진행]"),
+        para("SQ3. 거주하고 계신 지역은 어디입니까?"),
+        para("(운동 설문과 동일)"),
+        para("SQ4. 평소 온라인 동영상 플랫폼을 이용하십니까?"),
+        para("① 유튜브"), para("② 넷플릭스"), para("③ 이용하지 않음"),
+        para("Q1. 다음은 유튜버의 특성에 관한 질문입니다."),
+        para("(5점 척도)"),
+        para("① 매력적이다."), para("② 멋있다."),
+    ]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "초안.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("mimetype", "application/hwp+zip")
+        z.writestr("Contents/section0.xml", xml)
+    return str(path)
+
+
+def test_dp_header_fields_and_quota(dp_hwpx):
+    doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
+    assert doc["제목"] == "IT 리뷰 유튜버 설문지"
+    assert doc["샘플수"] == "250샘플"
+    assert doc["쿼터표"][0] == ["", "20대", "30대", "합계"]   # 좌상단 빈 칸
+    assert doc["쿼터표"][1] == ["남", "62", "63", "125"]
+
+
+def test_dp_labels_are_preserved(dp_hwpx):
+    doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
+    labels = [b["label"] for b in doc["blocks"] if b["kind"] == "question"]
+    assert labels == ["SQ1", "SQ2", "SQ3", "SQ4", "Q1"]        # 번호를 다시 매기지 않는다
+
+
+def test_dp_response_tags(dp_hwpx):
+    doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
+    tags = {b["label"]: b["tag"] for b in doc["blocks"] if b["kind"] == "question"}
+    assert tags["SQ1"] == "1개선택"
+    assert tags["SQ2"] == "출생년도 입력"
+    assert tags["SQ3"] == "지도에서 선택"
+    assert tags["SQ4"] == "모두선택"          # '이용하지 않음' 배타 보기가 있으므로
+    assert tags["Q1"] == "행별 1개선택"
+
+
+def test_dp_matrix_scale_and_rows(dp_hwpx):
+    doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
+    q1 = [b for b in doc["blocks"] if b.get("label") == "Q1"][0]
+    assert q1["scale"][0] == "전혀 그렇지 않다" and len(q1["scale"]) == 5
+    assert q1["options"] == ["매력적이다.", "멋있다."]
+    assert "체크해 주세요" in q1["text"]      # 안내 문장 자동 추가
+
+
+def test_dp_alone_prog_added(dp_hwpx):
+    dsl = items_to_dp_dsl(read_survey(dp_hwpx))
+    assert "%PROG: 3번 보기는 단독선택만 가능" in dsl
+
+
+def test_dp_alone_prog_can_be_disabled(dp_hwpx):
+    dsl = items_to_dp_dsl(read_survey(dp_hwpx), add_alone_prog=False)
+    assert "단독선택만 가능" not in dsl
+
+
+def test_dp_prog_lines_kept(dp_hwpx):
+    doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
+    progs = [b["text"] for b in doc["blocks"] if b["kind"] == "prog"]
+    assert "만20~39세만 진행" in progs
+    assert "17개시도 지도제시" in progs        # 지도형 기본 지시문
+
+
+def test_dp_summary(dp_hwpx):
+    found = summarize_dp(parse_dp(items_to_dp_dsl(read_survey(dp_hwpx))))
+    assert found["문항"] == 5
+    assert found["선정문항(SQ)"] == 4
+    assert found["행별 표"] == 1
+
+
+def test_dp_docx_structure(dp_hwpx):
+    import io
+
+    from docx import Document
+
+    doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
+    doc["제외"] = "2026060452 참여자 제외"
+    doc["blocks"].append({"kind": "verify", "text": "Q1 일자찍기 제외"})
+    data = DPWriter().write(doc).to_bytes()
+
+    d = Document(io.BytesIO(data))
+    spec = d.tables[0]
+    assert [c.text for c in spec.rows[0].cells][0] == "대상자"
+    assert len(spec.rows[2].cells[1].tables) == 1          # 쿼터 격자는 중첩 표
+    matrix = d.tables[-1]
+    assert len(matrix.columns) == 6 and len(matrix.rows) == 3
+    assert matrix.rows[0].cells[1].text.endswith("1")      # 라벨 + 척도 번호
+
+    xml = d.element.xml
+    assert 'w:val="yellow"' in xml                          # 제외 줄 형광
+    assert 'w:color w:val="0000FF"' in xml                  # PROG 파란색
+    assert 'w:color w:val="FF0000"' in xml                  # 검증 빨간색
+    assert "나눔고딕" in xml
