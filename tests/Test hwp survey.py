@@ -222,7 +222,7 @@ def test_dp_matrix_scale_and_rows(dp_hwpx):
     doc = parse_dp(items_to_dp_dsl(read_survey(dp_hwpx)))
     q1 = [b for b in doc["blocks"] if b.get("label") == "Q1"][0]
     assert q1["scale"][0] == "전혀 그렇지 않다" and len(q1["scale"]) == 5
-    assert q1["options"] == ["매력적이다.", "멋있다."]
+    assert [o["text"] for o in q1["options"]] == ["매력적이다.", "멋있다."]
     assert "체크해 주세요" in q1["text"]      # 안내 문장 자동 추가
 
 
@@ -273,3 +273,38 @@ def test_dp_docx_structure(dp_hwpx):
     assert 'w:color w:val="0000FF"' in xml                  # PROG 파란색
     assert 'w:color w:val="FF0000"' in xml                  # 검증 빨간색
     assert "나눔고딕" in xml
+
+
+def test_dp_handles_table_based_survey(sample_hwpx):
+    """표로 리커트를 짠 학술 설문지도 DP 스크립트로 변환된다."""
+    doc = parse_dp(items_to_dp_dsl(read_survey(sample_hwpx)))
+    qs = [b for b in doc["blocks"] if b["kind"] == "question"]
+    labels = [q["label"] for q in qs]
+
+    assert labels[:3] == ["SQ1", "SQ2", "SQ3"]        # 행별 문항 앞은 선정 문항
+    assert any(l.startswith("Q") for l in labels)     # 행별 문항부터 본 문항
+    matrix = [q for q in qs if q["tag"] == "행별 1개선택"]
+    assert len(matrix) == 1
+    assert [o["type"] for o in matrix[0]["options"]].count("group") == 1
+    assert doc["쿼터표"] == []                        # 표를 쿼터로 오인하지 않는다
+
+
+def test_dp_terminate_option_becomes_prog(tmp_path):
+    body = [para("1. 이용 경험이 있으십니까?"), para("① 예   ② 아니오[설문지 종료]")]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "종료.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+
+    dsl = items_to_dp_dsl(read_survey(str(path)))
+    assert "- 아니오" in dsl and "설문지 종료]" not in dsl
+    assert "%PROG: 2번 선택자 설문 종료" in dsl
+
+
+def test_dp_scale_middle_labels_filled(tmp_path):
+    """양 끝만 라벨이 있는 척도 안내표의 가운데 라벨을 채운다."""
+    from hwp_survey.dp import fill_scale
+    cols = ["① 전혀 그렇지 않다", "②", "③", "④", "⑤ 매우 그렇다"]
+    assert fill_scale(cols) == ["전혀 그렇지 않다", "그렇지 않다", "보통이다",
+                                "그렇다", "매우 그렇다"]
