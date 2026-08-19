@@ -6,6 +6,10 @@
   * 인쇄용 설문지 : 응답자 배포용. 보기 기호와 체크 칸
 
 문서 처리 로직은 hwp_survey 패키지에 있고, 이 파일은 화면만 담당한다.
+
+Streamlit 멀티페이지에서는 각 페이지 스크립트가 독립적으로 실행된다.
+Home.py 의 인증은 여기까지 미치지 않으므로, 이 파일에서도 직접
+utils.check_password() 를 호출해야 한다.
 """
 
 import csv
@@ -15,6 +19,7 @@ import tempfile
 
 import streamlit as st
 
+import utils
 from hwp_survey import items_to_dsl, parse_dsl, read_survey, summarize
 from hwp_survey.dp import DPWriter, items_to_dp_dsl, parse_dp, summarize_dp
 from hwp_survey.writer import SurveyWriter
@@ -23,6 +28,12 @@ PAGE_TITLE = "설문지 변환 (한글 → 워드)"
 SS = "survey_docx"          # 다른 페이지와 섞이지 않도록 세션 키 접두어
 
 st.set_page_config(page_title=PAGE_TITLE, page_icon="📋", layout="wide")
+
+# 인증 통과 전에는 아래 코드가 한 줄도 실행되지 않아야 한다.
+# (사이드바 위젯이나 업로더가 먼저 그려지면 화면이 잠깐 노출된다.)
+if not utils.check_password():
+    st.stop()
+
 st.title(PAGE_TITLE)
 
 HELP_DP = """
