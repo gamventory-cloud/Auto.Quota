@@ -106,11 +106,12 @@ def items_csv_dp(doc) -> bytes:
     for b in doc["blocks"]:
         if b["kind"] != "question":
             continue
+        items = [o["text"] for o in b["options"] if o["type"] == "row"]
         if b["tag"].startswith("행별"):
             rows += [[f"{b['label']}_{i}", b["tag"], b["text"], t]
-                     for i, t in enumerate(b["options"], 1)]
+                     for i, t in enumerate(items, 1)]
         else:
-            rows.append([b["label"], b["tag"], b["text"], " | ".join(b["options"])])
+            rows.append([b["label"], b["tag"], b["text"], " | ".join(items)])
     return to_csv(rows)
 
 
