@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import re
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -158,8 +159,9 @@ class SurveyWriter:
 
     def _question(self, b):
         self.qno += 1
+        label = b.get("label") or str(self.qno)     # '문5' 처럼 원본 번호가 있으면 유지
         suffix = " (복수 응답 가능)" if b["type"] == "복수" else ""
-        self.para(f"{self.qno}. {b['text']}{suffix}", bold=True, before=10, after=5)
+        self.para(f"{label}. {b['text']}{suffix}", bold=True, before=10, after=5)
         for note in b.get("notes", []):
             self.para(note, size=Pt(9), indent=0.6, after=4, color="606060")
 
@@ -170,6 +172,8 @@ class SurveyWriter:
         elif b["type"] == "장문":
             for _ in range(3):
                 self.answer_line(after=10)
+        elif b["type"] == "격자":
+            pass                        # 응답 칸은 바로 뒤 표에 있다
         elif b["type"] == "단답" and not b["options"]:
             self.answer_line()
         else:
@@ -178,10 +182,36 @@ class SurveyWriter:
                 if opt["type"] == "group":
                     self.para(opt["text"], size=Pt(9.5), bold=True, indent=0.4,
                               before=4, after=2)
+                elif re.match(r"^\d{1,4}[.)]", opt["text"]):   # '9997. 기타' 같은 코드
+                    self.para(opt["text"], indent=0.8, after=2)
                 else:
                     self.para(f"{mark} {opt['text']}", indent=0.8, after=2)
             if not b["options"]:
                 self.answer_line()
+
+    def _grid(self, b):
+        """분류되지 않은 원본 표를 격자 그대로 옮긴다(빈도 표, 기입 표 등)."""
+        rows = b["rows"]
+        cols = max(len(r) for r in rows)
+        table = self.doc.add_table(rows=0, cols=cols)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        width = Cm(self.o["content_cm"] / cols)
+        for n, row in enumerate(rows):
+            cells = table.add_row().cells
+            for c in range(cols):
+                value = row[c] if c < len(row) else ""
+                p = cells[c].paragraphs[0]
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p.paragraph_format.space_after = Pt(0)
+                self.font(p.add_run(value), size=Pt(9), bold=(n == 0))
+                cells[c].width = width
+                if n == 0:
+                    self.shade(cells[c])
+        for col in table.columns:
+            col.width = width
+        self.fix_layout(table)
+        self.para("", after=6)
 
     def _matrix(self, b):
         head = b["matrix"] or ["①", "②", "③", "④", "⑤"]
