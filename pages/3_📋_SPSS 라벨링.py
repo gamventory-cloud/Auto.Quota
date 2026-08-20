@@ -26,7 +26,7 @@ assert sl.MODULE_ROLE == "spss_labels", "spss_labels.py 가 아닌 파일이 imp
 # 파일을 교체했는데도 구버전이 돌아 문항이 누락되는 사고를 잡아낸다.
 # (Streamlit 은 import 된 모듈을 메모리에 유지하므로, 모듈 파일만 바꾸고
 #  서버를 재시작하지 않으면 예전 코드가 계속 실행된다.)
-REQUIRED_SL_VERSION = (1, 5)
+REQUIRED_SL_VERSION = (1, 6)
 
 
 def _module_origin(module):
@@ -90,6 +90,7 @@ K_EDIT = "SL_edit"      # 편집 중인 코드북 (DataFrame)
 K_SRC = "SL_src"        # 원본 파일명
 K_FILES = "SL_files"    # 생성된 산출물 {파일명: bytes}
 K_REPORT = "SL_report"  # 라벨 적용 결과
+K_VALID = "SL_valid"    # 검수 결과
 
 
 def ss(key, default=None):
@@ -127,7 +128,7 @@ def parse_cached(docx_bytes, base0_key, full_labels, multi_style, module_version
 
 
 def reset_state():
-    for k in (K_VARS, K_EDIT, K_SRC, K_FILES, K_REPORT):
+    for k in (K_VARS, K_EDIT, K_SRC, K_FILES, K_REPORT, K_VALID):
         st.session_state.pop(k, None)
     parse_cached.clear()
 
@@ -350,6 +351,61 @@ if files:
     if sps_blob:
         with st.expander("구문 미리보기"):
             st.code(sps_blob.decode("utf-8-sig")[:4000], language="text")
+
+# ==============================================================================
+# 4. 라벨 검수
+# ==============================================================================
+st.subheader("4. 라벨 검수")
+st.caption("코드북이 스스로 모순이 없는지, 그리고 실제 데이터와 맞는지 검사합니다. "
+           "원자료를 올렸다면 '값라벨에 없는 값'이 가장 중요한 신호입니다.")
+
+if st.button("검수 실행"):
+    sav_blob = None
+    if files:
+        sav_blob = next((b for n, b in files.items() if n.endswith(".sav")), None)
+    with st.spinner("검사 중…"):
+        try:
+            rep = sl.validate(variables, data=data, sav_bytes=sav_blob)
+        except Exception as e:
+            st.error(f"검수 실패: {type(e).__name__}: {e}")
+            st.stop()
+    st.session_state[K_VALID] = rep
+
+rep = ss(K_VALID)
+if rep is not None:
+    counts = rep.counts()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("오류", counts["오류"])
+    c2.metric("주의", counts["주의"])
+    c3.metric("정보", counts["정보"])
+    c4.metric("데이터 대조", f"{rep.matched}개" if rep.data_rows else "미실시")
+
+    if counts["오류"] == 0:
+        st.success("오류 없음. '주의' 항목은 눈으로 한 번 확인하세요.")
+    else:
+        st.error("오류가 있습니다. 아래 항목을 확인한 뒤 코드북을 수정하고 다시 생성하세요.")
+
+    issues = rep.to_frame()
+    if not issues.empty:
+        only_err = st.checkbox("오류만 보기", value=counts["오류"] > 0, key="SL_only_err")
+        view = issues[issues["심각도"] == "오류"] if only_err else issues
+        st.dataframe(view, **WIDE)
+
+        try:
+            import io
+
+            buf = io.BytesIO()
+            issues.to_excel(buf, index=False, sheet_name="검수결과")
+            st.download_button("⬇ 검수 결과 (xlsx)", buf.getvalue(),
+                               file_name=f"{stem}_검수결과.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument."
+                                    "spreadsheetml.sheet")
+        except Exception as e:
+            st.caption(f"엑셀 내려받기를 만들지 못했습니다: {type(e).__name__}")
+
+    if not rep.data_rows:
+        st.info("원자료(csv/xlsx/sav)를 3단계에서 올리면 데이터 대조 검사까지 실행됩니다. "
+                "코드가 밀렸거나 복수응답 저장 방식이 다른 경우는 데이터가 있어야 잡힙니다.")
 
 st.divider()
 if st.button("초기화"):
