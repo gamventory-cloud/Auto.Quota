@@ -879,6 +879,51 @@ def parse_dp(text: str) -> dict:
     return doc
 
 
+def split_long_matrices(doc, limit: int = 20):
+    """행이 너무 많은 행별 표를 여러 문항으로 나눈다.
+
+    limit 이하이면 그대로 둔다. 넘으면 limit 이하가 되도록 등분한다
+    (24행·limit 20 -> 12+12, 45행 -> 15+15+15). 문항 문장과 보기 라벨은
+    각 조각에 그대로 반복되고, 소제목 행 바로 뒤에서는 끊지 않는다.
+    """
+    if not limit or limit < 2:
+        return doc
+
+    used = {b.get("label") for b in doc["blocks"] if b["kind"] == "question"}
+    blocks = []
+    for block in doc["blocks"]:
+        rows = block.get("options") if block["kind"] == "question" else None
+        if (block["kind"] != "question" or not block["tag"].startswith(("행별", "열별"))
+                or not rows or len(rows) <= limit):
+            blocks.append(block)
+            continue
+
+        parts = -(-len(rows) // limit)                 # 올림 나눗셈
+        size = -(-len(rows) // parts)
+        chunks, start = [], 0
+        while start < len(rows):
+            end = min(start + size, len(rows))
+            while end < len(rows) and rows[end - 1]["type"] == "group":
+                end += 1                               # 소제목만 남기고 끊지 않는다
+            chunks.append(rows[start:end])
+            start = end
+
+        for n, chunk in enumerate(chunks, 1):
+            piece = dict(block)
+            piece["options"] = chunk
+            label = block.get("label") or ""
+            candidate = f"{label}-{n}" if label else ""
+            if label and candidate not in used:
+                piece["label"] = candidate
+                used.add(candidate)
+            else:
+                piece["text"] = f"{block['text']} ({n}/{len(chunks)})"
+            blocks.append(piece)
+
+    doc["blocks"] = blocks
+    return doc
+
+
 def last_question(doc):
     for block in reversed(doc["blocks"]):
         if block["kind"] == "question":
