@@ -33,6 +33,11 @@ utils.py — 쿼터 솔루션 공용 모듈
      앱 전체가 죽었다. 양쪽을 utf-8 bytes 로 인코딩해 비교하도록 변경.
    - 이 파일에서 바뀐 것은 위 한 곳뿐이며, 다른 함수는 손대지 않았다.
 6. unique_sheet_name : 시트명 충돌 방지
+8. [2.0.2] RESERVED_SHEETS 에 Run_Info / Recruit_Plan 추가
+   - 화면 쪽에서 재현성 기록 시트(Run_Info)와 추가 수집 지시서 시트
+     (Recruit_Plan)를 새로 쓴다. 추가 쿼터 그룹 이름이 우연히 이 둘과 같아지면
+     xlsxwriter 가 시트명 충돌로 죽으므로 예약어에 등록한다.
+   - 이 파일에서 바뀐 것은 RESERVED_SHEETS 한 줄뿐이며, 함수는 손대지 않았다.
 """
 
 import streamlit as st
@@ -47,7 +52,7 @@ import collections
 # 이 파일이 진짜 utils.py 인지 호출부에서 확인하는 표식.
 # 파일 내용이 뒤섞이는 사고를 즉시 잡아낸다.
 MODULE_ROLE = "utils"
-__version__ = "2.0.1-hmacfix"
+__version__ = "2.0.2-sheets"
 
 # 결측/공백을 나타내는 단일 토큰. 화면·엑셀·매칭 전부 이 값을 공유한다.
 NA_TOKEN = "(무응답)"
@@ -222,7 +227,10 @@ def load_df(file):
         return None
 
 
-RESERVED_SHEETS = {'Result_All', 'Result_Pass', 'Shortage_Analysis', 'Main_Status'}
+# Run_Info      : 실행 설정·시각을 남기는 재현성 기록 시트
+# Recruit_Plan  : 미달 시 "무엇을 몇 명 더 수집해야 하는지" 추가 수집 지시서 시트
+RESERVED_SHEETS = {'Result_All', 'Result_Pass', 'Shortage_Analysis', 'Main_Status',
+                   'Run_Info', 'Recruit_Plan'}
 
 
 def sanitize_sheet_name(name):
