@@ -941,3 +941,52 @@ def test_one_question_per_row_table(titled_table_hwpx):
     assert [q["text"] for q in qs] == ["귀하의 성별은?", "귀하의 연령은?"]
     assert [len(q["options"]) for q in qs] == [2, 3]
     assert all(q["tag"] == "1개 선택" for q in qs)          # 행별 표가 아니다
+
+
+# ============================================== 행이 많은 행별 표 나누기
+def _matrix_doc(rows: int):
+    dsl = ("Q1. 다음 각 항목에 응답해 주십시오. [행별 1개 선택]\n"
+           "@행별: 전혀 그렇지 않다,보통이다,매우 그렇다\n"
+           + "\n".join(f"- 항목 {i}" for i in range(1, rows + 1)))
+    return dsl
+
+
+def test_matrix_not_split_under_limit():
+    doc = parse_isas(_matrix_doc(18), split_matrix=20)
+    qs = [b for b in doc["blocks"] if b["kind"] == "question"]
+    assert len(qs) == 1 and len(qs[0]["options"]) == 18
+
+
+def test_matrix_split_into_balanced_halves():
+    """24행 · 상한 20 -> 12 + 12 (상한을 채우지 않고 고르게 나눈다)."""
+    doc = parse_isas(_matrix_doc(24), split_matrix=20)
+    qs = [b for b in doc["blocks"] if b["kind"] == "question"]
+    assert [len(q["options"]) for q in qs] == [12, 12]
+    assert [q["label"] for q in qs] == ["Q1-1", "Q1-2"]
+    assert all(q["scale"] == ["전혀 그렇지 않다", "보통이다", "매우 그렇다"] for q in qs)
+    assert all(q["text"].startswith("다음 각 항목에") for q in qs)   # 문항 문장 반복
+
+
+def test_matrix_split_into_three():
+    doc = parse_isas(_matrix_doc(45), split_matrix=20)
+    sizes = [len(b["options"]) for b in doc["blocks"] if b["kind"] == "question"]
+    assert sizes == [15, 15, 15]
+
+
+def test_matrix_split_keeps_group_header_with_its_rows():
+    """소제목 행만 남기고 끊지 않는다."""
+    dsl = ("Q1. 다음 각 항목에 응답해 주십시오. [행별 1개 선택]\n"
+           "@행별: 예,아니오\n"
+           + "\n".join(f"- 항목 {i}" for i in range(1, 4))
+           + "\n-- 두 번째 묶음\n"
+           + "\n".join(f"- 항목 {i}" for i in range(4, 7)))
+    doc = parse_isas(dsl, split_matrix=3)
+    qs = [b for b in doc["blocks"] if b["kind"] == "question"]
+    assert len(qs) >= 2
+    assert qs[1]["options"][0]["type"] == "group"     # 소제목이 뒤 조각의 머리로
+    assert qs[0]["options"][-1]["type"] == "row"      # 소제목으로 끝나지 않는다
+
+
+def test_split_disabled_by_default():
+    doc = parse_isas(_matrix_doc(30))
+    assert len([b for b in doc["blocks"] if b["kind"] == "question"]) == 1
