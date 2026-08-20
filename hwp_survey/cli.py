@@ -14,6 +14,9 @@ def main():
     ap.add_argument("--from-dsl", action="store_true",
                     help="src를 중간 텍스트(.txt)로 간주하고 바로 렌더링")
     ap.add_argument("--font", default=None, help="한글 글꼴")
+    ap.add_argument("--renumber", action="store_true",
+                    help="ISAS 번호 체계(SQ/Q1-1/DQ)로 다시 매긴다. "
+                         "기본은 원본 번호 유지")
     ap.add_argument("--style", choices=["isas", "dp"], default="isas",
                     help="isas=ISAS 표준, dp=DP 스크립트")
     args = ap.parse_args()
@@ -25,8 +28,8 @@ def main():
         items = read_survey(args.src)
         print(f"추출: 문단 {sum(1 for k, _ in items if k == 'p')}개, "
               f"표 {sum(1 for k, _ in items if k == 'table')}개")
-        dsl = {"dp": items_to_dp_dsl,
-               "isas": items_to_isas_dsl}[args.style](items)
+        dsl = (items_to_isas_dsl(items, renumber=args.renumber)
+               if args.style == "isas" else items_to_dp_dsl(items))
 
     if args.dsl:
         with open(args.dsl, "w", encoding="utf-8") as f:
