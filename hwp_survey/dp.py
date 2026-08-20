@@ -34,16 +34,29 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .parser import (CIRCLED, RE_FIELDWORK, RE_FOOTNOTE, RE_LEADIN, RE_OPT_CODE,
-                     RE_OPT_SPLIT, RE_RESP_TAG, RE_ROMAN_HEAD, code_options,
-                     detect_label_style, grid_lines, header_matrix, is_banner,
-                     matrix_rows, scale_columns, screening_rows)
+from .parser import (CIRCLED, RE_BOX_SPLIT, RE_FIELDWORK, RE_FOOTNOTE,
+                     RE_LEADIN, RE_OPT_CODE, RE_OPT_SPLIT, RE_RESP_TAG,
+                     RE_ROMAN_HEAD, code_options, detect_label_style, grid_lines,
+                     header_matrix, is_banner, matrix_rows, scale_columns,
+                     scale_from_note, screening_rows)
 
 # ---------------------------------------------------------------- 상수
 SCALE_5 = ["전혀 그렇지 않다", "그렇지 않다", "보통이다", "그렇다", "매우 그렇다"]
 MATRIX_HINT = "귀하의 의견과 가장 일치하는 정도에 체크해 주세요."
 
-RE_LABEL = re.compile(r"^\s*((?:SQ|Q|DQ|A|문)\s*\d+(?:-\d+)?)\s*[.)]\s*(.*)$", re.I)
+#: 번호 없는 라벨(AQ, DQ)도 쓰이므로 숫자는 있어도 없어도 된다
+RE_LABEL = re.compile(
+    r"^\s*((?:SQ|DQ|AQ|Q|S|A|문|배문)\s*\d*(?:[-_]\d+)?)\s*[.)]\s*(.*)$", re.I)
+#: '(□ 예, □ 아니오) 나는 …' 형태의 동의 문항
+RE_CONSENT = re.compile(r"^\s*\([^)]*[□☐][^)]*\)\s*(.+)$")
+#: 보기 안의 '(설문 종료)' 지시
+RE_STOP = re.compile(r"[(\[]\s*설문\s*(?:지\s*)?종료\s*[)\]]")
+#: 'PART 1. 일반 특성', '제2부' 처럼 길이와 무관하게 구역을 나누는 줄
+RE_PART_LINE = re.compile(r"^\s*(?:PART|파트|SECTION)\s*\d+|^\s*제\s*\d+\s*부", re.I)
+#: 구역 제목으로 볼 낱말. 짧은 줄을 무조건 구역으로 보면 연구자 소속·연락처까지
+#: 구역이 되어 버리므로 낱말로 좁힌다.
+RE_SECTION_WORD = re.compile(
+    r"선별|선정|스크리닝|screen|본문|demo|배경|인적\s*사항|일반\s*사항|이용$", re.I)
 RE_FIELD = re.compile(r"^@(제목|대상자|샘플수|쿼터|쿼터표|제외|행별)\s*:\s*(.*)$")
 RE_PROG_SRC = re.compile(r"^\s*\[?\s*PROG\s*[:：]\s*(.+?)\s*\]?\s*$", re.I)
 RE_TAG = re.compile(r"\[([^\[\]]+)\]\s*$")
@@ -70,6 +83,7 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
     quota_rows: list[list[str]] = []
     pending_scale: list[str] | None = None
     state = {"mode": None}
+    consent_rows: list[str] = []
     style = detect_label_style(items)      # '문1.'/'SQ1.' 표기를 쓰는 설문지인지
 
     flat = list(items)
@@ -111,8 +125,13 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             if matrix is None:
                 fallback = header_matrix(rows)
                 if fallback:
-                    head, matrix = fallback
-                    head = fill_scale(head)
+                    head_raw, matrix = fallback
+                    numeric = all(re.fullmatch(r"\d+", h.strip())
+                                  for h in head_raw if h.strip())
+                    # 표 머리가 숫자뿐이면 ※ 안내문에서 읽은 라벨을 쓴다
+                    head = (pending_scale if numeric and pending_scale
+                            and len(pending_scale) == len(head_raw)
+                            else fill_scale(head_raw))
             if matrix:
                 label, stem = pop_stem(lines)
                 stem = stem or "다음 각 항목에 대해 응답해 주십시오."
@@ -121,7 +140,7 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
                 lines.append("")
                 lines.append(f"{label or '?'}. {stem} [{MATRIX_TAG}]")
                 lines.append(f"@행별: {','.join(head or SCALE_5)}")
-                lines.extend(strip_row_number(r) for r in matrix)
+                lines.extend(strip_row_number(r) for r in matrix)  # 항목 코드 제거
                 pending_scale = None
                 continue
 
@@ -189,6 +208,16 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             lines.append(f"%PROG: {prog.group(1)}")
             continue
 
+        note_scale = scale_from_note(text, SCALE_5) if text.startswith("※") else None
+        if note_scale:
+            pending_scale = note_scale                 # ※ 1=…, 3=…, 5=…
+            continue
+
+        consent = RE_CONSENT.match(text)
+        if consent:                                    # (□ 예, □ 아니오) 나는 …
+            consent_rows.append(consent.group(1).strip())
+            continue
+
         field = RE_FIELDWORK.match(text)               # ▷ 조사원: …
         if field:
             lines.append(f"%PROG: 조사원 - {field.group(1).strip()}")
@@ -197,7 +226,9 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             lines.append(f"! {text}")
             continue
 
-        m = RE_LABEL.match(text) or (RE_NUM_Q.match(text) if style == "bare" else None)
+        m = RE_LABEL.match(text)
+        if not m and (style == "bare" or has_inline_options(text)):
+            m = RE_NUM_Q.match(text)
         if m:
             label = (re.sub(r"\s+", "", m.group(1)).upper()
                      if RE_LABEL.match(text) else "?")
@@ -208,6 +239,13 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             continue
 
         lines.extend(classify_free_line(text, lines))
+
+    if consent_rows:
+        anchor = next((n for n, l in enumerate(lines)
+                       if RE_LABEL.match(l) or l.startswith("?.")), len(lines))
+        block = ["", f"?. 아래 항목을 읽고, 응답해 주시기 바랍니다. [{MATRIX_TAG}]",
+                 "@행별: 예,아니오"] + [f"- {t}" for t in consent_rows] + [""]
+        lines[anchor:anchor] = block
 
     retag_grid_questions(lines)
     promote_title(lines)
@@ -261,12 +299,24 @@ def classify_free_line(text: str, lines) -> list[str]:
     """문항이 아닌 줄: 제목 / 영역 배너 / 인사말·유의사항 상자 / 괄호 안내."""
     if not lines and len(text) <= 40:
         return [f"@제목: {text}"]
-    if len(text) <= 12 and not re.search(r"[.?!:]$", text):
-        return [f"## {text}"]                      # '스크리닝' 같은 영역 이름
+    if RE_PART_LINE.match(text):
+        return ["", f"## {text}"]                  # 'PART 1. …' 구역 제목
+    if len(text) <= 20 and RE_SECTION_WORD.search(text):
+        return ["", f"## {text}"]                  # '선별 문항' 같은 영역 이름
     paren = RE_PAREN_ONLY.match(text)
     if paren and len(text) <= 30:
         return [f"! {paren.group(1)}"]
     return [f"~ {text}"]
+
+
+def has_inline_options(text: str) -> bool:
+    """'1. 최종 학력 □ 고등학교 이하 □ 전문대학 …' 처럼 보기를 품은 줄."""
+    return (len(RE_BOX_SPLIT.findall(text)) >= 2
+            or len(RE_OPT_SPLIT.findall(text)) >= 2)
+
+
+def strip_box(text: str) -> str:
+    return re.sub(r"^[□☐▢]\s*", "", text).strip()
 
 
 def strip_circle(text: str) -> str:
@@ -287,8 +337,9 @@ def fill_scale(cols: list[str]) -> list[str]:
 
 
 def strip_row_number(line: str) -> str:
-    """'- 1. 나는 ...' -> '- 나는 ...'"""
-    return re.sub(r"^-\s*\d{1,2}\s*[.)]\s*", "- ", line)
+    """행 머리의 항목 코드를 떼어낸다. '- 1. 나는 …', '- P2-1. 반려견은 …'"""
+    return re.sub(r"^-\s*(?:\d{1,2}|[A-Za-z]{1,4}\s*\d{0,2}(?:[-_]\d{1,2})?)\s*[.)]\s*",
+                  "- ", line)
 
 
 def pop_stem(lines) -> tuple[str | None, str | None]:
@@ -376,7 +427,11 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
         tag = MULTI_TAG if ("복수" in keyword or "중복" in keyword
                             or "모두" in keyword) else SINGLE_TAG
 
-    if style == "prefixed":                         # 한 줄에 몰린 코드 보기 분리
+    boxes = [strip_box(o) for o in RE_BOX_SPLIT.findall(stem)]
+    if len(boxes) >= 2:                            # '□ 예  □ 아니오' 가 문항에 붙은 경우
+        options += [b for b in boxes if b]
+        stem = stem[: stem.index("□")].strip() if "□" in stem else stem
+    elif style == "prefixed":                      # 한 줄에 몰린 코드 보기 분리
         codes = code_options(stem)
         if len(codes) >= 2:
             options += codes
@@ -395,6 +450,14 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
             continue
         if RE_LABEL.match(text) or (style == "bare" and RE_NUM_Q.match(text)):
             break            # 다음 문항 시작 ('문1.' 표기 문서에서 '1.'은 보기다)
+        if RE_PART_LINE.match(text):
+            break                                  # 구역이 바뀌었다
+        if text.startswith("※"):
+            note_scale = scale_from_note(text, SCALE_5)
+            if note_scale:
+                scale = note_scale                 # ※ 1=…, 3=…, 5=…
+                i += 1
+                continue
 
         prog = RE_PROG_SRC.match(text)
         if prog:
@@ -412,8 +475,13 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
             continue
 
         inline = [o.strip() for o in RE_OPT_SPLIT.findall(text)]
+        boxes = [o.strip() for o in RE_BOX_SPLIT.findall(text)]
         if len(inline) >= 2:                       # '① 예   ② 아니오' 처럼 한 줄에 여럿
             options += [strip_circle(o) for o in inline if strip_circle(o)]
+            i += 1
+            continue
+        if len(boxes) >= 2:                        # '□ 예  □ 아니오' 형태
+            options += [strip_box(o) for o in boxes if strip_box(o)]
             i += 1
             continue
         code = RE_OPT_CODE.match(text)
@@ -477,8 +545,8 @@ def finish_question(label, stem, tag, scale, options, notes, progs,
     else:
         out.append(f"{label_out} {stem} [{tag}]")
 
-    for n, opt in enumerate(options, 1):           # '아니오[설문지 종료]'
-        m = re.search(r"\[\s*(설문지\s*종료|종료)\s*\]", opt)
+    for n, opt in enumerate(options, 1):           # '아니오(설문 종료)'
+        m = RE_STOP.search(opt) or re.search(r"\[\s*종료\s*\]", opt)
         if m:
             options[n - 1] = opt[: m.start()].strip()
             progs.append(f"{n}번 선택자 설문 종료")
