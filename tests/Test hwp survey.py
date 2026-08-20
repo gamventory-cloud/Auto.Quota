@@ -586,3 +586,108 @@ def test_matrix_group_row_is_kept(sample_hwpx):
     d = Document(io.BytesIO(ISASWriter().write(doc).to_bytes()))
     texts = [c.text for t in d.tables for r in t.rows for c in r.cells]
     assert any("문항입니다" in t for t in texts)
+
+
+# ================================== 문 N. 표기 + 보기가 표에 든 설문지(SSK 계열)
+@pytest.fixture
+def spaced_label_hwpx(tmp_path):
+    """'문 1.' 띄어쓰기, 'Q1】' 기호, '5-1.' 하위 번호, 보기만 담긴 한 칸 표."""
+    likert = table([["문항", "전혀 없음", "", "거의 없음", "", "가끔", "",
+                     "자주", "", "매우 자주"],
+                    ["1.", "과제 아이디어를 얻는 데 사용하였다.", "①", "", "②", "",
+                     "③", "", "④", "", "⑤"],
+                    ["2.", "자료 요약에 사용하였다.", "①", "", "②", "", "③", "",
+                     "④", "", "⑤"]])
+    option_box = table([["① 30분 미만 ② 30분 이상~1시간 미만 ③ 1시간 이상"]])
+    intro_box = table([["안녕하십니까? 저희 연구진은 생성형 AI의 학습 활용에 관한 대학생 "
+                        "인식 연구를 위한 설문조사를 시행하고자 합니다. 모든 응답은 "
+                        "철저히 익명으로 처리되며 어떠한 불이익도 발생하지 않습니다."]])
+    body = [
+        intro_box,
+        para("귀하는 본 연구에 참여하는 것에 동의하십니까?"),
+        para("① 동의함 ② 동의하지 않음"),
+        para("(② 동의하지 않음 응답 시 설문 종료)"),
+        para("문 1. 다음 문항은 활용 경험에 관해 묻는 문항입니다."),
+        para("Q1】 귀하는 생성형 AI를 사용한 경험이 있습니까? ① 예 ② 아니오"),
+        para("5-1. 다음과 같은 경험이 있는 친구는 어느 정도입니까?"),
+        likert,
+        para("10-1. 하루 평균 몇 시간 사용했습니까?"),
+        option_box,
+    ]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "ssk.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+    return str(path)
+
+
+def test_spaced_and_bracket_labels(spaced_label_hwpx):
+    """'문 1.'(띄어쓰기)과 'Q1】'(기호)도 문항 번호로 인식한다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(spaced_label_hwpx)))
+    stems = [b["text"] for b in doc["blocks"] if b["kind"] == "question"]
+    assert any("사용한 경험이 있습니까" in s for s in stems)
+    assert not any(s.startswith("Q1") or s.startswith("문 1") for s in stems)
+
+
+def test_group_heading_becomes_section(spaced_label_hwpx):
+    """보기도 표도 없이 뒤 문항을 묶기만 하는 '문 1.'은 구역 제목이다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(spaced_label_hwpx)))
+    sections = [b["text"] for b in doc["blocks"] if b["kind"] == "section"]
+    assert any("활용 경험에 관해 묻는 문항입니다" in s for s in sections)
+
+
+def test_options_inside_single_cell_table(spaced_label_hwpx):
+    """한 칸짜리 표에 든 보기는 상자글이 아니라 앞 문항의 보기다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(spaced_label_hwpx)))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"
+         and "하루 평균" in b["text"]][0]
+    assert [o["text"] for o in q["options"]] == ["30분 미만",
+                                                "30분 이상~1시간 미만",
+                                                "1시간 이상"]
+
+
+def test_sub_numbered_question_is_matrix_stem(spaced_label_hwpx):
+    """'5-1.' 하위 번호 문항은 바로 뒤 표의 문항 문장이 된다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(spaced_label_hwpx)))
+    matrix = [b for b in doc["blocks"] if b["kind"] == "question"
+              and b["tag"].startswith("행별")]
+    assert len(matrix) == 1
+    assert "친구는 어느 정도입니까" in matrix[0]["text"]
+    assert matrix[0]["scale"] == ["전혀 없음", "거의 없음", "가끔", "자주", "매우 자주"]
+
+
+def test_question_sentence_without_number(spaced_label_hwpx):
+    """번호가 없어도 물음표로 끝나고 보기가 따르면 문항이다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(spaced_label_hwpx)))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"
+         and "참여하는 것에 동의" in b["text"]]
+    assert len(q) == 1
+    assert [o["text"] for o in q[0]["options"]] == ["동의함", "동의하지 않음"]
+
+
+def test_skip_note_becomes_prog(spaced_label_hwpx):
+    dsl = items_to_isas_dsl(read_survey(spaced_label_hwpx))
+    assert "%PROG: ② 동의하지 않음 응답 시 설문 종료" in dsl
+
+
+def test_prose_table_stays_box(spaced_label_hwpx):
+    """긴 안내문이 담긴 표는 격자가 아니라 상자로 남는다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(spaced_label_hwpx)))
+    assert any(b["kind"] == "box" and "안녕하십니까" in b["text"]
+               for b in doc["blocks"])
+    assert not any(b["kind"] == "grid" for b in doc["blocks"])
+
+
+def test_scale_legend_not_confused_with_matrix():
+    """문항이 들어 있는 3행 표를 척도 안내표로 오인하지 않는다."""
+    from hwp_survey.parser import scale_columns
+
+    rows = [["문항", "매우 낮음", "", "보통", "", "매우 높음"],
+            ["", "발각될 가능성이 얼마나 있다고 봅니까?", "①", "②", "③", "⑤"],
+            ["2.", "징계로 이어질 가능성은?", "①", "②", "③", "⑤"]]
+    assert scale_columns(rows) is None            # 기호가 두 행 -> 매트릭스다
+
+    legend = [["◀", "①", "②", "③", "④", "⑤", "▶"],
+              ["전혀 그렇지 않다", "매우 그렇다"]]
+    assert scale_columns(legend) is not None      # 기호가 한 행 -> 안내 표
