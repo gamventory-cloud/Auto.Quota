@@ -82,6 +82,10 @@ CHECKS: list[tuple[str, dict, str]] = [
      "빈칸 기입 양식표 → 문자형"),
     ("com1_2_dup2", {"kind": "single", "n_values": 3, "todo": True},
      "변수명 충돌(Com1 격자 항목 vs Com1-2 문항) → 확인필요로 표시"),
+    ("q17_1", {"kind": "multi", "n_values": 4, "value_at": (4, "핸드볼")},
+     "구분자가 탭+공백이거나 공백 하나여도 보기가 흡수되지 않음"),
+    ("q17_4", {"kind": "multi"},
+     "줄 끝 지시문 `[PROG : 4) …]` 이 보기 분리를 방해하지 않음"),
     ("in1_fail", {"kind": "dp_instruction", "label_has": "IN1_FAIL"},
      "[DP: … 변수 만들어주세요] → 변수 생성 + 라벨 유지"),
 ]
