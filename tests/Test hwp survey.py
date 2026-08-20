@@ -454,8 +454,8 @@ def isas_hwpx(tmp_path):
 
 
 def test_isas_numbering_scheme(isas_hwpx):
-    """선별 SQ / 동의 AQ / 본문 Qk-n / 배경 DQ."""
-    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx)))
+    """renumber=True: 선별 SQ / 동의 AQ / 본문 Qk-n / 배경 DQ."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx), renumber=True))
     labels = [b["label"] for b in doc["blocks"] if b["kind"] == "question"]
     assert labels == ["AQ", "SQ1", "SQ2", "Q1-1", "Q1-2", "Q2", "DQ1"]
 
@@ -468,7 +468,7 @@ def test_isas_tag_vocabulary(isas_hwpx):
 
 
 def test_isas_box_options_and_stop_prog(isas_hwpx):
-    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx)))
+    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx), renumber=True))
     sq1 = [b for b in doc["blocks"] if b.get("label") == "SQ1"][0]
     assert [o["text"] for o in sq1["options"]] == ["예", "아니오"]   # □ 보기 분리
     progs = [b["text"] for b in doc["blocks"] if b["kind"] == "prog"]
@@ -476,14 +476,14 @@ def test_isas_box_options_and_stop_prog(isas_hwpx):
 
 
 def test_isas_consent_lines_merge_into_matrix(isas_hwpx):
-    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx)))
+    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx), renumber=True))
     aq = [b for b in doc["blocks"] if b.get("label") == "AQ"][0]
     assert aq["scale"] == ["예", "아니오"]
     assert len(aq["options"]) == 2
 
 
 def test_isas_scale_note_becomes_labels(isas_hwpx):
-    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx)))
+    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx), renumber=True))
     q2 = [b for b in doc["blocks"] if b.get("label") == "Q2"][0]
     assert q2["scale"] == ["전혀 그렇지 않다", "그렇지 않다", "보통이다",
                           "그렇다", "매우 그렇다"]
@@ -878,7 +878,19 @@ def test_recovered_paragraph_placement_keeps_order():
              ("p", "A3-3. 총 비용은 어느 범위입니까?"),
              ("p", "A4. 온라인 예매 경험을 묻습니다.")]
     assert _label_key("A3-2-1. 왜 구매하지 않으셨습니까?") == (1, (3, 2, 1))
-    # 보기 목록 앞, A3-3 뒤가 아니라 앞 -> 보기가 자기 문항을 따라오게 된다
-    assert _place(items, "A3-2-1. 왜 구매하지 않으셨습니까?", 0) == 1
+
+    # 읽던 자리(cursor)가 A3-3 을 지나쳐 버린 경우 -> 번호 차례로 되돌린다
+    assert _place(items, "A3-2-1. 왜 구매하지 않으셨습니까?", len(items)) == 1
+    # 아직 지나치지 않았으면 읽던 자리를 그대로 쓴다
+    assert _place(items, "A3-2-1. 왜 구매하지 않으셨습니까?", 1) == 1
     # 번호가 앞선 문항(A3-3)을 넘어가지 않는다
-    assert _place(items, "A3-4. 좌석은 어디였습니까?", 0) == 3
+    assert _place(items, "A3-4. 좌석은 어디였습니까?", len(items)) == 3
+
+
+def test_isas_keeps_original_labels_by_default(isas_hwpx):
+    """기본값은 원본 번호 유지. [PROG] 지시문이 원본 번호를 가리키기 때문."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(isas_hwpx)))
+    labels = [b["label"] for b in doc["blocks"] if b["kind"] == "question"]
+    assert "S1" in labels and "S2" in labels      # 다시 매기지 않는다
+    assert "배문1" in labels
+    assert not any(l.startswith("DQ") for l in labels)
