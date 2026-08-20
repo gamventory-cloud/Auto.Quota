@@ -67,7 +67,18 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _text_of(el) -> str:
+def _text_of(el, keep_lines: bool = False) -> str:
+    if keep_lines:                                  # 문단마다 한 줄로
+        parts = []
+        for node in el.iter():
+            if _local(node.tag) != "p":
+                continue
+            text = clean("".join(t.text or "" for t in node.iter()
+                                 if _local(t.tag) == "t"))
+            if text:
+                parts.append(text)
+        if len(parts) > 1 and _is_question_block(parts):
+            return "\n".join(parts)      # 문항 덩어리만 줄을 남긴다
     buf = []
     for node in el.iter():
         name = _local(node.tag)
@@ -82,11 +93,13 @@ def _walk_owpml(el, items):
     for child in el:
         name = _local(child.tag)
         if name == "tbl":
+            trs = [n for n in child.iter() if _local(n.tag) == "tr"]
+            single = (len(trs) == 1
+                      and len([c for c in trs[0] if _local(c.tag) == "tc"]) == 1)
             rows = []
-            for tr in child.iter():
-                if _local(tr.tag) != "tr":
-                    continue
-                cells = [_text_of(tc) for tc in tr if _local(tc.tag) == "tc"]
+            for tr in trs:
+                cells = [_text_of(tc, keep_lines=single)
+                         for tc in tr if _local(tc.tag) == "tc"]
                 if any(cells):
                     rows.append(cells)
             if rows:
@@ -145,19 +158,105 @@ def read_hwp(path: str) -> list[tuple[str, object]]:
             raise RuntimeError("변환 결과에서 XHTML을 찾지 못했습니다.")
         with open(html_path, encoding="utf-8") as f:
             soup = BeautifulSoup(f.read(), "lxml")
-        return _items_from_html(soup)
+        items = _items_from_html(soup)
+        return _recover_dropped(path, items)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _block_text(el) -> str:
-    """셀/문단의 텍스트. 내부 <p>(줄 단위)는 공백으로, run 조각은 붙여서."""
+#: 한 칸짜리 표 안에 문항·보기가 통째로 들어 있는지 판별할 때 쓰는 표시들
+_MARKER = re.compile(
+    r"^\s*(?:[①-⑳➀-➉□☐▢]|(?:문|SQ|DQ|Q)?\s*\d{1,2}(?:-\d{1,2})?\s*[.)】])")
+
+
+def _is_question_block(parts) -> bool:
+    """문항이나 보기로 보이는 줄이 둘 이상이면 줄 구분을 살려야 한다."""
+    return sum(1 for x in parts if _MARKER.match(x)) >= 2
+
+
+def _block_text(el, keep_lines: bool = False) -> str:
+    """셀/문단의 텍스트. 내부 <p>(줄 단위)는 공백으로, run 조각은 붙여서.
+
+    keep_lines=True 면 문단 경계를 줄바꿈으로 남긴다. 한 칸짜리 표 안에
+    문항과 보기가 통째로 들어 있는 경우가 많아, 이때는 줄 구분이 필요하다.
+    """
     paras = el.find_all("p")
     if paras:
         parts = [clean(p.get_text("")) for p in paras]
     else:
         parts = [clean(el.get_text(""))]
-    return clean(" ".join(x for x in parts if x))
+    parts = [x for x in parts if x]
+    if keep_lines and len(parts) > 1 and _is_question_block(parts):
+        return "\n".join(parts)          # 문항 덩어리만 줄을 남긴다
+    return clean(" ".join(parts))
+
+
+def _model_paragraphs(path: str) -> list[str]:
+    """HWP 이진 구조에서 문단 텍스트를 순서대로 꺼낸다.
+
+    XHTML 변환기는 글상자 같은 개체 안의 문단을 그리지 않고 버린다.
+    문항 제목이 글상자에 들어 있으면 통째로 사라지므로, 이진 구조를
+    한 번 더 훑어 빠진 문단을 되찾는다.
+    """
+    from hwp5.treeop import STARTEVENT
+    from hwp5.xmlmodel import Hwp5File
+
+    hwp5 = Hwp5File(path)
+    try:
+        indexes = list(hwp5.bodytext.section_indexes())
+        paras, buf = [], []
+        for index in indexes:
+            for event, item in hwp5.bodytext.section(index).events():
+                model = item[0] if isinstance(item, (tuple, list)) else item
+                attrs = (item[1] if isinstance(item, (tuple, list)) and len(item) > 1
+                         and isinstance(item[1], dict) else {})
+                name = getattr(model, "__name__", "")
+                if event is not STARTEVENT:
+                    continue
+                if name == "Paragraph" and buf:
+                    paras.append(clean("".join(buf)))
+                    buf = []
+                elif name == "Text":
+                    text = attrs.get("text", "")
+                    if isinstance(text, str):
+                        buf.append(text)
+        if buf:
+            paras.append(clean("".join(buf)))
+        return [p for p in paras if p]
+    finally:
+        hwp5.close()
+
+
+def _recover_dropped(path: str, items: list) -> list:
+    """XHTML에서 누락된 문단을 이진 구조에서 찾아 제자리에 끼워 넣는다."""
+    try:
+        paragraphs = _model_paragraphs(path)
+    except Exception:                                 # noqa: BLE001
+        return items                                  # 되찾기는 있으면 좋은 기능이다
+
+    pool = "\n".join(v if k == "p" else " ".join(c for r in v for c in r)
+                      for k, v in items)
+    pool = WS.sub("", pool)
+
+    recovered, cursor = [], 0
+    for text in paragraphs:
+        key = WS.sub("", text)
+        if len(key) < 6:
+            continue
+        if key in pool:
+            for n in range(cursor, len(items)):       # 위치를 따라간다
+                kind, payload = items[n]
+                blob = payload if kind == "p" else " ".join(
+                    c for r in payload for c in r)
+                if key in WS.sub("", blob):
+                    cursor = n + 1
+                    break
+            continue
+        recovered.append((cursor, text))
+
+    for offset, (position, text) in enumerate(recovered):
+        items.insert(position + offset, ("p", text))
+    return items
 
 
 def _items_from_html(soup) -> list[tuple[str, object]]:
@@ -168,9 +267,12 @@ def _items_from_html(soup) -> list[tuple[str, object]]:
         if el.find_parent("table") is not None:
             continue                              # 표 내부는 표에서 처리
         if el.name == "table":
+            trs = el.find_all("tr")
+            single = len(trs) == 1 and len(trs[0].find_all(["td", "th"])) == 1
             rows = []
-            for tr in el.find_all("tr"):
-                cells = [_block_text(td) for td in tr.find_all(["td", "th"])]
+            for tr in trs:
+                cells = [_block_text(td, keep_lines=single)
+                         for td in tr.find_all(["td", "th"])]
                 if any(cells):
                     rows.append(cells)
             if rows:
