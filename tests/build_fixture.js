@@ -225,7 +225,21 @@ const body = [
   p("Com1-2 (Com1 응답자만) 다음 중 가장 선호하는 개선안은 무엇입니까? [단수]", { bold: true }),
   p("1) 개선안A 2) 개선안B 3) 개선안C"),
 
-  // 25. DP 작업지시로 생성되는 변수
+  // 25. 구분자가 `탭+공백`, 그리고 줄 끝 지시문에 보기 표시가 들어간 경우
+  //     (둘 다 보기가 앞 라벨에 흡수되어 조용히 사라지던 패턴)
+  p("Q17. 새롭게 도입되었으면 하는 종목을 모두 선택해 주십시오. [복수]", { bold: true }),
+  new Paragraph({
+    children: [
+      new TextRun({ text: "1) 당구" }),
+      new TextRun({ children: [new Tab(), new Tab()] }),
+      new TextRun({ text: " 2) 탁구" }),          // 탭 뒤에 공백
+      new TextRun({ children: [new Tab()] }),
+      new TextRun({ text: "3) e스포츠 4) 핸드볼" }), // 공백 하나로만 구분
+      new TextRun({ text: " [PROG : 4) 기타 제외 보기 rotation]" }), // 지시문 안의 보기 표시
+    ],
+  }),
+
+  // 26. DP 작업지시로 생성되는 변수
   p("[DP: 최초 오답여부: IN1_FAIL 변수 만들어주세요.]"),
 ];
 
