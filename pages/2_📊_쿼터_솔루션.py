@@ -21,7 +21,7 @@
 5. 실행 전 정합성 프리플라이트 : 데이터에 아예 없는 쿼터 셀을 미리 경고
 6. 인덱스 int 강제 캐스팅 제거 (문자열 ID 인덱스에서 죽던 문제)
 7. 시트명 충돌 방지, Main_Status index=False, 0 나누기 가드
-8. 계산 방식 선택 : 정확해(ILP) / 휴리스틱(그리디)
+8. 계산 방식 선택 : 최선 보장(ILP) / 빠른 근사(그리디)
 
 v3 변경점 (추가 쿼터 100% 할당)
 ------------------------------
@@ -67,6 +67,15 @@ v3 변경점 (추가 쿼터 100% 할당)
 20. [버그 수정] preflight_targets 호출에 존재하지 않는 인자를 넘기던 문제
     - main_hard / overflow_weight / ex_tol_* 가 잘못 섞여 들어가 있었다.
       실행 시 TypeError 로 죽는 자리였다. 유효 인자만 넘기도록 수정.
+21. 화면 문구를 일상어로 전면 교체
+    - 해(解)/최적성/희소성/섀도 프라이스/프로파일 같은 최적화 용어를 걷어냈다.
+      "최적해임이 증명되었습니다" -> "이보다 많이 뽑을 수는 없습니다"
+      "물리적 부족 / 경합 부족"   -> "표본이 모자람 / 다른 쿼터에 밀림"
+      "정확해(ILP) / 휴리스틱"    -> "최선 보장(정밀) / 빠른 근사(간이)"
+    - 코드 주석과 함수 문서는 원래 용어를 유지한다(유지보수용).
+22. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+    - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
+      대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
 
 import streamlit as st
@@ -358,23 +367,26 @@ if data_file:
     # ==========================================================================
     st.divider()
     st.subheader("3. 실행 옵션")
-    solver_opts = (["정확해 (ILP)", "휴리스틱 (그리디)"] if HAS_ILP
+    solver_opts = (["최선 보장 (정밀)", "빠른 근사 (간이)"] if HAS_ILP
                    else ["휴리스틱 (그리디)"])
     solver_kind = st.radio(
         "계산 방식", solver_opts, horizontal=True,
-        help=("ILP: 최적해임을 증명하고, 미달 시 어느 상한이 막는지 정확히 알려줍니다. "
-              "그리디: 랜덤 재시작 휴리스틱으로 최적성 보장이 없습니다.")
+        help=("최선 보장: 이보다 많이 뽑는 방법이 없다는 것까지 확인하고 끝냅니다. "
+              "미달하면 어느 쿼터가 막고 있는지도 알려줍니다. 보통 이쪽이 더 빠릅니다. "
+              "빠른 근사: 여러 번 시도해서 제일 좋았던 결과를 씁니다. "
+              "더 나은 조합이 있을 수도 있습니다.")
     )
     if not HAS_ILP:
-        st.caption(f"ℹ️ ILP 사용 불가 (`pip install ortools`) — {ILP_ERR}")
-    use_ilp = solver_kind.startswith("정확해")
+        st.caption(f"ℹ️ '최선 보장' 방식을 쓸 수 없습니다 (`pip install ortools` 필요) "
+                   f"— {ILP_ERR}")
+    use_ilp = solver_kind.startswith("최선 보장")
 
     # ── 추가 쿼터를 상한이 아니라 '목표'로 다룰지 ──────────────────────────
     ex_as_target = st.checkbox(
         "🎯 추가 쿼터도 목표로 100% 맞추기", value=False, disabled=not use_ilp,
         help="끄면 추가 쿼터는 상한으로만 작동합니다(초과 금지, 부족 허용). "
              "켜면 부족도 최소화합니다. 초과는 두 경우 모두 금지됩니다. "
-             "정확해(ILP)에서만 지원합니다.")
+             "'최선 보장' 방식에서만 지원합니다.")
     if ex_as_target:
         st.info(
             "추가 쿼터 그룹이 단일응답이면 **그룹의 목표 합계가 메인 목표 합계와 "
@@ -422,14 +434,31 @@ if data_file:
 
     c1, c2 = st.columns(2)
     with c1:
-        c_no = st.selectbox("ID 컬럼", df_survey.columns)
-        tol = st.number_input("허용 오차", 0, 100, 0)
+        def _col_idx(cols, *names):
+            """컬럼 목록에서 이름이 일치하는 것을 찾아 기본 선택 위치를 돌려준다.
+            대소문자와 앞뒤 공백은 무시한다. 없으면 0(첫 컬럼)."""
+            low = [str(c).strip().lower() for c in cols]
+            for nm in names:
+                if nm.lower() in low:
+                    return low.index(nm.lower())
+            return 0
+
+        cols_all = list(df_survey.columns)
+        c_no = st.selectbox("ID 컬럼", cols_all,
+                            index=_col_idx(cols_all, "id", "no", "번호", "일련번호"))
+        tol = st.number_input(
+            "총 인원 허용 오차(명)", 0, 100, 0,
+            help="목표 인원에서 이 인원까지 모자라도 '달성'으로 봅니다. "
+                 "쿼터별이 아니라 전체 합계 기준입니다. 0이면 한 명도 모자라면 안 됩니다.")
         use_intval = st.checkbox(
             "intval 최적화", value=True,
             help="쿼터 조건이 완전히 같은 응답자들 사이에서, intval 값이 낮은 쪽을 "
                  "먼저 탈락시킵니다. 조건이 다른 응답자끼리는 영향이 없으므로 "
                  "최종 통과 인원수는 달라지지 않습니다.")
-        c_int = st.selectbox("intval 컬럼", df_survey.columns) if use_intval else None
+        c_int = st.selectbox(
+            "intval 컬럼", cols_all,
+            index=_col_idx(cols_all, "intval", "int_val", "intValue")
+        ) if use_intval else None
         if not use_intval:
             rand_pick = st.checkbox(
                 "동일 조건 응답자 무작위 선택", value=True,
@@ -438,25 +467,26 @@ if data_file:
             rand_pick = False
     with c2:
         if use_ilp:
-            time_limit = st.number_input("시간 제한(초)", 5, 600, 60, 5)
+            time_limit = st.number_input(
+                "계산 시간 제한(초)", 5, 600, 60, 5,
+                help="이 시간 안에 끝내지 못하면 그때까지 찾은 가장 좋은 조합을 씁니다.")
             ilp_priority = st.checkbox(
-                "희소 쿼터 우선 채우기", value=True,
-                help="통과 인원을 최대로 확정한 뒤, 대체 인원이 없는 희소한 셀을 "
+                "구하기 어려운 쿼터 먼저 채우기", value=True,
+                help="뽑을 인원을 최대로 확정한 뒤, 대신할 사람이 없는 귀한 조건의 셀을 "
                      "먼저 채웁니다. 총 인원은 줄지 않습니다. 끄면 어느 셀을 "
                      "채울지 임의로 결정됩니다.")
             # [수정] 0.0~1.0 값에 format="%.0f%%" 를 쓰면 0.7 이 "1%" 로 표시됐다.
             min_fill = (st.slider(
                 "셀별 최소 달성률", 0, 100, 70, 5, format="%d%%",
                 disabled=not ilp_priority,
-                help="희소 셀을 우선하더라도 어떤 셀도 이 비율 미만으로 떨어지지 "
+                help="귀한 셀을 먼저 채우더라도 어떤 셀도 이 비율 밑으로 떨어지지 "
                      "않게 합니다. 0%로 두면 흔한 셀이 0명이 될 수 있습니다. "
                      "만족 불가능하면 자동으로 하한 없이 재계산하고 알려줍니다."
             ) / 100.0) if ilp_priority else 0.0
             balance = st.checkbox(
                 "부족분 고르게 분산", value=True,
-                help="희소 셀 우선 배분이 끝난 뒤, 남은 부족이 특정 셀에 몰리지 "
-                     "않도록 재조정합니다. 희소 쿼터 우선보다 뒤 단계이므로 "
-                     "희소 셀의 자리를 빼앗지 않습니다.")
+                help="귀한 셀을 먼저 채운 뒤, 남은 부족분이 특정 셀에 몰리지 않도록 "
+                     "나눠 줍니다. 나중에 적용되므로 귀한 셀의 자리를 빼앗지 않습니다.")
             want_plan = st.checkbox(
                 "미달 시 추가 수집 지시서 계산", value=True,
                 help="메인 쿼터가 미달하면 '어떤 조건의 응답자를 몇 명 더 수집해야 "
@@ -490,7 +520,7 @@ if data_file:
             st.stop()
 
         try:
-            with st.spinner("희소성 계산 및 병렬 연산 중..."):
+            with st.spinner("쿼터 조건 정리 중..."):
                 # ------------------------------------------------------------------
                 # 키 생성 : 설정 화면과 동일한 캐시 함수를 호출한다 (df_proc 불필요)
                 # ------------------------------------------------------------------
@@ -570,7 +600,7 @@ if data_file:
             # 실행 (A) 정확해 : 정수계획법
             # ======================================================================
             if use_ilp:
-                with st.spinner("정수계획법으로 최적해 탐색 중..."):
+                with st.spinner("최적 조합 계산 중..."):
                     ilp_sol = quota_ilp.solve_quota_ilp(
                         m_keys, ex_keys_list, main_map, ex_maps, indices,
                         priority=ilp_priority, balance=balance,
@@ -588,7 +618,7 @@ if data_file:
             # 실행 (B) 휴리스틱 : 랜덤 재시작 그리디
             # ======================================================================
             else:
-              with st.spinner("희소성 계산 및 병렬 연산 중..."):
+              with st.spinner("여러 조합을 시도하는 중..."):
                 # 희소성 점수 : 보유/목표 비율이 낮을수록 먼저 뽑는다
                 if use_main:
                     score_main = np.array([
@@ -680,7 +710,8 @@ if data_file:
                         diff = tgt - act
                         if diff > 0:
                             raw_avail = m_cnt.get(k, 0)
-                            reason = "⚠️ 물리적 부족" if raw_avail < tgt else "⚔️ 경합 부족"
+                            reason = ("⚠️ 표본이 모자람" if raw_avail < tgt
+                                      else "⚔️ 다른 쿼터에 밀림")
                             recs.append({'순서': 0, '구분': '메인 쿼터', '항목': " / ".join(k),
                                          '목표': tgt, '현재': act, '부족': diff,
                                          '진단': reason, '전체보유': raw_avail})
@@ -699,11 +730,11 @@ if data_file:
                         if diff > 0:
                             raw_avail = raw_cnt_map.get(k, 0)
                             if raw_avail < tgt:
-                                reason = "⚠️ 물리적 부족"
+                                reason = "⚠️ 표본이 모자람"
                             elif j in struct_bad:
-                                reason = "⚖️ 구조적 (목표 합계 불일치)"
+                                reason = "⚖️ 목표 합계가 안 맞음"
                             else:
-                                reason = "⚔️ 경합 부족"
+                                reason = "⚔️ 다른 쿼터에 밀림"
                             label = " / ".join(k) if isinstance(k, tuple) else str(k)
                             recs.append({'순서': j + 1, '구분': cfg['name'], '항목': label,
                                          '목표': tgt, '현재': act, '부족': diff,
@@ -787,6 +818,7 @@ if data_file:
                 pd.DataFrame([
                     {'항목': '실행 시각', '값': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')},
                     {'항목': '계산 방식', '값': solver_kind},
+                    {'항목': '총 인원 허용 오차(명)', '값': tol},
                     {'항목': '추가 쿼터 처리', '값': '목표(100% 지향)' if ex_as_target else '상한'},
                     {'항목': '추가 쿼터 허용 편차',
                      '값': (f"±{ex_tol_abs}명" if ex_tol_abs else
@@ -794,11 +826,11 @@ if data_file:
                             "제한 없음" if ex_tol_unlimited else "정확히 맞춤")},
                     {'항목': '목록 밖 값', '값': unlisted},
                     {'항목': '메인 목표 합계', '값': target_total},
-                    {'항목': '허용 오차', '값': tol},
                     {'항목': '선정 인원', '값': len(df_pass)},
                     {'항목': '추가 쿼터 부족', '값': ex_short_sum},
-                    {'항목': 'ILP 시간제한(초)', '값': time_limit},
-                    {'항목': '희소 우선 / 최소달성률', '값': f"{ilp_priority} / {min_fill:.0%}"},
+                    {'항목': '계산 시간 제한(초)', '값': time_limit},
+                    {'항목': '귀한 쿼터 우선 / 최소달성률',
+                     '값': f"{ilp_priority} / {min_fill:.0%}"},
                     {'항목': '부족 분산 / 비율기준', '값': f"{balance} / {balance_rel}"},
                     {'항목': '시도 횟수(휴리스틱)', '값': iters},
                     {'항목': '지터(휴리스틱)', '값': jitter},
@@ -862,7 +894,7 @@ if data_file:
                         f"쿼터 조건이 같은 응답자 중 `{c_int}` 값이 낮은 쪽을 먼저 "
                         "탈락시킨 결과입니다. 조건이 다른 응답자끼리는 비교하지 않으므로 "
                         "통과자 평균이 항상 더 높다고 보장되지는 않습니다 "
-                        "(희소한 셀에서는 값이 낮아도 뽑아야 합니다)."
+                        "(구하기 어려운 셀에서는 값이 낮아도 뽑아야 합니다)."
                     )
 
             # 추가 쿼터 달성 현황 (목표 모드에서만 의미가 있다)
@@ -930,19 +962,21 @@ if data_file:
                 if ilp_sol.proven_optimal:
                     extra = ""
                     if ilp_sol.ex_as_target:
-                        extra = (" 추가 쿼터 부족 합계 "
-                                 f"{sum(ilp_sol.ex_short_total):,}명도 이 조건에서 "
-                                 "최소입니다.")
+                        extra = (f" 추가 쿼터가 모자란 {sum(ilp_sol.ex_short_total):,}명도 "
+                                 "더 줄일 수 없는 최소치입니다.")
                     st.success(
-                        f"✅ **최적해임이 증명되었습니다.** 이 조건에서 {ilp_sol.total:,}명보다 "
-                        f"많이 뽑는 방법은 존재하지 않습니다.{extra} "
-                        f"(프로파일 {ilp_sol.n_profiles:,}개로 집약 / {ilp_sol.solve_sec:.2f}초)"
+                        f"✅ **이보다 많이 뽑을 수는 없습니다.** 지금 쿼터 조건에서 "
+                        f"{ilp_sol.total:,}명이 최대이고, 어떤 조합을 시도해도 이 숫자를 "
+                        f"넘길 수 없다는 것까지 확인했습니다.{extra} "
+                        f"(응답자를 {ilp_sol.n_profiles:,}개 유형으로 묶어 "
+                        f"{ilp_sol.solve_sec:.2f}초 만에 계산)"
                     )
                 else:
                     st.warning(
-                        f"⏱️ 시간 제한({time_limit}초) 내에 최적성을 증명하지 못했습니다 "
-                        f"(상태: {ilp_sol.status}). 현재 해는 유효하지만 더 나은 해가 "
-                        f"있을 수 있습니다. 시간 제한을 늘려보세요."
+                        f"⏱️ {time_limit}초 안에 계산을 끝내지 못했습니다. 아래 결과는 "
+                        f"그때까지 찾은 것 중 가장 좋은 조합이며, 더 나은 조합이 있을 "
+                        f"수도 있습니다. 시간 제한을 늘리면 확인할 수 있습니다. "
+                        f"(내부 상태: {ilp_sol.status})"
                     )
 
                 for _n in getattr(ilp_sol, "notes", []):
@@ -950,42 +984,43 @@ if data_file:
 
                 d = ilp_sol.diagnosis
                 if is_fail:
-                    st.markdown("#### 🧭 왜 목표를 못 채웠는가")
+                    st.markdown("#### 🧭 왜 목표를 못 채웠나")
 
                     if d.group_relax_gain:
-                        rows = [{'추가 쿼터 그룹': ex_configs[j]['name'],
-                                 '이 그룹 상한을 없애면': f"+{gain:,}명 확보 가능"}
+                        rows = [{'추가 쿼터': ex_configs[j]['name'],
+                                 '이 쿼터를 빼면': f"{gain:,}명 더 뽑을 수 있음"}
                                 for j, gain in sorted(d.group_relax_gain.items(),
                                                       key=lambda x: -x[1])]
-                        st.markdown("**어느 그룹이 막고 있는지** "
-                                    "(해당 그룹의 초과 금지를 풀었을 때)")
+                        st.markdown("**어느 쿼터가 막고 있는지** "
+                                    "(그 쿼터를 아예 빼고 계산했을 때)")
                         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                                      hide_index=True)
 
                     if d.value_relax_gain:
                         rows = [{'그룹': ex_configs[j]['name'],
                                  '항목': " / ".join(k) if isinstance(k, tuple) else str(k),
-                                 '상한 +1명당 확보': f"+{gain:,}명"}
+                                 '목표 1명 늘릴 때': f"{gain:,}명 더 뽑힘"}
                                 for (j, k), gain in sorted(d.value_relax_gain.items(),
                                                            key=lambda x: -x[1])]
-                        st.markdown("**한도를 조금만 풀면 효과가 큰 항목** (섀도 프라이스)")
+                        st.markdown("**조금만 늘려주면 효과가 큰 항목**")
                         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                                      hide_index=True)
-                        st.caption("추가 쿼터 상한을 1명 늘렸을 때 전체 확보 인원이 "
-                                   "몇 명 늘어나는지를 실제로 재계산한 값입니다.")
+                        st.caption("이 항목의 목표를 딱 1명 늘려서 다시 계산해 본 결과입니다. "
+                                   "1명 늘렸는데 여러 명이 더 뽑힌다면, 그 항목이 전체를 "
+                                   "막고 있다는 뜻입니다.")
 
                     if not d.group_relax_gain and not d.value_relax_gain:
-                        st.info("추가 쿼터를 전부 해제해도 인원이 늘지 않습니다. "
-                                "미달은 순수하게 **데이터에 해당 응답자가 없어서**입니다. "
-                                "표본을 더 확보하거나 목표를 조정해야 합니다.")
+                        st.info("추가 쿼터를 전부 없애고 계산해도 인원이 늘지 않습니다. "
+                                "**데이터에 그 조건의 응답자가 아예 없어서** 모자란 "
+                                "것입니다. 표본을 더 모으거나 목표를 낮춰야 합니다.")
 
                 if d.binding:
-                    with st.expander(f"한도까지 꽉 찬 추가 쿼터 {len(d.binding)}건 (병목 후보)"):
+                    with st.expander(f"목표를 다 채워 더 못 받는 추가 쿼터 {len(d.binding)}건"):
                         st.dataframe(pd.DataFrame([
                             {'그룹': ex_configs[b['group']]['name'],
                              '항목': " / ".join(b['key']) if isinstance(b['key'], tuple)
                                      else str(b['key']),
-                             '상한': b['cap'], '사용': b['used']}
+                             '목표': b['cap'], '채운 인원': b['used']}
                             for b in d.binding
                         ]), use_container_width=True, hide_index=True)
 
