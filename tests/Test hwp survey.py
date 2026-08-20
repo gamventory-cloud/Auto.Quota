@@ -759,3 +759,93 @@ def test_model_recovery_helper_exists():
     items = [("p", "문 10. 활용 현황 문항입니다."), ("p", "1. 보기")]
     # .hwp 가 아니면 조용히 원본을 그대로 돌려준다(되찾기는 부가 기능)
     assert _recover_dropped("/존재하지/않는/파일.hwp", list(items)) == items
+
+
+# ============================ 보기 표 · [DP:] · 수치 기입 · 양 끝 라벨 척도
+@pytest.fixture
+def option_grid_hwpx(tmp_path):
+    """보기를 여러 칸에 나눈 표, [DP:] 지시문, '( )명' 기입란."""
+    stadiums = table([["① 대구 삼성라이온즈파크", "② 부산 사직야구장"],
+                      ["③ 서울 잠실야구장", "④ 대전 한화생명볼파크"],
+                      ["⑤ 광주 기아챔피언스필드", "기타 구장"]])
+    scale = table([["전혀 없음", "", "", "", "", "", "", "매우 빈번함"],
+                   ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧"]])
+    likert = table([["번호", "문항", "전혀그렇지않다", "", "매우그렇다"],
+                    ["1", "AI 음원은 듣기 좋다.", "①", "②", "③", "④", "⑤",
+                     "⑥", "⑦"],
+                    ["2", "AI 음원은 자연스럽다.", "①", "②", "③", "④", "⑤",
+                     "⑥", "⑦"]])
+    body = [
+        para("SQ2. 귀하의 출생연도는 어떻게 되십니까?"),
+        para("[DP: 20대, 30대, 40대 구간별 결과 분석]"),
+        para("SQ4. 방문한 구장을 모두 선택해 주십시오."),
+        stadiums,
+        para("A2-1. 평균 동반 인원은 몇 명입니까?"),
+        para("()명"),
+        para("Q2. 생성형 AI 음악을 들어본 적이 있습니까?"),
+        scale,
+        para("Q3. 다음 문항에 응답해 주십시오."),
+        likert,
+    ]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "grid.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+    return str(path)
+
+
+def test_options_spread_across_table_cells(option_grid_hwpx):
+    """보기를 여러 칸에 나눠 담은 표는 격자가 아니라 보기 목록이다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(option_grid_hwpx)))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"
+         and "구장을 모두" in b["text"]][0]
+    texts = [o["text"] for o in q["options"]]
+    assert texts[:2] == ["대구 삼성라이온즈파크", "부산 사직야구장"]   # 행 우선
+    assert texts[-1] == "기타 구장"                                  # 기호 없는 보기도
+    assert q["tag"] == "모두 선택"
+
+
+def test_dp_instruction_becomes_data_note(option_grid_hwpx):
+    dsl = items_to_isas_dsl(read_survey(option_grid_hwpx))
+    assert "%검증: 20대, 30대, 40대 구간별 결과 분석" in dsl
+
+
+def test_numeric_input_field(option_grid_hwpx):
+    doc = parse_isas(items_to_isas_dsl(read_survey(option_grid_hwpx)))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"
+         and "동반 인원" in b["text"]][0]
+    assert q["tag"] == "수치형"
+
+
+def test_single_item_scale_becomes_options(option_grid_hwpx):
+    """'전혀 없음 ①…⑧ 매우 빈번함' 안내표는 앞 문항의 보기다(행별 표가 아니다)."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(option_grid_hwpx)))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"
+         and "들어본 적이" in b["text"]][0]
+    texts = [o["text"] for o in q["options"]]
+    assert len(texts) == 8
+    assert texts[0] == "전혀 없음" and texts[-1] == "매우 빈번함"
+
+
+def test_scale_header_drops_index_columns_and_fills_points(option_grid_hwpx):
+    """'번호 | 문항 | 전혀그렇지않다 | | 매우그렇다' -> 7점 라벨."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(option_grid_hwpx)))
+    matrix = [b for b in doc["blocks"] if b["kind"] == "question"
+              and b["tag"].startswith("행별")][0]
+    assert matrix["scale"][0] == "전혀그렇지않다"
+    assert matrix["scale"][-1] == "매우그렇다"
+    assert len(matrix["scale"]) == 7           # 기호 개수에 맞춰 채운다
+    assert "문항" not in matrix["scale"]        # 구분 열 이름은 라벨이 아니다
+
+
+def test_options_after_grid_are_not_dropped():
+    """표(@표:)가 끼어들어도 뒤따르는 보기를 잃지 않는다."""
+    dsl = ("Q1. 지출 항목을 적어 주십시오. [표 응답]\n"
+           "@표: 티켓 구매 비용,()원\n"
+           "@표: 식음료 비용,()원\n"
+           "- 가격이 비싸서\n"
+           "- 원하는 메뉴가 없어서")
+    doc = parse_isas(dsl)
+    q = [b for b in doc["blocks"] if b["kind"] == "question"][0]
+    assert [o["text"] for o in q["options"]] == ["가격이 비싸서", "원하는 메뉴가 없어서"]
