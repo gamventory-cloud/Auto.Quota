@@ -102,6 +102,13 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             rows = payload
             joined = " ".join(c for r in rows for c in r)
 
+            # 한 칸짜리 표 안에 문항과 보기가 통째로 들어 있는 경우가 많다.
+            # 줄 단위로 풀어서 본문과 똑같이 처리한다.
+            if expandable_cell(rows):
+                flat[i:i] = [("p", ln) for ln in rows[0][0].splitlines()
+                             if ln.strip()]
+                continue
+
             opts = option_cell(rows)                # 보기만 담긴 한 칸짜리 표
             if opts:
                 lines += [f"- {strip_circle(o).strip()}"
@@ -242,6 +249,11 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             lines.append(f"! {text}")
             continue
 
+        if (is_marked_option(text) and last_is_question(lines)
+                and not RE_LABEL.match(text) and not RE_NUM_Q.match(text)):
+            lines += option_lines(text)            # 앞 문항에 딸린 보기 줄
+            continue
+
         m = RE_LABEL.match(text)
         if not m and (style == "bare" or has_inline_options(text)
                       or is_sub_numbered(text)):
@@ -351,6 +363,52 @@ def classify_free_line(text: str, lines) -> list[str]:
     if paren and len(text) <= 30:
         return [f"! {paren.group(1)}"]
     return [f"~ {text}"]
+
+
+def expandable_cell(rows) -> bool:
+    """문항·보기가 여러 줄로 들어 있는 한 칸짜리 표인지."""
+    if len(rows) != 1 or len(rows[0]) != 1 or "\n" not in rows[0][0]:
+        return False
+    lines = [l.strip() for l in rows[0][0].splitlines() if l.strip()]
+    if len(lines) < 2:
+        return False
+    marked = sum(1 for l in lines
+                 if is_option_line(l) or RE_LABEL.match(l) or RE_NUM_Q.match(l))
+    return marked >= 2
+
+
+def is_option_line(text: str) -> bool:
+    return bool(RE_OPT_LINE.match(text) or has_inline_options(text))
+
+
+def is_marked_option(text: str) -> bool:
+    """기호(①, □)로 시작하는 보기 줄만. 숫자로 시작하는 줄은 문항일 수 있다."""
+    head = text.strip()[:1]
+    return bool(head and (head in CIRCLED or head in "□☐▢")) or has_inline_options(text)
+
+
+def option_lines(text: str) -> list[str]:
+    """'① 예 ② 아니오' 한 줄을 보기 여러 줄로."""
+    inline = [strip_circle(o).strip() for o in RE_OPT_SPLIT.findall(text)]
+    if len(inline) >= 2:
+        return [f"- {o}" for o in inline if o]
+    boxes = [strip_box(o).strip() for o in RE_BOX_SPLIT.findall(text)]
+    if len(boxes) >= 2:
+        return [f"- {o}" for o in boxes if o]
+    m = RE_OPT_LINE.match(text)
+    return [f"- {m.group(1).strip()}"] if m else []
+
+
+def last_is_question(lines) -> bool:
+    """마지막으로 쓴 줄이 문항이거나 그 보기인지."""
+    for line in reversed(lines):
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("-") or s.startswith("!") or s.startswith("%"):
+            return True
+        return bool(RE_LABEL.match(s) or s.startswith("?."))
+    return False
 
 
 def is_sub_numbered(text: str) -> bool:
