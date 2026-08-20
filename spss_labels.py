@@ -49,7 +49,11 @@ utils.py 와의 관계
 5. SPSS 한도는 바이트 기준 : 값라벨 120B, 변수라벨 256B (한글 1자 = 3B)
    라벨이 한도를 넘으면 문항 서두를 버리고 항목 텍스트를 살린다 (compose_label)
 6. .sps 는 UTF-8 BOM 으로 내보낸다 (SPSS 유니코드 모드에서 한글 보존)
-7. 복수응답 저장 방식(multi_style)
+7. 라벨 검수 : validate() 로 코드북 정합성과 실제 데이터 대조를 검사한다
+     - 데이터에 있는 값이 값라벨에 없으면 '오류' (코드 밀림·척도 시작값 오류 신호)
+     - 복수응답 저장 방식이 데이터와 다르면 '오류'
+     - 생성된 .sav 를 되읽어 라벨이 실제로 들어갔는지 왕복 검증
+8. 복수응답 저장 방식(multi_style)
      category  : 열마다 선택한 보기 코드, 미선택은 공백 (기본) -> MRSETS MCGROUP
      position  : 보기별 열이며 그 열은 자기 코드만 (1열=1, 2열=2 …) -> MCGROUP
      dichotomy : 0=비선택 / 1=선택 더미 -> MRSETS MDGROUP
@@ -77,7 +81,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 
 
@@ -129,7 +133,8 @@ def option_text(match: re.Match) -> str:
 
 # 한 단락 안에 여러 보기가 탭/다중공백으로 붙어있는 경우 분리용
 RE_OPT_SPLIT_LOOSE = re.compile(r"\s+(?=\d{1,2}\s*[.)]\s*\S)")
-RE_OPT_SPLIT = re.compile(rf"(?:\t|\s{{3,}})(?=(?:\d{{1,3}}\s*[.)]|[{CIRCLED_CHARS}])\s*\S)")
+RE_OPT_SPLIT = re.compile(
+    rf"(?:\t[ \t]*|\s{{3,}})(?=(?:\d{{1,3}}\s*[.)]|[{CIRCLED_CHARS}])\s*\S)")
 
 # 라벨에서 제거할 지시문.
 #   - `[PROG: …]` 및 실무에서 흔한 오타 `[RROG:`, `[PROR:`, `[DP:`
@@ -421,13 +426,18 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
                 continue
             if cur is None:
                 continue
-            # 보기 (한 줄에 여러 개일 수 있음)
-            parts = RE_OPT_SPLIT.split(raw)
+            # 보기 (한 줄에 여러 개일 수 있음).
+            # 줄 끝의 지시문(`[PROG : 10) 기타 제외 …]`)에 보기 표시가 들어 있으면
+            # 분리 결과가 어긋나므로 먼저 걷어낸다.
+            opt_src = RE_DIRECTIVE.sub(" ", raw).strip()
+            parts = RE_OPT_SPLIT.split(opt_src)
             hits = [RE_OPTION.match(p.strip()) for p in parts]
-            if not (hits and all(hits) and len(parts) > 1):
+            embedded = any(h and re.search(r"\s\d{1,2}\s*[.)]\s*\S", h.group(0) or "")
+                           for h in hits if h)
+            if embedded or not (hits and all(hits) and len(parts) > 1):
                 # 구분자가 공백 하나뿐인 경우(`1) 개선안A 2) 개선안B`).
                 # 코드가 연속된 번호일 때만 인정해 오탐을 막는다.
-                loose = RE_OPT_SPLIT_LOOSE.split(raw)
+                loose = RE_OPT_SPLIT_LOOSE.split(opt_src)
                 lhits = [RE_OPTION.match(p.strip()) for p in loose]
                 if len(loose) > 1 and all(lhits):
                     codes = [option_code(h) for h in lhits]
@@ -1211,7 +1221,268 @@ def write_sav(variables: list[Var], path: str | Path,
 
 
 # ==============================================================================
-# 4. 화면용 bytes 입출력 계층
+# 4. 라벨 검수 (코드북 정합성 / 데이터 대조)
+# ==============================================================================
+
+# 값라벨이 없어도 정상인 유형 (숫자·문자 입력)
+NO_LABEL_KINDS = {"entry", "text", "numeric", "slider", "rank_entry", "dp_instruction"}
+
+SEVERITY_ORDER = {"오류": 0, "주의": 1, "정보": 2}
+
+
+@dataclass
+class Issue:
+    severity: str      # 오류 | 주의 | 정보
+    variable: str
+    kind: str          # 검사 항목
+    detail: str
+
+
+@dataclass
+class Report:
+    issues: list[Issue] = field(default_factory=list)
+    checked: int = 0
+    matched: int = 0            # 데이터와 매칭된 변수 수
+    data_rows: int = 0
+
+    def add(self, severity: str, variable: str, kind: str, detail: str) -> None:
+        self.issues.append(Issue(severity, variable, kind, detail))
+
+    def counts(self) -> dict[str, int]:
+        out = {"오류": 0, "주의": 0, "정보": 0}
+        for i in self.issues:
+            out[i.severity] = out.get(i.severity, 0) + 1
+        return out
+
+    def to_frame(self) -> pd.DataFrame:
+        rows = sorted(self.issues, key=lambda i: (SEVERITY_ORDER.get(i.severity, 9), i.variable))
+        return pd.DataFrame(
+            [{"심각도": i.severity, "변수": i.variable, "검사항목": i.kind, "내용": i.detail}
+             for i in rows],
+            columns=["심각도", "변수", "검사항목", "내용"],
+        )
+
+
+# ------------------------------------------------------------ 코드북 자체 검사
+
+def multi_groups(variables: list[Var]) -> dict[str, list[Var]]:
+    """복수응답 세트를 접두사로 묶는다."""
+    groups: dict[str, list[Var]] = {}
+    for v in variables:
+        if v.kind == "multi" and (m := re.match(r"^(.*)_\d+$", v.name)):
+            groups.setdefault(m.group(1), []).append(v)
+    return groups
+
+
+def check_codebook(variables: list[Var], report: Report | None = None,
+                   check_gaps: bool = True) -> Report:
+    """데이터 없이 코드북만 보고 잡을 수 있는 문제.
+
+    check_gaps: 코드 불연속 검사. 데이터 대조를 함께 할 때는 실제 사용값으로
+    판단하는 편이 정확하므로 끌 수 있다.
+    """
+    rep = report or Report()
+    rep.checked = len(variables)
+
+    seen: dict[str, int] = {}
+    for v in variables:
+        seen[v.name] = seen.get(v.name, 0) + 1
+    for name, n in seen.items():
+        if n > 1:
+            rep.add("오류", name, "변수명 중복", f"같은 변수명이 {n}번 나옵니다")
+
+    for v in variables:
+        if not v.label.strip():
+            rep.add("오류", v.name, "라벨 없음", "변수라벨이 비어 있습니다")
+        if len(v.label.encode("utf-8")) > 256:
+            rep.add("오류", v.name, "라벨 길이", "변수라벨이 256바이트를 넘습니다")
+
+        for code, lab in v.values.items():
+            if len(lab.encode("utf-8")) > 120:
+                rep.add("오류", v.name, "값라벨 길이",
+                        f"코드 {code} 라벨이 120바이트를 넘습니다 (SPSS 한도)")
+
+        if v.vtype == "string" and v.values:
+            rep.add("오류", v.name, "자료형 불일치",
+                    "문자형 변수에 값라벨이 있습니다 (숫자형이어야 함)")
+
+        if not v.values and v.kind not in NO_LABEL_KINDS and v.measure in ("nominal", "ordinal"):
+            rep.add("주의", v.name, "값라벨 없음",
+                    f"{v.measure} 변수인데 값라벨이 없습니다")
+
+        # 같은 라벨이 두 코드에 붙은 경우 (보기 복사 실수)
+        dupes = [lab for lab, n in pd.Series(list(v.values.values())).value_counts().items()
+                 if n > 1] if v.values else []
+        for lab in dupes[:2]:
+            rep.add("주의", v.name, "값라벨 중복", f"'{lab[:30]}' 이 두 코드에 붙어 있습니다")
+
+        # 코드가 끊긴 경우 (보기 누락 의심). 결측 코드(90 이상)는 제외.
+        #
+        # 척도 문항은 양 끝과 중간에만 라벨을 붙이는 것이 정상이라(예: 1·4·7),
+        # 빈 코드가 많으면 오히려 정상이다. 한두 개만 빠진 경우가 진짜 누락 신호다.
+        codes = sorted(c for c in v.values if c < 90)
+        if check_gaps and len(codes) >= 4:
+            gaps = [c for c in range(codes[0], codes[-1]) if c not in codes]
+            if 0 < len(gaps) <= 2:
+                rep.add("주의", v.name, "코드 불연속",
+                        f"코드 {gaps} 이(가) 빠져 있습니다 (보기 누락인지 확인)")
+
+        if "확인필요" in (v.note or ""):
+            rep.add("주의", v.name, "검수 미완료", v.note[:80])
+
+        for spec in re.split(r"[,\s]+", (v.missing or "").strip()):
+            if spec and re.fullmatch(r"-?\d+", spec) and int(spec) not in v.values:
+                rep.add("정보", v.name, "결측 코드",
+                        f"결측 {spec} 에 대응하는 값라벨이 없습니다")
+
+    # 복수응답 세트 안에서 방식이 섞이면 안 된다
+    for base, members in multi_groups(variables).items():
+        styles = {"더미(0/1)" if "0/1" in (m.note or "") else "보기코드" for m in members}
+        if len(styles) > 1:
+            rep.add("오류", base + "_*", "복수응답 방식 혼재",
+                    f"한 세트 안에 {', '.join(sorted(styles))} 가 섞여 있습니다")
+    return rep
+
+
+# ------------------------------------------------------------ 데이터 대조 검사
+
+def check_against_data(variables: list[Var], data: pd.DataFrame,
+                       report: Report | None = None,
+                       max_examples: int = 5) -> Report:
+    """실제 데이터와 대조. 라벨 검수의 핵심."""
+    rep = report or Report()
+    rep.data_rows = len(data)
+    lower = {str(c).lower(): c for c in data.columns}
+    used: set[str] = set()
+    absent: list[str] = []
+
+    for v in variables:
+        col = lower.get(v.name.lower())
+        if col is None:
+            absent.append(v.name)
+            continue
+        used.add(str(col))
+        rep.matched += 1
+        series = data[col]
+
+        if v.vtype == "string":
+            continue
+
+        numeric = pd.to_numeric(series, errors="coerce")
+        bad = series.notna() & numeric.isna()
+        if bad.any():
+            samples = series[bad].astype(str).unique()[:3]
+            rep.add("오류", v.name, "숫자형에 문자값",
+                    f"{int(bad.sum())}건: {', '.join(samples)}")
+
+        present = numeric.dropna()
+        if present.empty:
+            rep.add("정보", v.name, "전부 결측", "데이터에 유효값이 없습니다")
+            continue
+
+        # 결측으로 지정한 코드는 검사 대상에서 제외
+        missing_codes = {int(m) for m in re.split(r"[,\s]+", (v.missing or "").strip())
+                         if m and re.fullmatch(r"-?\d+", m)}
+
+        if v.values:
+            defined = set(v.values) | missing_codes
+            actual = {int(x) for x in present.unique() if float(x).is_integer()}
+            undefined = sorted(actual - defined)
+            if undefined:
+                # 가장 중요한 신호. 코드가 밀렸거나 척도 시작값이 틀린 경우 여기서 잡힌다.
+                counts = {c: int((present == c).sum()) for c in undefined[:max_examples]}
+                rep.add("오류", v.name, "값라벨에 없는 값",
+                        f"코드 {list(counts)} 이(가) 데이터에 있으나 라벨이 없습니다 "
+                        f"(건수 {list(counts.values())})")
+                # 척도 전체가 한 칸 밀린 전형적인 패턴을 따로 알려준다.
+                # (0부터 코딩된 척도를 1부터로 라벨했거나 그 반대)
+                lo_lab, hi_lab = min(v.values), max(v.values)
+                lo_dat, hi_dat = int(present.min()), int(present.max())
+                shift = lo_dat - lo_lab
+                if shift in (1, -1) and hi_dat - hi_lab == shift:
+                    rep.add("오류", v.name, "코드 밀림 의심",
+                            f"데이터 {lo_dat}~{hi_dat} vs 라벨 {lo_lab}~{hi_lab} — "
+                            f"척도 전체가 {abs(shift)}칸 밀렸습니다 (base0 옵션 확인)")
+
+            unused = sorted(set(v.values) - actual - missing_codes)
+            if unused and len(unused) < len(v.values):
+                rep.add("정보", v.name, "사용되지 않은 코드",
+                        f"코드 {unused[:8]} 이(가) 데이터에 없습니다")
+
+        if v.kind == "multi":
+            dummy = "0/1" in (v.note or "")
+            vals = {int(x) for x in present.unique() if float(x).is_integer()}
+            if dummy and vals - {0, 1}:
+                rep.add("오류", v.name, "복수응답 방식 불일치",
+                        f"0/1 더미로 라벨했으나 데이터에 {sorted(vals - {0, 1})[:5]} 가 있습니다")
+            if not dummy and vals and vals <= {0, 1}:
+                rep.add("오류", v.name, "복수응답 방식 불일치",
+                        "보기 코드로 라벨했으나 데이터는 0/1 더미로 보입니다")
+
+    # 없는 변수가 20개를 넘으면 개별 항목 대신 한 줄로 묶는다.
+    # (일부 문항만 담긴 데이터로 검수하는 경우가 잦다)
+    if len(absent) > 20:
+        rep.add("주의", f"({len(absent)}개)", "데이터에 없음",
+                "코드북에 있으나 데이터에 없는 변수: "
+                + ", ".join(absent[:20]) + f" … 외 {len(absent) - 20}개")
+    else:
+        for name in absent:
+            rep.add("주의", name, "데이터에 없음", "코드북에 있으나 데이터에 열이 없습니다")
+
+    extra = [str(c) for c in data.columns if str(c) not in used]
+    for col in extra[:30]:
+        rep.add("정보", col, "코드북에 없음", "데이터에 있으나 코드북에 없는 열입니다")
+    if len(extra) > 30:
+        rep.add("정보", "(외)", "코드북에 없음", f"그 외 {len(extra) - 30}개 열")
+    return rep
+
+
+def verify_sav(sav_bytes: bytes, variables: list[Var],
+               report: Report | None = None) -> Report:
+    """생성된 .sav 를 되읽어 라벨이 실제로 들어갔는지 확인 (왕복 검증)."""
+    import tempfile
+    from pathlib import Path
+
+    import pyreadstat
+
+    rep = report or Report()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "check.sav"
+        path.write_bytes(sav_bytes)
+        _, meta = pyreadstat.read_sav(str(path), user_missing=True)
+
+    labels = meta.column_names_to_labels
+    value_labels = meta.variable_value_labels
+    for v in variables:
+        if v.name not in labels:
+            rep.add("오류", v.name, "sav 누락", ".sav 에 변수가 없습니다")
+            continue
+        got = labels.get(v.name) or ""
+        if v.label and got.strip() != v.label.strip():
+            rep.add("주의", v.name, "sav 라벨 불일치",
+                    f"코드북 '{v.label[:30]}' vs sav '{got[:30]}'")
+        if v.values:
+            saved = value_labels.get(v.name, {})
+            if len(saved) != len(v.values):
+                rep.add("오류", v.name, "sav 값라벨 개수",
+                        f"코드북 {len(v.values)}개 vs sav {len(saved)}개")
+    return rep
+
+
+def validate(variables: list[Var], data: pd.DataFrame | None = None,
+             sav_bytes: bytes | None = None) -> Report:
+    """전체 검수. 데이터가 있으면 대조까지, .sav 가 있으면 왕복 검증까지."""
+    rep = check_codebook(variables, check_gaps=data is None)
+    if data is not None:
+        check_against_data(variables, data, rep)
+    if sav_bytes is not None:
+        verify_sav(sav_bytes, variables, rep)
+    return rep
+
+
+
+# ==============================================================================
+# 5. 화면용 bytes 입출력 계층
 # ==============================================================================
 
 FIELDS = ["변수명", "문항번호", "문항유형", "변수라벨", "유형", "측도", "값라벨", "결측값", "비고"]
