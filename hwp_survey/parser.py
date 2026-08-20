@@ -432,6 +432,42 @@ def scale_header(rows) -> list[str] | None:
     return labels
 
 
+def titled_matrix(rows):
+    """첫 행이 구역 제목인 표. ('제목', 보기 라벨, 문항 행들) 로 나눈다.
+
+    'Ⅵ. 다음은 …' 한 칸을 표 맨 위에 넣고, 그 아래에 보기 라벨 행을 두는
+    설문지가 많다. 이 경우 제목·라벨 행을 문항으로 오인하면 표가 망가진다.
+    """
+    if len(rows) < 3:
+        return None
+    head = [c.strip() for c in rows[0] if c.strip()]
+    if len(head) != 1 or len(head[0]) < 6:
+        return None
+    labels = scale_header(rows[1:])
+    if not labels:
+        return None
+    return head[0], labels, rows[2:]
+
+
+def qa_rows(rows) -> list[tuple[str, str]] | None:
+    """'귀하의 성별은? | ① 남성 ② 여성' 처럼 한 행이 문항 하나인 표.
+
+    인적사항(Demo) 문항을 이렇게 담는 설문지가 많다.
+    """
+    out = []
+    for row in rows:
+        cells = [c.strip() for c in row if c.strip()]
+        if len(cells) < 2:
+            return None
+        question, rest = cells[0], " ".join(cells[1:])
+        if not re.search(r"[?？]\s*$", question) or len(question) > 60:
+            return None
+        if not any(ch in rest for ch in CIRCLED):
+            return None
+        out.append((question, rest))
+    return out or None
+
+
 def option_table(rows) -> list[str] | None:
     """보기를 여러 칸에 나눠 담은 표. 행 우선(좌→우, 위→아래)으로 읽는다."""
     cells = [c.strip() for r in rows for c in r if c.strip()]
