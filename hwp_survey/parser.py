@@ -43,6 +43,11 @@ RE_ROMAN_HEAD = re.compile(rf"^\s*(?:[{ROMAN}]|[IVX]{{1,4}})\s*[.)]?\s*$")
 RE_SECTION_LINE = re.compile(
     rf"^\s*(?:[{ROMAN}]|[IVX]{{1,4}}|[가-힣])\s*[.)]\s*\S")
 
+#: '□ 예  □ 아니오(설문 종료)' 처럼 네모 기호로 나열한 보기
+RE_BOX_SPLIT = re.compile(r"[□☐▢]\s*[^□☐▢]+")
+#: '※ 1=전혀 그렇지 않다, 3=보통이다, 5=매우 그렇다' 형태의 척도 안내
+RE_SCALE_NOTE = re.compile(r"(\d)\s*=\s*([^,;/]+)")
+
 RE_FOOTNOTE = re.compile(r"^\s*\*{1,3}\s*\S")          # * ** *** 각주
 RE_LEADIN = re.compile(r"^\s*[♣◈▣▶]\s*\S")             # ♣ 다음으로 ...
 RE_FIELDWORK = re.compile(r"^\s*▷?\s*조사원\s*[:：]\s*(.+)$")  # ▷ 조사원: ...
@@ -325,6 +330,29 @@ def header_matrix(rows) -> tuple[list[str], list[str]] | None:
     if len(labels) < 2:
         return None
     return [c for c in head[1:] if c], [f"- {l}" for l in labels]
+
+
+def scale_from_note(text: str, default=None) -> list[str] | None:
+    """'※ 1=전혀 그렇지 않다, 3=보통이다, 5=매우 그렇다' -> 5칸 라벨.
+
+    비어 있는 자리(2, 4번)는 표준 5점 라벨로 채운다.
+    """
+    if "=" not in text:
+        return None
+    pairs = [(int(n), lab.strip()) for n, lab in RE_SCALE_NOTE.findall(text)]
+    pairs = [(n, lab) for n, lab in pairs if lab]
+    if len(pairs) < 2:
+        return None
+    top = max(n for n, _ in pairs)
+    if not 3 <= top <= 10:
+        return None
+    base = list(default or [])
+    if len(base) != top:
+        base = [""] * top
+    out = base[:]
+    for n, lab in pairs:
+        out[n - 1] = lab
+    return out
 
 
 def is_banner(rows) -> bool:
