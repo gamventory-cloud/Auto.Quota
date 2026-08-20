@@ -38,8 +38,8 @@ from .parser import (CIRCLED, END, RE_BOX_SPLIT, RE_FIELDWORK, RE_FOOTNOTE,
                      RE_LEADIN, RE_OPT_CODE, RE_OPT_SPLIT, RE_RESP_TAG,
                      RE_ROMAN_HEAD, code_options, detect_label_style, grid_lines,
                      header_matrix, is_banner, is_prose_table, matrix_rows,
-                     option_cell, option_table, scale_columns, scale_from_note,
-                     scale_header, screening_rows)
+                     option_cell, option_table, qa_rows, scale_columns,
+                     scale_from_note, scale_header, screening_rows, titled_matrix)
 
 # ---------------------------------------------------------------- 상수
 SCALE_5 = ["전혀 그렇지 않다", "그렇지 않다", "보통이다", "그렇다", "매우 그렇다"]
@@ -128,6 +128,16 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
                 lines.append(f"## {rows[0][0].strip()}")
                 continue
 
+            demo = qa_rows(rows)                     # '귀하의 성별은? | ① 남성 ② 여성'
+            if demo:
+                for question, options in demo:
+                    block, _ = read_question([], 0, "?", f"{question} {options}",
+                                             add_matrix_hint, add_alone_prog,
+                                             style, inline_only=True)
+                    lines.append("")
+                    lines.extend(block)
+                continue
+
             screening = screening_rows(rows)         # 'SQ1. 거주 | 1. 서울 2. 부산 …'
             if screening:
                 for raw_label, body in screening:
@@ -146,9 +156,16 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
                 pending_scale = fill_scale(cols)
                 continue
 
-            body_rows, head_labels = rows, scale_header(rows)
-            if head_labels:                         # 첫 행이 보기 라벨 줄이면 분리
-                body_rows = rows[1:]
+            titled = titled_matrix(rows)            # 첫 행이 구역 제목인 표
+            if titled:
+                title, head_labels, body_rows = titled
+                lines.append("")
+                lines.append(f"## {title}")
+            else:
+                body_rows, head_labels = rows, scale_header(rows)
+                if head_labels:                     # 첫 행이 보기 라벨 줄이면 분리
+                    body_rows = rows[1:]
+            if head_labels:
                 # 이 표는 자체 라벨을 가지므로, 앞서 읽어둔 척도 안내표는
                 # 바로 앞 문항의 보기였다는 뜻이다.
                 pending_scale = flush_scale(lines, pending_scale)
