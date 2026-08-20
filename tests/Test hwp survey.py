@@ -725,3 +725,37 @@ def test_two_point_matrix_end_to_end(tmp_path):
     assert q["scale"] == ["예", "아니오"]
     assert len(q["options"]) == 2
     assert not any(b["kind"] == "grid" for b in doc["blocks"])   # 격자로 새지 않는다
+
+
+def test_question_block_inside_single_cell_is_expanded(tmp_path):
+    """한 칸짜리 표 안에 문항+보기가 통째로 든 경우, 문항이 사라지지 않아야 한다."""
+    # 실제 한글 파일처럼 한 셀 안에 문단이 여러 개인 표
+    block = ("<hp:p><hp:run><hp:tbl><hp:tr>"
+             + cell_multi("① 제공함 ☞ 10-5로 이동",
+                          "② 제공하지 않음 ☞ 문 11로 이동",
+                          "10-5. 구독 서비스는 어떠한 형태입니까?",
+                          "① 크레딧 한도 내에서 사용",
+                          "② 추가 비용 없이 사용")
+             + "</hp:tr></hp:tbl></hp:run></hp:p>")
+    body = [para("10-4. 귀하의 대학에서 구독 서비스를 제공하고 있습니까?"), block]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "cell.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+
+    doc = parse_isas(items_to_isas_dsl(read_survey(str(path))))
+    stems = [b["text"] for b in doc["blocks"] if b["kind"] == "question"]
+    assert any("제공하고 있습니까" in s for s in stems)
+    assert any("어떠한 형태입니까" in s for s in stems)      # 상자에 묻히지 않는다
+    first = [b for b in doc["blocks"] if b["kind"] == "question"][0]
+    assert len(first["options"]) == 2                        # 앞 문항의 보기로 붙는다
+
+
+def test_model_recovery_helper_exists():
+    """XHTML 변환기가 버리는 글상자 문단을 이진 구조에서 되찾는 보조 경로."""
+    from hwp_survey.reader import _recover_dropped
+
+    items = [("p", "문 10. 활용 현황 문항입니다."), ("p", "1. 보기")]
+    # .hwp 가 아니면 조용히 원본을 그대로 돌려준다(되찾기는 부가 기능)
+    assert _recover_dropped("/존재하지/않는/파일.hwp", list(items)) == items
