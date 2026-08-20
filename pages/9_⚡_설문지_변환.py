@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """한글 설문지(.hwp/.hwpx) -> 워드(.docx) 변환 페이지.
 
-세 가지 출력 서식을 고를 수 있다.
-  * ISAS 표준     : 부서 표준 서식. 납품본에서 실측한 값으로 재현
-  * DP 스크립트   : 리서치사 납품용. 조사 개요표 + SQ/Q 번호 + [PROG] 지시문
-  * 인쇄용 설문지 : 응답자 배포용. 보기 기호와 체크 칸
+두 가지 출력 서식을 고를 수 있다.
+  * ISAS 표준   : 부서 표준 서식. 납품본에서 실측한 값으로 재현
+  * DP 스크립트 : 리서치사 납품용. 조사 개요표 + SQ/Q 번호 + [PROG] 지시문
 
 문서 처리 로직은 hwp_survey 패키지에 있고, 이 파일은 화면만 담당한다.
 
@@ -21,12 +20,16 @@ import tempfile
 import streamlit as st
 
 import utils
-from hwp_survey import items_to_dsl, parse_dsl, read_survey, summarize
+from hwp_survey import read_survey
 from hwp_survey.dp import DPWriter, items_to_dp_dsl, parse_dp, summarize_dp
 from hwp_survey.isas import (ISASWriter, items_to_isas_dsl, parse_isas,
                              summarize_isas)
-from hwp_survey.verify import compare, docx_text, hwp_text, pdf_text
-from hwp_survey.writer import SurveyWriter
+try:                                     # 검증 기능은 선택 사항
+    from hwp_survey.verify import compare, docx_text, hwp_text, pdf_text
+    VERIFY_READY = True
+except ImportError as err:
+    VERIFY_READY = False
+    VERIFY_ERROR = str(err)
 
 PAGE_TITLE = "설문지 변환 (한글 → 워드)"
 SS = "survey_docx"          # 다른 페이지와 섞이지 않도록 세션 키 접두어
@@ -78,22 +81,6 @@ DP 스크립트와 같은 문법을 쓰고, 번호와 태그만 ISAS 관행으�
 `Qk-1 Qk-2`, 배경 구역 `DQ`. 분류되지 않은 줄은 **빨간색**으로 남습니다(규칙 2-8).
 """
 
-HELP_PRINT = """
-| 표기 | 뜻 |
-|---|---|
-| `# 제목` / `> 안내문` / `~ 상자글` | 표지 요소 |
-| `## Ⅰ. 섹션` | 섹션 제목 |
-| `1. 문항 [단일]` | 문항 + 유형 |
-| `- 보기` | 보기 (표 유형이면 표의 행) |
-| `-- 소제목` | 표 안 소제목 행 |
-| `! 지시문` | 문항 아래 작은 안내 |
-| `@표: 셀,셀,셀` | 원본 표를 격자 그대로 (줄마다 한 행) |
-
-유형 태그: `[단일]` `[복수]` `[단답]` `[장문]` `[척도:1-7]`
-`[표:① 전혀 그렇지 않다,②,③,④,⑤ 매우 그렇다]`
-"""
-
-
 @st.cache_data(show_spinner=False)
 def extract(file_bytes: bytes, suffix: str, tighten: bool, style: str,
             matrix_hint: bool, alone_prog: bool):
@@ -109,33 +96,14 @@ def extract(file_bytes: bytes, suffix: str, tighten: bool, style: str,
              "표": sum(1 for k, _ in items if k == "table")}
     if style == "ISAS 표준":
         return items_to_isas_dsl(items), stats
-    if style == "DP 스크립트":
-        return items_to_dp_dsl(items, add_matrix_hint=matrix_hint,
-                               add_alone_prog=alone_prog), stats
-    return items_to_dsl(items), stats
+    return items_to_dp_dsl(items, add_matrix_hint=matrix_hint,
+                           add_alone_prog=alone_prog), stats
 
 
 def to_csv(rows) -> bytes:
     buf = io.StringIO()
     csv.writer(buf).writerows(rows)
     return buf.getvalue().encode("utf-8-sig")       # 엑셀에서 한글 깨지지 않게
-
-
-def items_csv_print(blocks) -> bytes:
-    rows = [["문항번호", "유형", "섹션", "문항", "보기/세부항목"]]
-    section, qno = "", 0
-    for b in blocks:
-        if b["kind"] == "section":
-            section = b["text"]
-        elif b["kind"] == "question":
-            qno += 1
-            items = [o["text"] for o in b["options"] if o["type"] == "row"]
-            if b["type"] == "표":
-                rows += [[f"{qno}-{i}", b["type"], section, b["text"], t]
-                         for i, t in enumerate(items, 1)]
-            else:
-                rows.append([qno, b["type"], section, b["text"], " | ".join(items)])
-    return to_csv(rows)
 
 
 def items_csv_dp(doc) -> bytes:
@@ -153,14 +121,13 @@ def items_csv_dp(doc) -> bytes:
 
 
 def help_text(style):
-    return {"ISAS 표준": HELP_ISAS, "DP 스크립트": HELP_DP}.get(style, HELP_PRINT)
+    return HELP_ISAS if style == "ISAS 표준" else HELP_DP
 
 
 with st.sidebar:
     st.subheader("출력 서식")
-    style = st.radio("서식", ["ISAS 표준", "DP 스크립트", "인쇄용 설문지"], index=0,
-                     captions=["부서 표준 서식", "리서치사 납품용 스크립트",
-                               "응답자 배포용 설문지"],
+    style = st.radio("서식", ["ISAS 표준", "DP 스크립트"], index=0,
+                     captions=["부서 표준 서식", "리서치사 납품용 스크립트"],
                      label_visibility="collapsed")
     st.divider()
 
@@ -204,17 +171,6 @@ with st.sidebar:
         font = st.selectbox("글꼴", ["나눔고딕", "맑은 고딕", "함초롬돋움"], index=0)
         base_pt = st.slider("글자 크기(pt)", 9.0, 11.0, 10.0, 0.5)
         row_label_cm = st.slider("행별 표 문항열 너비(cm)", 7.0, 12.0, 9.85, 0.05)
-    else:
-        matrix_hint = alone_prog = False
-        st.subheader("문서 서식")
-        font = st.selectbox("한글 글꼴",
-                            ["맑은 고딕", "함초롬돋움", "바탕", "굴림", "나눔고딕"], index=0)
-        base_pt = st.slider("본문 글자 크기(pt)", 9.0, 12.0, 10.5, 0.5)
-        single_mark = st.selectbox("단일 응답 기호", ["○", "□", "( )"], index=0)
-        multi_mark = st.selectbox("복수 응답 기호", ["□", "☐", "[ ]"], index=0)
-        row_label_cm = st.slider("표 첫 열 너비(cm)", 5.0, 12.0, 9.0, 0.5)
-        accent = st.color_picker("섹션 제목 색", "#1F3B63")
-
     st.divider()
     st.subheader("추출 옵션")
     tighten = st.toggle(
@@ -316,24 +272,6 @@ with right:
         docx_bytes = DPWriter(font=font, base_pt=base_pt,
                               row_label_cm=row_label_cm).write(doc).to_bytes()
         csv_bytes = items_csv_dp(doc)
-    else:
-        blocks = parse_dsl(dsl)
-        found = summarize(blocks)
-        c, d = st.columns(2)
-        c.metric("문항", found["문항"])
-        d.metric("섹션", found["섹션"])
-        e, f = st.columns(2)
-        e.metric("매트릭스 표", found["매트릭스 표"])
-        f.metric("매트릭스 세부항목", found["매트릭스 세부항목"])
-        st.metric("그대로 옮긴 표", found["일반 표"],
-                  help="분류되지 않은 원본 표(빈도 표, 기입 표)를 격자 그대로 옮긴 개수")
-        empty = found["문항"] == 0
-        docx_bytes = SurveyWriter(
-            font=font, base_pt=base_pt, single_mark=single_mark,
-            multi_mark=multi_mark, row_label_cm=row_label_cm,
-            accent=accent.lstrip("#").upper()).write(blocks).to_bytes()
-        csv_bytes = items_csv_print(blocks)
-
     if empty:
         st.warning("문항을 찾지 못했습니다. 왼쪽 텍스트의 문항 줄 형식을 확인해 주세요.")
 
@@ -350,6 +288,10 @@ with right:
 
 st.divider()
 st.subheader("변환 누락 검증")
+if not VERIFY_READY:
+    st.info(f"검증 기능을 불러오지 못했습니다 ({VERIFY_ERROR}). "
+            "hwp_survey/verify.py 와 requirements.txt 의 pypdf 를 확인해 주세요.")
+    st.stop()
 st.caption("한글에서 '다른 이름으로 저장 → PDF'로 저장한 원본을 올리면, 변환 결과와 "
            "문장 단위로 대조해 빠진 내용을 찾습니다.")
 
