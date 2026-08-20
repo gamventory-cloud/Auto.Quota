@@ -12,3 +12,13 @@ from .dp import DPWriter, build_dp_docx, items_to_dp_dsl, parse_dp, summarize_dp
 
 __all__ += ["DPWriter", "build_dp_docx", "items_to_dp_dsl", "parse_dp",
             "summarize_dp"]
+
+from .isas import (ISASWriter, build_isas_docx, items_to_isas_dsl, parse_isas,  # noqa: E402
+                   summarize_isas)
+
+__all__ += ["ISASWriter", "build_isas_docx", "items_to_isas_dsl", "parse_isas",
+            "summarize_isas"]
+
+from .verify import compare, compare_files, docx_text, pdf_text  # noqa: E402
+
+__all__ += ["compare", "compare_files", "docx_text", "pdf_text"]
