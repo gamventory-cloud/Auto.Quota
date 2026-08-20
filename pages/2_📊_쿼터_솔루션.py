@@ -59,6 +59,14 @@ v3 변경점 (추가 쿼터 100% 할당)
 18. 편차 분산에 제곱 편차 단계 추가
     - 최소최대만 쓰면 물리적으로 불가피한 큰 편차 하나가 최댓값을 포화시켜
       나머지를 고르게 나눌 동기가 사라진다 (자영 -84 vs 전문/자영/기타 각 -28)
+19. '메인 쿼터를 하드 쿼터로' 옵션 제거
+    - 사전식 최적화라 메인은 이미 사실상 하드다. 켜고 끄고에 따라 결과가
+      달라지는 경우는 메인이 달성 불가능할 때뿐인데, 그때는 자동 완화로
+      되돌아가므로 결국 같은 결과가 된다. 혼란만 주어 화면에서 뺐다.
+    - quota_ilp 의 main_hard 인자는 기본값 False 로 남겨 호환을 유지한다.
+20. [버그 수정] preflight_targets 호출에 존재하지 않는 인자를 넘기던 문제
+    - main_hard / overflow_weight / ex_tol_* 가 잘못 섞여 들어가 있었다.
+      실행 시 TypeError 로 죽는 자리였다. 유효 인자만 넘기도록 수정.
 """
 
 import streamlit as st
@@ -404,17 +412,13 @@ if data_file:
         ex_overflow, overflow_weight = False, 1
         ex_tol_abs, ex_tol_pct, ex_tol_unlimited = 0, 0.0, False
 
-    main_hard = st.checkbox(
-        "🔒 메인 쿼터를 하드 쿼터로", value=False, disabled=not use_ilp,
-        help="셀별 목표를 정확히 충족시킵니다. 물리적으로 불가능하면 해가 사라지므로, "
-             "그때는 자동으로 부족 허용 방식으로 되돌리고 사유를 알려줍니다. "
-             "참고: 사전식 최적화라 이 옵션을 끄더라도 메인 쿼터가 우선이며, "
-             "추가 쿼터 때문에 메인이 깎이는 일은 없습니다.")
-    if main_hard and ex_as_target:
-        st.caption(
-            "메인·추가 둘 다 하드로 걸고 시작합니다. 정확히 맞출 수 없으면 "
-            "추가 쿼터 편차를 먼저 풀고(총 인원은 유지), 그래도 안 되면 메인 "
-            "부족을 허용합니다. 어느 단계에서 풀렸는지 실행 후 알려드립니다.")
+    # [제거] '메인 쿼터를 하드 쿼터로' 옵션
+    #   사전식 최적화라 1단계에서 메인 부족을 최소화하고 그 값을 고정한 뒤에야
+    #   추가 쿼터를 다룬다. 따라서 메인이 달성 가능하면 이 옵션과 무관하게 항상
+    #   100% 채워지고, 추가 쿼터에 양보하는 일은 구조적으로 없다.
+    #   달성 불가능할 때만 동작이 갈리는데 그때는 INFEASIBLE 이 나서 자동 완화로
+    #   되돌아가므로 결국 끈 것과 같은 결과가 된다. 혼란만 주어 화면에서 뺐다.
+    #   quota_ilp.solve_quota_ilp 의 main_hard 인자는 기본값 False 로 남아 있다.
 
     c1, c2 = st.columns(2)
     with c1:
@@ -522,10 +526,7 @@ if data_file:
                     pre = quota_ilp.preflight_targets(
                         m_keys, ex_keys_list, main_map, ex_maps,
                         ex_as_target=ex_as_target, unlisted=unlisted,
-                        main_hard=main_hard, ex_overflow=ex_overflow,
-                        overflow_weight=overflow_weight,
-                        ex_tol_abs=ex_tol_abs, ex_tol_pct=ex_tol_pct,
-                        ex_tol_unlimited=ex_tol_unlimited)
+                        ex_overflow=ex_overflow)
                 else:
                     ghosts = [k for k in main_map if m_cnt.get(k, 0) == 0]
                     if ghosts:
@@ -577,7 +578,7 @@ if data_file:
                         min_fill=min_fill, time_limit=time_limit,
                         workers=n_cores, rng=pick_rng, tiebreak=tiebreak,
                         ex_as_target=ex_as_target, unlisted=unlisted,
-                        main_hard=main_hard, ex_overflow=ex_overflow,
+                        ex_overflow=ex_overflow,
                         overflow_weight=overflow_weight,
                         ex_tol_abs=ex_tol_abs, ex_tol_pct=ex_tol_pct,
                         ex_tol_unlimited=ex_tol_unlimited)
@@ -787,7 +788,6 @@ if data_file:
                     {'항목': '실행 시각', '값': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')},
                     {'항목': '계산 방식', '값': solver_kind},
                     {'항목': '추가 쿼터 처리', '값': '목표(100% 지향)' if ex_as_target else '상한'},
-                    {'항목': '메인 하드 쿼터', '값': main_hard},
                     {'항목': '추가 쿼터 허용 편차',
                      '값': (f"±{ex_tol_abs}명" if ex_tol_abs else
                             f"±{ex_tol_pct:.0%}" if ex_tol_pct else
