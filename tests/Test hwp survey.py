@@ -691,3 +691,37 @@ def test_scale_legend_not_confused_with_matrix():
     legend = [["◀", "①", "②", "③", "④", "⑤", "▶"],
               ["전혀 그렇지 않다", "매우 그렇다"]]
     assert scale_columns(legend) is not None      # 기호가 한 행 -> 안내 표
+
+
+def test_two_point_yes_no_matrix():
+    """'예 / 아니오' 두 칸짜리 표도 매트릭스다(5점으로 오인하거나 격자로 흘리지 않는다)."""
+    from hwp_survey.parser import matrix_rows, scale_header
+
+    rows = [["문항", "예", "", "아니오", ""],
+            ["1.", "남이 잘 된 것이 부러웠던 적이 있다.", "①", "", "②", ""],
+            ["2.", "가끔씩 나는 분하게 느낀다.", "①", "", "②", ""]]
+    assert scale_header(rows) == ["예", "아니오"]
+    assert matrix_rows(rows[1:], min_marks=2) == [
+        "- 1. 남이 잘 된 것이 부러웠던 적이 있다.",
+        "- 2. 가끔씩 나는 분하게 느낀다.",
+    ]
+    assert matrix_rows(rows[1:]) is None          # 5점 기준으로는 잡히지 않는다
+
+
+def test_two_point_matrix_end_to_end(tmp_path):
+    yes_no = table([["문항", "예", "", "아니오", ""],
+                    ["1.", "남이 잘 된 것이 부러웠던 적이 있다.", "①", "", "②", ""],
+                    ["2.", "가끔씩 나는 분하게 느낀다.", "①", "", "②", ""]])
+    body = [para("문 15. 다음 각 문항에 응답해 주십시오."), yes_no]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "yesno.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+
+    doc = parse_isas(items_to_isas_dsl(read_survey(str(path))))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"][0]
+    assert q["tag"] == "행별 1개 선택"
+    assert q["scale"] == ["예", "아니오"]
+    assert len(q["options"]) == 2
+    assert not any(b["kind"] == "grid" for b in doc["blocks"])   # 격자로 새지 않는다
