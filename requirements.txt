@@ -22,3 +22,10 @@ python-docx>=1.1.0
 pyhwp>=0.1b15
 beautifulsoup4>=4.12
 lxml>=5.0
+python-docx>=1.1.0      # 워드 문서 생성
+pyhwp>=0.1b15           # .hwp (HWP 5.x) 읽기
+beautifulsoup4>=4.12    # pyhwp가 내놓는 XHTML 파싱
+lxml>=5.0               # 위 파서 백엔드 / .hwpx XML
+pypdf>=5.0             # 원본 PDF 텍스트 읽기 (누락 검증)
+pdfplumber>=0.11       # 표 많은 PDF 대비 폴백
+ 
