@@ -23,12 +23,15 @@ CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳➀➁➂
 ROMAN = "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ"
 
 # '1.' '문1.' 뿐 아니라 리서치 표기인 'SQ1.' 'Q1.' 'DQ1.'도 문항으로 본다
-RE_Q = re.compile(r"^\s*(?:문\s*|SQ\s*|DQ\s*|Q\s*)?(\d{1,2})\s*[.)]\s*(.+)$",
+#: 문항 번호 뒤에는 '.' ')' 말고도 '】' 같은 기호가 쓰인다. 하위 번호(5-1)도 있다.
+END = r"[.)\]】〕〉>]"
+RE_Q = re.compile(rf"^\s*(?:문\s*|SQ\s*|DQ\s*|Q\s*)?(\d{{1,2}}(?:-\d{{1,2}})?)\s*{END}\s*(.+)$",
                   re.IGNORECASE)
 #: '문1.' 'SQ1.' 처럼 접두어가 붙은 문항. 이 표기를 쓰는 설문지에서는
 #: 맨 앞이 숫자인 줄('1. 읽었다')은 문항이 아니라 보기다.
-RE_Q_PREFIXED = re.compile(r"^\s*((?:문|SQ|DQ|Q)\s*\d{1,3})\s*[.)]\s*(.+)$",
-                           re.IGNORECASE)
+RE_Q_PREFIXED = re.compile(
+    rf"^\s*((?:문|SQ|DQ|Q)\s*\d{{1,3}}(?:-\d{{1,2}})?)\s*{END}\s*(.+)$",
+    re.IGNORECASE)
 #: 한 줄에 코드 보기가 여러 개 있는 경우: '1. 서울 2. 부산 3. 대구'
 RE_CODE_SPLIT = re.compile(r"(?:(?<=^)|(?<=\s))(\d{1,4})\.\s*([^\d]|\d(?!\s*\.))+?(?=\s+\d{1,4}\.\s|$)")
 #: 문항 끝에 붙은 응답 방식 표기
@@ -278,6 +281,14 @@ def scale_columns(rows) -> list[str] | None:
     """척도 안내 표를 열 라벨로. 예: ['① 전혀 그렇지 않다','②','③','④','⑤ 매우 그렇다']"""
     if len(rows) > 3:
         return None
+    # 안내 표는 기호가 한 행에만 있다. 여러 행에 기호가 있으면 응답을 받는
+    # 매트릭스이므로 안내 표로 삼키면 문항이 통째로 사라진다.
+    mark_rows = [r for r in rows
+                 if sum(1 for c in r if c.strip() in list(CIRCLED)) >= 3]
+    if len(mark_rows) != 1:
+        return None
+    if any(len(c.strip()) > 30 for r in rows for c in r):
+        return None
     flat = " ".join(c for r in rows for c in r)
     marks = [c for c in flat if c in CIRCLED]
     if len(marks) < 3 or not any(k in flat for k in SCALE_HINTS):
@@ -371,6 +382,40 @@ def screening_rows(rows) -> list[tuple[str, str]] | None:
             return None
         out.append((r[0].strip(), " ".join(c for c in r[1:] if c).strip()))
     return out or None
+
+
+def is_prose_table(rows) -> bool:
+    """안내문·동의서처럼 긴 글이 담긴 표. 격자로 옮기면 오히려 읽기 나빠진다."""
+    cells = [c.strip() for r in rows for c in r if c.strip()]
+    if not cells:
+        return False
+    longest = max(len(c) for c in cells)
+    return longest >= 80 or (sum(len(c) for c in cells) >= 200 and len(cells) <= 6)
+
+
+def option_cell(rows) -> str | None:
+    """'① 30분 미만 ② 30분 이상 …' 처럼 보기만 담긴 한 칸짜리 표."""
+    if len(rows) != 1 or len(rows[0]) != 1:
+        return None
+    text = rows[0][0]
+    return text if len(RE_OPT_SPLIT.findall(text)) >= 2 else None
+
+
+def scale_header(rows) -> list[str] | None:
+    """표 첫 행이 보기 라벨 줄인지 판별해 라벨만 돌려준다.
+
+    '문항 | 전혀 없음 | | 거의 없음 | … ' 처럼 빈 칸이 섞여 있어도 된다.
+    """
+    if not rows:
+        return None
+    head = [c.strip() for c in rows[0]]
+    if any(ch in c for c in head for ch in CIRCLED):
+        return None
+    labels = [c for c in head[1:] if c]
+    if len(labels) < 3:
+        return None
+    body_marks = sum(1 for r in rows[1:] for c in r if c.strip() in list(CIRCLED))
+    return labels if body_marks >= 3 else None
 
 
 def grid_lines(rows) -> list[str]:
