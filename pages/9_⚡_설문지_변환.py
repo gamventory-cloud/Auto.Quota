@@ -83,7 +83,7 @@ DP 스크립트와 같은 문법을 쓰고, 번호와 태그만 ISAS 관행으�
 
 @st.cache_data(show_spinner=False)
 def extract(file_bytes: bytes, suffix: str, tighten: bool, style: str,
-            matrix_hint: bool, alone_prog: bool):
+            matrix_hint: bool, alone_prog: bool, renumber: bool = False):
     """업로드 파일에서 문단·표를 뽑아 중간 텍스트로. 바이트가 같으면 재사용된다."""
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(file_bytes)
@@ -95,7 +95,7 @@ def extract(file_bytes: bytes, suffix: str, tighten: bool, style: str,
     stats = {"문단": sum(1 for k, _ in items if k == "p"),
              "표": sum(1 for k, _ in items if k == "table")}
     if style == "ISAS 표준":
-        return items_to_isas_dsl(items), stats
+        return items_to_isas_dsl(items, renumber=renumber), stats
     return items_to_dp_dsl(items, add_matrix_hint=matrix_hint,
                            add_alone_prog=alone_prog), stats
 
@@ -149,8 +149,15 @@ with st.sidebar:
         row_label_cm = st.slider("행별 표 문항열 너비(cm)", 6.0, 12.0, 8.82, 0.01)
         doc_header = st.text_input("머리말(문서 상단)", "",
                                   placeholder="비우면 설문 제목이 들어갑니다")
+
+        st.subheader("자동 처리")
+        renumber = st.toggle(
+            "문항 번호 다시 매기기 (SQ / Q1-1 / DQ)", value=False,
+            help="끄면 원본 번호(문1, A3-2, B0 …)를 그대로 씁니다. "
+                 "[PROG] 지시문이 원본 번호를 가리키므로 기본값은 끄기입니다.")
         matrix_hint = alone_prog = False
     elif style == "DP 스크립트":
+        renumber = False
         st.subheader("조사 개요")
         quota_note = st.text_input("쿼터 설명", "성별*연령대별 균등할당")
         exclude = st.text_input("개요표 마지막 줄(형광)", "",
@@ -188,12 +195,13 @@ if uploaded is None:
     st.stop()
 
 suffix = os.path.splitext(uploaded.name)[1].lower()
-key = f"{uploaded.name}:{uploaded.size}:{tighten}:{style}:{matrix_hint}:{alone_prog}"
+key = (f"{uploaded.name}:{uploaded.size}:{tighten}:{style}"
+       f":{matrix_hint}:{alone_prog}:{renumber}")
 
 try:
     with st.spinner("한글 파일에서 문단과 표를 읽는 중"):
         auto_dsl, stats = extract(uploaded.getvalue(), suffix, tighten, style,
-                                  matrix_hint, alone_prog)
+                                  matrix_hint, alone_prog, renumber)
 except Exception as err:                                        # noqa: BLE001
     st.error(f"파일을 읽지 못했습니다: {err}")
     st.caption("한글에서 '다른 이름으로 저장 → HWPX'로 저장한 파일이 가장 잘 읽힙니다.")
