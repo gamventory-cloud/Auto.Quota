@@ -134,7 +134,9 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             body_rows, head_labels = rows, scale_header(rows)
             if head_labels:                         # 첫 행이 보기 라벨 줄이면 분리
                 body_rows = rows[1:]
-            matrix = matrix_rows(body_rows)
+            # 보기가 둘뿐인 표(예/아니오)는 행마다 기호도 둘뿐이다
+            min_marks = max(2, min(3, len(head_labels))) if head_labels else 3
+            matrix = matrix_rows(body_rows, min_marks=min_marks)
             head = head_labels or pending_scale
             if matrix is None:
                 fallback = header_matrix(body_rows)
