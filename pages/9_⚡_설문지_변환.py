@@ -151,6 +151,10 @@ with st.sidebar:
                                   placeholder="비우면 설문 제목이 들어갑니다")
 
         st.subheader("자동 처리")
+        split_matrix = st.slider(
+            "행별 표 최대 행 수 (0 = 쪼개지 않음)", 0, 40, 0, 1,
+            help="이 행 수를 넘는 행별 표를 여러 문항으로 등분합니다. "
+                 "예: 20으로 두면 24행 표가 12행 + 12행 두 문항이 됩니다.")
         renumber = st.toggle(
             "문항 번호 다시 매기기 (SQ / Q1-1 / DQ)", value=False,
             help="끄면 원본 번호(문1, A3-2, B0 …)를 그대로 씁니다. "
@@ -158,6 +162,7 @@ with st.sidebar:
         matrix_hint = alone_prog = False
     elif style == "DP 스크립트":
         renumber = False
+        split_matrix = 0
         st.subheader("조사 개요")
         quota_note = st.text_input("쿼터 설명", "성별*연령대별 균등할당")
         exclude = st.text_input("개요표 마지막 줄(형광)", "",
@@ -235,7 +240,7 @@ with right:
     b.metric("표", stats["표"])
 
     if style == "ISAS 표준":
-        doc = parse_isas(dsl)
+        doc = parse_isas(dsl, split_matrix=split_matrix)
         doc["대상자"] = target or doc["대상자"]
         doc["샘플수"] = sample or doc["샘플수"]
         doc["쿼터"] = quota_note or doc["쿼터"]
