@@ -14,6 +14,8 @@ def main():
     ap.add_argument("--from-dsl", action="store_true",
                     help="src를 중간 텍스트(.txt)로 간주하고 바로 렌더링")
     ap.add_argument("--font", default=None, help="한글 글꼴")
+    ap.add_argument("--split-matrix", type=int, default=0, metavar="N",
+                    help="행별 표가 N행을 넘으면 여러 문항으로 등분(0=끄기)")
     ap.add_argument("--renumber", action="store_true",
                     help="ISAS 번호 체계(SQ/Q1-1/DQ)로 다시 매긴다. "
                          "기본은 원본 번호 유지")
@@ -37,7 +39,7 @@ def main():
         print("중간 텍스트:", args.dsl)
 
     if args.style == "isas":
-        doc = parse_isas(dsl)
+        doc = parse_isas(dsl, split_matrix=args.split_matrix)
         print("인식:", summarize_isas(doc))
         ISASWriter(**({"font": args.font} if args.font else {})).write(doc).save(args.dst)
     else:
