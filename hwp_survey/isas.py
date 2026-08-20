@@ -36,6 +36,7 @@ TAGS = {
     "출생년도 입력": "출생연도로 응답",
     "지도에서 선택": "1개 선택",
     "표 응답": "표 응답",
+    "수치 입력": "수치형",
 }
 RE_PART = re.compile(r"^##\s*(?:PART|파트)\s*(\d+)", re.I)
 RE_SCREEN = re.compile(r"선별|선정|스크리닝|screen", re.I)
@@ -440,7 +441,7 @@ class ISASWriter:
                 if b["tag"].startswith("행별") or b["tag"].startswith("열별"):
                     stem.paragraph_format.keep_with_next = True
                     self.matrix(b)
-                elif "연도" in b["tag"] or "수치" in b["tag"]:
+                elif "연도" in b["tag"] or "수치" in b["tag"] or "형" == b["tag"][-1:]:
                     self.para("(          )")
                 else:
                     self.options(b["options"])
