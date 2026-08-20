@@ -302,11 +302,15 @@ def scale_columns(rows) -> list[str] | None:
     return cols
 
 
-def matrix_rows(rows) -> list[str] | None:
-    """리커트 표 -> ['-- 소제목', '- 1. 문항', ...]. 매트릭스가 아니면 None."""
+def matrix_rows(rows, min_marks: int = 3) -> list[str] | None:
+    """리커트 표 -> ['-- 소제목', '- 1. 문항', ...]. 매트릭스가 아니면 None.
+
+    min_marks: 한 행에 보기 기호가 몇 개 있어야 응답 행으로 볼지.
+        예/아니오처럼 보기가 둘뿐인 표는 2로 낮춰 호출한다.
+    """
     scored = [r for r in rows
               if len(r) >= 3 and sum(1 for c in r if c.strip() in
-                                     [ch for ch in CIRCLED]) >= 3]
+                                     [ch for ch in CIRCLED]) >= min_marks]
     if len(scored) < 2:
         return None
 
@@ -315,7 +319,7 @@ def matrix_rows(rows) -> list[str] | None:
         cells = [c.strip() for c in r]
         marks = sum(1 for c in cells if c in [ch for ch in CIRCLED])
         texts = [c for c in cells if c and c not in [ch for ch in CIRCLED]]
-        if marks >= 3 and texts:
+        if marks >= min_marks and texts:
             num = texts[0] if texts[0].isdigit() else None
             body = " ".join(texts[1:]) if num else " ".join(texts)
             body = re.sub(r"\s+([,.?!)])", r"\1", body)
@@ -412,10 +416,10 @@ def scale_header(rows) -> list[str] | None:
     if any(ch in c for c in head for ch in CIRCLED):
         return None
     labels = [c for c in head[1:] if c]
-    if len(labels) < 3:
+    if len(labels) < 2:                       # '예 / 아니오' 2점 표도 매트릭스다
         return None
     body_marks = sum(1 for r in rows[1:] for c in r if c.strip() in list(CIRCLED))
-    return labels if body_marks >= 3 else None
+    return labels if body_marks >= len(labels) else None
 
 
 def grid_lines(rows) -> list[str]:
