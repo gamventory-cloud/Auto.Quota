@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """한글 설문지(.hwp/.hwpx) -> 워드(.docx) 변환 페이지.
 
-두 가지 출력 서식을 고를 수 있다.
+세 가지 출력 서식을 고를 수 있다.
+  * ISAS 표준     : 부서 표준 서식. 납품본에서 실측한 값으로 재현
   * DP 스크립트   : 리서치사 납품용. 조사 개요표 + SQ/Q 번호 + [PROG] 지시문
   * 인쇄용 설문지 : 응답자 배포용. 보기 기호와 체크 칸
 
@@ -22,6 +23,9 @@ import streamlit as st
 import utils
 from hwp_survey import items_to_dsl, parse_dsl, read_survey, summarize
 from hwp_survey.dp import DPWriter, items_to_dp_dsl, parse_dp, summarize_dp
+from hwp_survey.isas import (ISASWriter, items_to_isas_dsl, parse_isas,
+                             summarize_isas)
+from hwp_survey.verify import compare, docx_text, hwp_text, pdf_text
 from hwp_survey.writer import SurveyWriter
 
 PAGE_TITLE = "설문지 변환 (한글 → 워드)"
@@ -57,6 +61,23 @@ HELP_DP = """
 `[1개선택]` `[모두선택]` `[행별 1개선택]` `[출생년도 입력]` `[지도에서 선택]`
 """
 
+HELP_ISAS = """
+DP 스크립트와 같은 문법을 쓰고, 번호와 태그만 ISAS 관행으로 바뀝니다.
+
+| 표기 | 뜻 |
+|---|---|
+| `## PART 1. 제목` | 구역 제목 (본문 번호 `Q1-1`의 기준) |
+| `SQ1. 문항 [1개 선택]` | 선별 문항 |
+| `Q1-1. 문항 [행별 1개 선택]` | 본문 문항 |
+| `@행별: 전혀 그렇지 않다,…` | 행별 표의 보기 라벨 (표 안은 코드로 채움) |
+| `%PROG: …` | 파란색 프로그래밍 지시문 |
+| `%검증: …` | 초록색 `[DATA: …]` 지시문 |
+| `~ 상자글` / `! 안내` | 테두리 상자 / 상자 안 보조 줄 |
+
+번호 체계 — 선별 구역 `SQ`, 참여 동의 `AQ`, 본문 구역 k번째 `Qk` 또는
+`Qk-1 Qk-2`, 배경 구역 `DQ`. 분류되지 않은 줄은 **빨간색**으로 남습니다(규칙 2-8).
+"""
+
 HELP_PRINT = """
 | 표기 | 뜻 |
 |---|---|
@@ -86,6 +107,8 @@ def extract(file_bytes: bytes, suffix: str, tighten: bool, style: str,
         os.unlink(path)
     stats = {"문단": sum(1 for k, _ in items if k == "p"),
              "표": sum(1 for k, _ in items if k == "table")}
+    if style == "ISAS 표준":
+        return items_to_isas_dsl(items), stats
     if style == "DP 스크립트":
         return items_to_dp_dsl(items, add_matrix_hint=matrix_hint,
                                add_alone_prog=alone_prog), stats
@@ -129,14 +152,38 @@ def items_csv_dp(doc) -> bytes:
     return to_csv(rows)
 
 
+def help_text(style):
+    return {"ISAS 표준": HELP_ISAS, "DP 스크립트": HELP_DP}.get(style, HELP_PRINT)
+
+
 with st.sidebar:
     st.subheader("출력 서식")
-    style = st.radio("서식", ["DP 스크립트", "인쇄용 설문지"], index=0,
-                     captions=["리서치사 납품용 스크립트", "응답자 배포용 설문지"],
+    style = st.radio("서식", ["ISAS 표준", "DP 스크립트", "인쇄용 설문지"], index=0,
+                     captions=["부서 표준 서식", "리서치사 납품용 스크립트",
+                               "응답자 배포용 설문지"],
                      label_visibility="collapsed")
     st.divider()
 
-    if style == "DP 스크립트":
+    if style == "ISAS 표준":
+        st.subheader("조사 개요표")
+        st.caption("원본에 없는 정보라 직접 입력합니다.")
+        target = st.text_input("조사대상", "")
+        sample = st.text_input("샘플 수(명)", "")
+        quota_note = st.text_input("할당 설명", "")
+        quota_raw = st.text_area(
+            "할당 격자 (줄마다 한 행, 쉼표로 칸 구분)", "",
+            placeholder=",20-29세,30-39세,합계\n여성,40,40,80", height=90)
+        verify = st.text_input("데이터 검증 지시문", "",
+                               placeholder="예: Q2~Q7 모두 동일 값 응답시 데이터에서 제외")
+
+        st.subheader("문서 서식")
+        font = st.selectbox("글꼴", ["나눔고딕", "맑은 고딕", "함초롬돋움"], index=0)
+        base_pt = st.slider("글자 크기(pt)", 8.0, 11.0, 9.0, 0.5)
+        row_label_cm = st.slider("행별 표 문항열 너비(cm)", 6.0, 12.0, 8.82, 0.01)
+        doc_header = st.text_input("머리말(문서 상단)", "",
+                                  placeholder="비우면 설문 제목이 들어갑니다")
+        matrix_hint = alone_prog = False
+    elif style == "DP 스크립트":
         st.subheader("조사 개요")
         quota_note = st.text_input("쿼터 설명", "성별*연령대별 균등할당")
         exclude = st.text_input("개요표 마지막 줄(형광)", "",
@@ -181,7 +228,7 @@ if uploaded is None:
     st.info("변환할 .hwp 또는 .hwpx 파일을 올려주세요. 암호가 걸린 파일과 HWP 3.x 이하 "
             "옛 형식은 한글에서 다시 저장한 뒤 올려주세요.")
     with st.expander("중간 텍스트 문법 보기"):
-        st.markdown(HELP_DP if style == "DP 스크립트" else HELP_PRINT)
+        st.markdown(help_text(style))
     st.stop()
 
 suffix = os.path.splitext(uploaded.name)[1].lower()
@@ -223,7 +270,31 @@ with right:
     a.metric("문단", stats["문단"])
     b.metric("표", stats["표"])
 
-    if style == "DP 스크립트":
+    if style == "ISAS 표준":
+        doc = parse_isas(dsl)
+        doc["대상자"] = target or doc["대상자"]
+        doc["샘플수"] = sample or doc["샘플수"]
+        doc["쿼터"] = quota_note or doc["쿼터"]
+        if quota_raw.strip():
+            doc["쿼터표"] = [[c.strip() for c in row.split(",")]
+                           for row in quota_raw.strip().splitlines() if row.strip()]
+        if verify:
+            doc["blocks"].append({"kind": "verify", "text": verify})
+
+        found = summarize_isas(doc)
+        c, d = st.columns(2)
+        c.metric("문항", found["문항"])
+        d.metric("선별문항(SQ)", found["선별문항(SQ)"])
+        e, f = st.columns(2)
+        e.metric("행별 표", found["행별 표"])
+        f.metric("PROG 지시문", found["PROG 지시문"])
+        st.metric("그대로 옮긴 표", found["일반 표"])
+        empty = found["문항"] == 0
+        docx_bytes = ISASWriter(font=font, base_pt=base_pt,
+                                row_label_cm=row_label_cm,
+                                doc_header=doc_header).write(doc).to_bytes()
+        csv_bytes = items_csv_dp(doc)
+    elif style == "DP 스크립트":
         doc = parse_dp(dsl)
         if quota_note and not doc["쿼터"]:
             doc["쿼터"] = quota_note
@@ -275,4 +346,53 @@ with right:
                        help="변수 라벨 작업에 넘겨 쓸 수 있는 문항·보기 목록입니다.")
 
     with st.expander("문법 도움말"):
-        st.markdown(HELP_DP if style == "DP 스크립트" else HELP_PRINT)
+        st.markdown(help_text(style))
+
+st.divider()
+st.subheader("변환 누락 검증")
+st.caption("한글에서 '다른 이름으로 저장 → PDF'로 저장한 원본을 올리면, 변환 결과와 "
+           "문장 단위로 대조해 빠진 내용을 찾습니다.")
+
+pdf_file = st.file_uploader("원본 PDF (선택)", type=["pdf"], key=f"{SS}_pdf")
+use_parser = st.checkbox(
+    "PDF 없이 검사 (파서가 읽은 텍스트를 기준으로)", value=False,
+    help="파서가 애초에 놓친 내용은 이 방식으로 검출되지 않습니다. "
+         "렌더링 단계의 누락만 잡힙니다.")
+
+if pdf_file is not None or use_parser:
+    if pdf_file is not None:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_file.getvalue())
+            src_path = tmp.name
+        try:
+            source = pdf_text(src_path)
+        finally:
+            os.unlink(src_path)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(uploaded.getvalue())
+            src_path = tmp.name
+        try:
+            source = hwp_text(src_path)
+        finally:
+            os.unlink(src_path)
+
+    result = compare(source, docx_text(io.BytesIO(docx_bytes)))
+    v1, v2, v3 = st.columns(3)
+    v1.metric("대조 문장", result["대조 문장"])
+    v2.metric("부분 일치", result["부분 일치"])
+    v3.metric("누락", result["누락"], delta=f"{result['누락률']:.1%}",
+              delta_color="inverse")
+
+    if result["누락"]:
+        st.warning("아래 내용이 변환 결과에서 발견되지 않았습니다. 확인해 주세요.")
+        st.dataframe({"누락된 문장": result["누락 목록"]},
+                     use_container_width=True, hide_index=True)
+    else:
+        st.success("원본의 모든 문장이 변환 결과에서 확인되었습니다.")
+
+    if result["부분 일치"]:
+        with st.expander(f"부분 일치 {result['부분 일치']}건 "
+                         "(지시문 분리·문구 변형이 대부분입니다)"):
+            st.dataframe({"문장": result["부분 일치 목록"]},
+                         use_container_width=True, hide_index=True)
