@@ -38,8 +38,8 @@ from .parser import (CIRCLED, END, RE_BOX_SPLIT, RE_FIELDWORK, RE_FOOTNOTE,
                      RE_LEADIN, RE_OPT_CODE, RE_OPT_SPLIT, RE_RESP_TAG,
                      RE_ROMAN_HEAD, code_options, detect_label_style, grid_lines,
                      header_matrix, is_banner, is_prose_table, matrix_rows,
-                     option_cell, scale_columns, scale_from_note, scale_header,
-                     screening_rows)
+                     option_cell, option_table, scale_columns, scale_from_note,
+                     scale_header, screening_rows)
 
 # ---------------------------------------------------------------- 상수
 SCALE_5 = ["전혀 그렇지 않다", "그렇지 않다", "보통이다", "그렇다", "매우 그렇다"]
@@ -60,6 +60,10 @@ RE_SECTION_WORD = re.compile(
     r"선별|선정|스크리닝|screen|본문|demo|배경|인적\s*사항|일반\s*사항|이용$", re.I)
 RE_FIELD = re.compile(r"^@(제목|대상자|샘플수|쿼터|쿼터표|제외|행별)\s*:\s*(.*)$")
 RE_PROG_SRC = re.compile(r"^\s*\[?\s*PROG\s*[:：]\s*(.+?)\s*\]?\s*$", re.I)
+#: '[DP: 20대, 30대 … 구간별 결과 분석]' 처럼 데이터 처리에 대한 지시문
+RE_DP_SRC = re.compile(r"^\s*\[?\s*(?:DP|DATA|데이터)\s*[:：]\s*(.+?)\s*\]?\s*$", re.I)
+#: '(  )명', '( )원' 같은 수치 기입란
+RE_NUM_INPUT = re.compile(r"^\s*[(（]\s*[)）]\s*\S{0,4}\s*$")
 RE_TAG = re.compile(r"\[([^\[\]]+)\]\s*$")
 RE_NUM_Q = re.compile(rf"^\s*(?:문\s*)?(\d{{1,2}}(?:-\d{{1,2}})?)\s*{END}\s*(.+)$")
 #: '귀하는 … 동의하십니까?' 처럼 번호 없이 문장만 있는 문항
@@ -141,6 +145,9 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             body_rows, head_labels = rows, scale_header(rows)
             if head_labels:                         # 첫 행이 보기 라벨 줄이면 분리
                 body_rows = rows[1:]
+                # 이 표는 자체 라벨을 가지므로, 앞서 읽어둔 척도 안내표는
+                # 바로 앞 문항의 보기였다는 뜻이다.
+                pending_scale = flush_scale(lines, pending_scale)
             # 보기가 둘뿐인 표(예/아니오)는 행마다 기호도 둘뿐이다
             min_marks = max(2, min(3, len(head_labels))) if head_labels else 3
             matrix = matrix_rows(body_rows, min_marks=min_marks)
@@ -186,6 +193,11 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
 
             if state["mode"] == "쿼터" or is_quota_grid(rows):
                 quota_rows.extend([c for c in r] for r in rows)
+                continue
+
+            opts_grid = option_table(rows)          # 보기를 여러 칸에 나눈 표
+            if opts_grid:
+                lines += [f"- {o}" for o in opts_grid if o]
                 continue
 
             if len(rows) >= 2 and not is_prose_table(rows):
@@ -241,6 +253,11 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             consent_rows.append(consent.group(1).strip())
             continue
 
+        data_note = RE_DP_SRC.match(text)              # [DP: …]
+        if data_note:
+            lines.append(f"%검증: {data_note.group(1)}")
+            continue
+
         field = RE_FIELDWORK.match(text)               # ▷ 조사원: …
         if field:
             lines.append(f"%PROG: 조사원 - {field.group(1).strip()}")
@@ -258,6 +275,8 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
         if not m and (style == "bare" or has_inline_options(text)
                       or is_sub_numbered(text)):
             m = RE_NUM_Q.match(text)
+        if m and pending_scale:
+            pending_scale = flush_scale(lines, pending_scale)
         if not m and RE_QUESTION_SENTENCE.search(text) and options_follow(flat, i):
             block, i = read_question(flat, i, "?", text, add_matrix_hint,
                                      add_alone_prog, style)
@@ -274,6 +293,8 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             continue
 
         lines.extend(classify_free_line(text, lines))
+
+    pending_scale = flush_scale(lines, pending_scale)
 
     if consent_rows:
         anchor = next((n for n, l in enumerate(lines)
@@ -434,6 +455,18 @@ def has_inline_options(text: str) -> bool:
             or len(RE_OPT_SPLIT.findall(text)) >= 2)
 
 
+def flush_scale(lines, pending, used: bool = False):
+    """행별 표에 쓰이지 못한 척도 안내표는 앞 문항의 보기로 돌린다.
+
+    '전혀 없음 ① ② … ⑧ 매우 빈번함'처럼 문항 하나를 척도로 받는 형태다.
+    """
+    if not pending or used:
+        return None if used else pending
+    if last_is_question(lines):
+        lines += [f"- {label}" for label in pending]
+    return None
+
+
 def strip_box(text: str) -> str:
     return re.sub(r"^[□☐▢]\s*", "", text).strip()
 
@@ -550,6 +583,7 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
     """문항 한 덩어리(보기·척도 안내·PROG)를 읽어 DP DSL 줄로."""
     options: list[str] = []
     progs: list[str] = []
+    datas: list[str] = []
     notes: list[str] = []
     scale: list[str] | None = None
     tag = None
@@ -577,7 +611,7 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
             stem = stem[: stem.index(codes[0])].strip()
     if inline_only:
         return finish_question(label, stem, tag, scale, options, notes, progs,
-                               add_matrix_hint, add_alone_prog), i
+                               add_matrix_hint, add_alone_prog, datas), i
 
     while i < len(flat):
         kind, payload = flat[i]
@@ -605,6 +639,15 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
             i += 1
             continue
 
+        data_note = RE_DP_SRC.match(text)
+        if data_note:
+            datas.append(data_note.group(1))       # [DP: …] 는 데이터 지시문
+            i += 1
+            continue
+        if RE_NUM_INPUT.match(text):
+            tag = "수치 입력"                        # '(   )명' 기입란
+            i += 1
+            continue
         if RE_FIELDWORK.match(text):               # 조사원 지시문
             progs.append(f"조사원 - {RE_FIELDWORK.match(text).group(1).strip()}")
             i += 1
@@ -661,11 +704,11 @@ def read_question(flat, i, label, stem, add_matrix_hint, add_alone_prog,
         break                                   # 다음 문단은 문항 바깥(상자글 등)
 
     return finish_question(label, stem, tag, scale, options, notes, progs,
-                           add_matrix_hint, add_alone_prog), i
+                           add_matrix_hint, add_alone_prog, datas), i
 
 
 def finish_question(label, stem, tag, scale, options, notes, progs,
-                    add_matrix_hint, add_alone_prog) -> list[str]:
+                    add_matrix_hint, add_alone_prog, datas=None) -> list[str]:
     """문항 한 덩어리를 DP DSL 줄로 마무리한다."""
     if tag is None:
         if re.search(r"복수\s*응답|모두", stem):
@@ -707,6 +750,7 @@ def finish_question(label, stem, tag, scale, options, notes, progs,
     if tag == "지도에서 선택" and not progs:
         progs.append("17개시도 지도제시")
     out += [f"%PROG: {p}" for p in progs]
+    out += [f"%검증: {d}" for d in (datas or [])]
     return out
 
 
@@ -784,13 +828,19 @@ def parse_dp(text: str) -> dict:
             doc["blocks"].append({"kind": "note", "text": s.lstrip("! ").strip()})
             continue
         if s.startswith("--"):
-            if cur:
-                cur["options"].append({"type": "group",
-                                       "text": s.lstrip("- ").strip()})
+            target = cur or last_question(doc)
+            if target:
+                target["options"].append({"type": "group",
+                                          "text": s.lstrip("- ").strip()})
             continue
         if s.startswith("-"):
-            if cur:
-                cur["options"].append({"type": "row", "text": s.lstrip("- ").strip()})
+            # 표(@표:)가 끼어들어 cur 가 끊긴 뒤에도 보기를 잃지 않는다
+            target = cur or last_question(doc)
+            if target:
+                target["options"].append({"type": "row",
+                                          "text": s.lstrip("- ").strip()})
+            else:
+                doc["blocks"].append({"kind": "note", "text": s.lstrip("- ").strip()})
             continue
 
         m = RE_LABEL.match(s)
@@ -805,6 +855,13 @@ def parse_dp(text: str) -> dict:
         doc["blocks"].append(cur)
 
     return doc
+
+
+def last_question(doc):
+    for block in reversed(doc["blocks"]):
+        if block["kind"] == "question":
+            return block
+    return None
 
 
 def summarize_dp(doc) -> dict:
