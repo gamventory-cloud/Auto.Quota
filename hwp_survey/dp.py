@@ -46,8 +46,11 @@ SCALE_5 = ["전혀 그렇지 않다", "그렇지 않다", "보통이다", "그�
 MATRIX_HINT = "귀하의 의견과 가장 일치하는 정도에 체크해 주세요."
 
 #: 번호 없는 라벨(AQ, DQ)도 쓰이므로 숫자는 있어도 없어도 된다
+#: 'SQ1.', '문 3.', 'A0.', 'B2.', 'A3-2-1.' 처럼 쓰이는 문항 번호.
+#: 파트 구분에 알파벳 한 글자를 쓰는 설문지가 많아 A~Z를 모두 받는다.
 RE_LABEL = re.compile(
-    rf"^\s*((?:SQ|DQ|AQ|Q|S|A|문|배문)\s*\d*(?:[-_]\d+)?)\s*{END}\s*(.*)$", re.I)
+    rf"^\s*((?:SQ|DQ|AQ|[A-Z]|문|배문)\s*\d*(?:[-_]\d+){{0,3}})\s*{END}\s*(.*)$",
+    re.I)
 #: '(□ 예, □ 아니오) 나는 …' 형태의 동의 문항
 RE_CONSENT = re.compile(r"^\s*\([^)]*[□☐][^)]*\)\s*(.+)$")
 #: 보기 안의 '(설문 종료)' 지시
@@ -120,6 +123,7 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
                 continue
 
             if is_banner(rows):                     # '신문 이용' 같은 영역 배너
+                pending_scale = flush_scale(lines, pending_scale)
                 lines.append("")
                 lines.append(f"## {rows[0][0].strip()}")
                 continue
@@ -197,6 +201,7 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
 
             opts_grid = option_table(rows)          # 보기를 여러 칸에 나눈 표
             if opts_grid:
+                pending_scale = flush_scale(lines, pending_scale)
                 lines += [f"- {o}" for o in opts_grid if o]
                 continue
 
