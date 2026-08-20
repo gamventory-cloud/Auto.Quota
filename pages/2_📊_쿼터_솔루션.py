@@ -22,6 +22,43 @@
 6. 인덱스 int 강제 캐스팅 제거 (문자열 ID 인덱스에서 죽던 문제)
 7. 시트명 충돌 방지, Main_Status index=False, 0 나누기 가드
 8. 계산 방식 선택 : 정확해(ILP) / 휴리스틱(그리디)
+
+v3 변경점 (추가 쿼터 100% 할당)
+------------------------------
+ 9. "🎯 추가 쿼터도 목표로 100% 맞추기" 옵션 추가 (ILP 전용)
+    -> quota_ilp v2.0 의 ex_as_target. 추가 쿼터를 상한이 아니라 등식+부족변수로
+       모델링해 부족까지 최소화한다. 초과는 두 모드 모두 금지.
+10. 추가 쿼터 목표 0 을 '금지'로 보존 (예전엔 t>0 만 저장해 '무제한'으로 뒤집혔다)
+11. 성공/실패 판정을 총량(total_fail)과 개별 쿼터(is_fail)로 분리.
+    부족 분석은 항상 계산한다. 예전엔 총량만 채우면 미달이 숨겨졌다.
+12. 실행 전 산술 프리플라이트 : quota_ilp.preflight_targets 로 교체.
+    메인/추가 양쪽 유령 키·물리적 부족, 추가 목표 합계 정합성, 무응답자 수를 검사.
+    (단일응답 추가 쿼터는 "그룹 목표 합계 == 메인 목표 합계" 가 100% 달성의
+     필요조건이다. 이걸 실행 전에 숫자로 알려준다.)
+13. min_fill 슬라이더 표시 버그 수정 (0.0~1.0 + "%.0f%%" -> 70% 가 "1%" 로 보였다)
+14. 부족 분산 기준 선택 : 인원수 vs 목표 대비 비율(balance_relative)
+15. Run_Info 시트 추가 (재현성 기록)
+16. 하드 쿼터 + 추가 쿼터 허용 편차
+    - "🔒 메인 쿼터를 하드 쿼터로" : 셀별 목표를 정확히 충족
+    - "추가 쿼터 허용 편차" : 정확히 맞춤 / ±N명 / ±N% / 제한 없음
+      총 선정 인원은 메인 쿼터가 정하므로 바뀌지 않고, 추가 쿼터의 개별
+      항목만 목표 위아래로 나뉘어 흔들린다.
+          50/50/50/50 (합 200)  ->  55/45/47/53 (합 200)
+    - 완화 순서 : ① 추가 쿼터 편차 한계 -> ② 메인 하드
+      (메인이 총량을 정의하므로 메인을 마지막에 풀어준다. 어느 단계에서
+       풀렸는지는 ilp_sol.notes 로 화면에 표시된다)
+    - 솔버는 항상 편차를 최소화하므로, 허용 편차 설정은 '이 범위를 넘으면
+      알려달라'는 경고선으로 작동한다.
+17. 추가 수집 지시서 (quota_ilp.plan_recruitment)
+    - 메인 쿼터가 미달하면 "어떤 조건의 응답자를 몇 명 더 수집해야 하는지" 역산
+    - 기존 표본 활용을 최대화해 필요 인원을 최소화한 뒤, 남는 추가 쿼터 편차를
+      제곱 편차 기준으로 여러 항목에 고르게 분산
+    - 데이터에 실제로 관측된 조합만 후보로 쓴다 (모집단에 없는 조건을 지시하면
+      의미가 없으므로). 목표 0(금지) 키를 포함한 조합은 제외
+    - 결과 엑셀 Recruit_Plan 시트로도 저장
+18. 편차 분산에 제곱 편차 단계 추가
+    - 최소최대만 쓰면 물리적으로 불가피한 큰 편차 하나가 최댓값을 포화시켜
+      나머지를 고르게 나눌 동기가 사라진다 (자영 -84 vs 전문/자영/기타 각 -28)
 """
 
 import streamlit as st
@@ -265,9 +302,12 @@ if data_file:
                             if t is None:
                                 bad.append(r['값'])
                                 continue
-                            if t > 0:
-                                config['map'][str(r['값'])] = t
+                            # [수정] 0 도 저장한다. 0 = "이 값은 뽑지 않는다"(금지).
+                            # 예전엔 0 을 버려서 '무제한'으로 뒤집혔다.
+                            config['map'][str(r['값'])] = t
                         warn_bad(bad, f"추가 쿼터 {i+1}")
+                        st.caption(f"항목 {len(config['map'])}개 / "
+                                   f"목표 합계 {sum(config['map'].values()):,}명")
 
             else:
                 config['mode'] = 'grid'
@@ -298,9 +338,10 @@ if data_file:
                                 if t is None:
                                     bad.append(" / ".join(key))
                                     continue
-                                if t > 0:
-                                    config['map'][key] = t
+                                config['map'][key] = t      # 0 = 금지 (위와 동일)
                             warn_bad(bad, f"추가 쿼터 {i+1}")
+                            st.caption(f"셀 {len(config['map'])}개 / "
+                                       f"목표 합계 {sum(config['map'].values()):,}명")
 
             ex_configs.append(config)
 
@@ -319,6 +360,61 @@ if data_file:
     if not HAS_ILP:
         st.caption(f"ℹ️ ILP 사용 불가 (`pip install ortools`) — {ILP_ERR}")
     use_ilp = solver_kind.startswith("정확해")
+
+    # ── 추가 쿼터를 상한이 아니라 '목표'로 다룰지 ──────────────────────────
+    ex_as_target = st.checkbox(
+        "🎯 추가 쿼터도 목표로 100% 맞추기", value=False, disabled=not use_ilp,
+        help="끄면 추가 쿼터는 상한으로만 작동합니다(초과 금지, 부족 허용). "
+             "켜면 부족도 최소화합니다. 초과는 두 경우 모두 금지됩니다. "
+             "정확해(ILP)에서만 지원합니다.")
+    if ex_as_target:
+        st.info(
+            "추가 쿼터 그룹이 단일응답이면 **그룹의 목표 합계가 메인 목표 합계와 "
+            "같아야** 양쪽 100%가 가능합니다. 응답자 한 명은 그 그룹의 항목 하나에 "
+            "1명으로만 계상되기 때문입니다. 실행 직전에 자동 검사합니다."
+        )
+        unlisted_pol = st.radio(
+            "목표 목록에 없는 값의 처리", ["제약 없이 선택 가능", "선택 대상에서 제외"],
+            horizontal=True,
+            help="목표 표에서 지운 값을 가진 응답자를 어떻게 볼지 결정합니다.")
+        unlisted = "free" if unlisted_pol.startswith("제약") else "forbid"
+        # ── 추가 쿼터 허용 편차 ────────────────────────────────────────
+        # 총 선정 인원은 메인 쿼터가 정하므로 바뀌지 않는다. 개별 항목만
+        # 목표 위아래로 흔들린다.  50/50/50/50 → 55/45/47/53 (합 200 유지)
+        st.markdown("**추가 쿼터 허용 편차**")
+        tol_mode = st.radio(
+            "항목별로 목표에서 얼마나 벗어나도 되는지",
+            ["정확히 맞춤 (하드)", "±N명까지", "±N%까지", "제한 없음"],
+            horizontal=True, label_visibility="collapsed",
+            help="솔버는 항상 편차를 최소로 만듭니다. 이 설정은 '이 범위를 넘으면 "
+                 "알려달라'는 경고선입니다. 범위 안에서 맞출 수 없으면 자동으로 "
+                 "한계를 풀고, 그때 최소 편차가 얼마인지 알려줍니다.")
+        ex_tol_abs, ex_tol_pct, ex_tol_unlimited = 0, 0.0, False
+        if tol_mode.startswith("±N명"):
+            ex_tol_abs = st.number_input("허용 편차 (명)", 1, 10000, 10)
+        elif tol_mode.startswith("±N%"):
+            ex_tol_pct = st.number_input("허용 편차 (%)", 1, 100, 5) / 100.0
+        elif tol_mode.startswith("제한"):
+            ex_tol_unlimited = True
+        # '정확히 맞춤'도 달성 불가하면 자동 완화되므로 편차 허용 자체는 켜둔다
+        ex_overflow = not tol_mode.startswith("정확히")
+        overflow_weight = 1
+    else:
+        unlisted = "free"
+        ex_overflow, overflow_weight = False, 1
+        ex_tol_abs, ex_tol_pct, ex_tol_unlimited = 0, 0.0, False
+
+    main_hard = st.checkbox(
+        "🔒 메인 쿼터를 하드 쿼터로", value=False, disabled=not use_ilp,
+        help="셀별 목표를 정확히 충족시킵니다. 물리적으로 불가능하면 해가 사라지므로, "
+             "그때는 자동으로 부족 허용 방식으로 되돌리고 사유를 알려줍니다. "
+             "참고: 사전식 최적화라 이 옵션을 끄더라도 메인 쿼터가 우선이며, "
+             "추가 쿼터 때문에 메인이 깎이는 일은 없습니다.")
+    if main_hard and ex_as_target:
+        st.caption(
+            "메인·추가 둘 다 하드로 걸고 시작합니다. 정확히 맞출 수 없으면 "
+            "추가 쿼터 편차를 먼저 풀고(총 인원은 유지), 그래도 안 되면 메인 "
+            "부족을 허용합니다. 어느 단계에서 풀렸는지 실행 후 알려드립니다.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -344,18 +440,29 @@ if data_file:
                 help="통과 인원을 최대로 확정한 뒤, 대체 인원이 없는 희소한 셀을 "
                      "먼저 채웁니다. 총 인원은 줄지 않습니다. 끄면 어느 셀을 "
                      "채울지 임의로 결정됩니다.")
-            min_fill = st.slider(
-                "셀별 최소 달성률", 0.0, 1.0, 0.7, 0.05, format="%.0f%%",
+            # [수정] 0.0~1.0 값에 format="%.0f%%" 를 쓰면 0.7 이 "1%" 로 표시됐다.
+            min_fill = (st.slider(
+                "셀별 최소 달성률", 0, 100, 70, 5, format="%d%%",
                 disabled=not ilp_priority,
                 help="희소 셀을 우선하더라도 어떤 셀도 이 비율 미만으로 떨어지지 "
                      "않게 합니다. 0%로 두면 흔한 셀이 0명이 될 수 있습니다. "
                      "만족 불가능하면 자동으로 하한 없이 재계산하고 알려줍니다."
-            ) if ilp_priority else 0.0
+            ) / 100.0) if ilp_priority else 0.0
             balance = st.checkbox(
                 "부족분 고르게 분산", value=True,
                 help="희소 셀 우선 배분이 끝난 뒤, 남은 부족이 특정 셀에 몰리지 "
                      "않도록 재조정합니다. 희소 쿼터 우선보다 뒤 단계이므로 "
                      "희소 셀의 자리를 빼앗지 않습니다.")
+            want_plan = st.checkbox(
+                "미달 시 추가 수집 지시서 계산", value=True,
+                help="메인 쿼터가 미달하면 '어떤 조건의 응답자를 몇 명 더 수집해야 "
+                     "하는지'를 역산합니다. 계산이 한 번 더 돌아가므로 표본이 매우 "
+                     "크면 시간이 조금 늘어납니다.")
+            balance_rel = st.checkbox(
+                "부족을 목표 대비 비율로 분산", value=True,
+                disabled=not balance,
+                help="목표 1000인 셀의 50명 부족(5%)과 목표 100인 셀의 50명 "
+                     "부족(50%)을 같게 보지 않습니다. 끄면 인원수 기준입니다.")
             iters, backend, jitter = 0, None, 0.0
         else:
             iters = st.number_input("시도 횟수", 100, 1000000, 10000, 1000)
@@ -368,6 +475,7 @@ if data_file:
                       "나을 수도 있습니다.")
             )
             time_limit, balance, ilp_priority, min_fill = 0, False, False, 0.0
+            balance_rel, want_plan = False, False
 
     if st.button("🚀 매칭 시작", type="primary"):
         if not main_map:
@@ -399,21 +507,46 @@ if data_file:
                 target_total = sum(main_map.values())
                 soft_target = max(0, target_total - tol)
                 m_cnt = collections.Counter(m_keys)
+                ex_maps = [c['map'] for c in ex_configs]
 
                 # ------------------------------------------------------------------
                 # 프리플라이트 : 데이터에 아예 존재하지 않는 쿼터 키 경고
                 # (정규화 불일치를 실행 전에 잡아내는 안전망)
                 # ------------------------------------------------------------------
-                ghosts = [k for k in main_map if m_cnt.get(k, 0) == 0]
-                if ghosts:
-                    st.warning(
-                        f"⚠️ 메인 쿼터 {len(ghosts)}개 셀이 데이터에 한 명도 없습니다. "
-                        f"목표 {sum(main_map[k] for k in ghosts):,}명은 달성 불가입니다.\n\n"
-                        + ", ".join(" / ".join(k) for k in ghosts[:10])
-                        + (" ..." if len(ghosts) > 10 else "")
-                    )
+                # [교체] 메인 유령셀만 보던 검사를 quota_ilp 의 종합 프리플라이트로.
+                #  - 메인/추가 양쪽의 유령 키·물리적 부족
+                #  - 추가 쿼터 목표 합계가 메인 합계와 맞는지 (초과 금지 시 필수 조건)
+                #  - 추가 쿼터 변수의 무응답자 수
+                pre = []
+                if HAS_ILP:
+                    pre = quota_ilp.preflight_targets(
+                        m_keys, ex_keys_list, main_map, ex_maps,
+                        ex_as_target=ex_as_target, unlisted=unlisted,
+                        main_hard=main_hard, ex_overflow=ex_overflow,
+                        overflow_weight=overflow_weight,
+                        ex_tol_abs=ex_tol_abs, ex_tol_pct=ex_tol_pct,
+                        ex_tol_unlimited=ex_tol_unlimited)
+                else:
+                    ghosts = [k for k in main_map if m_cnt.get(k, 0) == 0]
+                    if ghosts:
+                        pre = [{'level': 'error', 'group': None, 'kind': 'main_ghost',
+                                'msg': (f"메인 쿼터 {len(ghosts)}개 셀이 데이터에 한 명도 "
+                                        f"없습니다. 목표 "
+                                        f"{sum(main_map[k] for k in ghosts):,}명은 "
+                                        f"달성 불가입니다.")}]
 
-                ex_maps = [c['map'] for c in ex_configs]
+                def _gname(d):
+                    j = d.get('group')
+                    return "" if j is None else f"[{ex_configs[j]['name']}] "
+
+                for d in pre:
+                    if d['level'] == 'error':
+                        st.error(f"❌ {_gname(d)}{d['msg']}")
+                    elif d['level'] == 'warn':
+                        st.warning(f"⚠️ {_gname(d)}{d['msg']}")
+                    else:
+                        st.caption(f"✅ {_gname(d)}{d['msg']}")
+
                 indices = df_survey.index.to_numpy()
                 pick_rng = np.random.default_rng(0) if rand_pick else None
                 ilp_sol = None
@@ -440,8 +573,14 @@ if data_file:
                     ilp_sol = quota_ilp.solve_quota_ilp(
                         m_keys, ex_keys_list, main_map, ex_maps, indices,
                         priority=ilp_priority, balance=balance,
+                        balance_relative=balance_rel,
                         min_fill=min_fill, time_limit=time_limit,
-                        workers=n_cores, rng=pick_rng, tiebreak=tiebreak)
+                        workers=n_cores, rng=pick_rng, tiebreak=tiebreak,
+                        ex_as_target=ex_as_target, unlisted=unlisted,
+                        main_hard=main_hard, ex_overflow=ex_overflow,
+                        overflow_weight=overflow_weight,
+                        ex_tol_abs=ex_tol_abs, ex_tol_pct=ex_tol_pct,
+                        ex_tol_unlimited=ex_tol_unlimited)
                 g_best_cnt, g_best_idxs = ilp_sol.total, ilp_sol.selected
 
             # ======================================================================
@@ -508,7 +647,9 @@ if data_file:
                     if c > g_best_cnt:
                         g_best_cnt, g_best_idxs = c, ixs
 
-            is_fail = g_best_cnt < soft_target
+            # [수정] 총량만 보던 판정을 분리한다. 총량을 채웠어도 개별 쿼터가
+            # 미달일 수 있고, 예전에는 그 경우 부족 분석이 통째로 생략됐다.
+            total_fail = g_best_cnt < soft_target
 
             # ==================================================================
             # 결과 집계
@@ -531,7 +672,7 @@ if data_file:
             # 부족분 진단
             # ------------------------------------------------------------------
             recs = []
-            if is_fail:
+            if True:            # [수정] 항상 계산한다 (예전엔 is_fail 일 때만)
                 if use_main:
                     for k, tgt in main_map.items():
                         act = final_m.get(k, 0)
@@ -549,16 +690,63 @@ if data_file:
                     raw_cnt_map = collections.Counter(
                         v for keys in ex_keys_list[j] for v in keys
                     )
+                    struct_bad = {d.get('group') for d in pre
+                                  if d['kind'] in ('group_sum_low', 'group_sum_high')}
                     for k, tgt in cfg['map'].items():
                         act = final_exs[j].get(k, 0)
                         diff = tgt - act
                         if diff > 0:
                             raw_avail = raw_cnt_map.get(k, 0)
-                            reason = "⚠️ 물리적 부족" if raw_avail < tgt else "⚔️ 경합 부족"
+                            if raw_avail < tgt:
+                                reason = "⚠️ 물리적 부족"
+                            elif j in struct_bad:
+                                reason = "⚖️ 구조적 (목표 합계 불일치)"
+                            else:
+                                reason = "⚔️ 경합 부족"
                             label = " / ".join(k) if isinstance(k, tuple) else str(k)
                             recs.append({'순서': j + 1, '구분': cfg['name'], '항목': label,
                                          '목표': tgt, '현재': act, '부족': diff,
                                          '진단': reason, '전체보유': raw_avail})
+
+            # ------------------------------------------------------------------
+            # 최종 판정 : 총량 미달 또는 개별 쿼터 미달
+            # ------------------------------------------------------------------
+            main_short_recs = [r for r in recs if r['구분'] == '메인 쿼터']
+            ex_short_recs = [r for r in recs if r['구분'] != '메인 쿼터']
+            ex_short_sum = sum(r['부족'] for r in ex_short_recs)
+            if ex_as_target:
+                # 편차를 허용한 경우 추가 쿼터의 벗어남은 실패가 아니라 '편차'로 본다.
+                # 정확히 맞춤(하드)을 요구했을 때만 미달을 실패로 판정한다.
+                is_fail = total_fail or bool(main_short_recs) or (
+                    not ex_overflow and bool(ex_short_recs))
+            else:
+                is_fail = total_fail
+
+            # ------------------------------------------------------------------
+            # 추가 수집 지시서 : 부족분을 어떤 구성으로 보충해야 하는가
+            # ------------------------------------------------------------------
+            plan, plan_rows = None, []
+            if want_plan and use_ilp and HAS_ILP and main_short_recs:
+                with st.spinner("추가 수집 지시서 역산 중..."):
+                    try:
+                        plan = quota_ilp.plan_recruitment(
+                            m_keys, ex_keys_list, main_map, ex_maps,
+                            unlisted=unlisted, ex_tol_abs=ex_tol_abs,
+                            ex_tol_pct=ex_tol_pct,
+                            ex_tol_unlimited=(ex_tol_unlimited or not ex_overflow),
+                            time_limit=max(20, time_limit), workers=n_cores)
+                    except Exception as _pe:                      # noqa: BLE001
+                        st.warning(f"⚠️ 추가 수집 지시서 계산 실패 — "
+                                   f"{type(_pe).__name__}: {_pe}")
+                if plan is not None and plan.feasible:
+                    for r in plan.rows:
+                        cond = " · ".join(
+                            f"{ex_configs[j]['name']}={'/'.join(str(x) for x in ks)}"
+                            for j, ks in r['pattern'].items())
+                        plan_rows.append({
+                            '메인 셀': " / ".join(r['cell']),
+                            '추가 조건': cond or "(조건 없음)",
+                            '추가 수집 인원': r['n']})
 
             # ------------------------------------------------------------------
             # 엑셀 저장
@@ -590,6 +778,32 @@ if data_file:
                          'Diff': v - final_m[k]}
                         for k, v in main_map.items()
                     ]).to_excel(w, index=False, sheet_name='Main_Status')
+
+                if plan_rows:
+                    pd.DataFrame(plan_rows).to_excel(
+                        w, index=False, sheet_name='Recruit_Plan')
+
+                pd.DataFrame([
+                    {'항목': '실행 시각', '값': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')},
+                    {'항목': '계산 방식', '값': solver_kind},
+                    {'항목': '추가 쿼터 처리', '값': '목표(100% 지향)' if ex_as_target else '상한'},
+                    {'항목': '메인 하드 쿼터', '값': main_hard},
+                    {'항목': '추가 쿼터 허용 편차',
+                     '값': (f"±{ex_tol_abs}명" if ex_tol_abs else
+                            f"±{ex_tol_pct:.0%}" if ex_tol_pct else
+                            "제한 없음" if ex_tol_unlimited else "정확히 맞춤")},
+                    {'항목': '목록 밖 값', '값': unlisted},
+                    {'항목': '메인 목표 합계', '값': target_total},
+                    {'항목': '허용 오차', '값': tol},
+                    {'항목': '선정 인원', '값': len(df_pass)},
+                    {'항목': '추가 쿼터 부족', '값': ex_short_sum},
+                    {'항목': 'ILP 시간제한(초)', '값': time_limit},
+                    {'항목': '희소 우선 / 최소달성률', '값': f"{ilp_priority} / {min_fill:.0%}"},
+                    {'항목': '부족 분산 / 비율기준', '값': f"{balance} / {balance_rel}"},
+                    {'항목': '시도 횟수(휴리스틱)', '값': iters},
+                    {'항목': '지터(휴리스틱)', '값': jitter},
+                    {'항목': 'intval 컬럼', '값': str(c_int)},
+                ]).to_excel(w, index=False, sheet_name='Run_Info')
 
                 for j, cfg in enumerate(ex_configs):
                     if not cfg['cols']:
@@ -651,19 +865,77 @@ if data_file:
                         "(희소한 셀에서는 값이 낮아도 뽑아야 합니다)."
                     )
 
-            if is_fail:
-                st.error("⚠️ 목표 인원을 달성하지 못했습니다. 아래 분석을 확인하세요.")
+            # 추가 쿼터 달성 현황 (목표 모드에서만 의미가 있다)
+            if ex_as_target and ex_configs:
+                ex_target_sum = sum(sum(c['map'].values())
+                                    for c in ex_configs if c['cols'])
+                if ex_target_sum:
+                    e1, e2, e3 = st.columns(3)
+                    e1.metric("🎯 추가 쿼터 목표 합계", f"{ex_target_sum:,}명")
+                    e2.metric("✅ 추가 쿼터 달성",
+                              f"{ex_target_sum - ex_short_sum:,}명")
+                    e3.metric("📉 추가 쿼터 부족", f"{ex_short_sum:,}명",
+                              delta="충족" if ex_short_sum == 0 else f"-{ex_short_sum:,}명",
+                              delta_color="normal" if ex_short_sum == 0 else "inverse")
+
+            # 추가 쿼터 편차 현황 (총 인원은 유지되고 항목만 흔들린다)
+            ex_dev_recs = []
+            if ex_as_target:
+                for j, cfg in enumerate(ex_configs):
+                    if not cfg['cols']:
+                        continue
+                    for k, tgt in cfg['map'].items():
+                        act = final_exs[j].get(k, 0)
+                        if act != tgt:
+                            ex_dev_recs.append({
+                                '구분': cfg['name'],
+                                '항목': " / ".join(k) if isinstance(k, tuple) else str(k),
+                                '목표': tgt, '실제': act, '편차': act - tgt,
+                                '편차율': (act - tgt) / tgt if tgt else None})
+                if ex_dev_recs:
+                    mx = max(abs(r['편차']) for r in ex_dev_recs)
+                    mxr = max((abs(r['편차율']) for r in ex_dev_recs
+                               if r['편차율'] is not None), default=0)
+                    d1, d2, d3 = st.columns(3)
+                    d1.metric("📐 편차 발생 항목", f"{len(ex_dev_recs)}개")
+                    d2.metric("최대 편차", f"{mx:,}명")
+                    d3.metric("최대 편차율", f"{mxr:.1%}")
+                    st.caption(
+                        "총 선정 인원은 메인 쿼터가 정하므로 그대로이고, 추가 쿼터의 "
+                        "개별 항목만 목표 위아래로 나뉘어 흔들립니다. 아래 편차는 "
+                        "이 조건에서 가능한 최소값입니다.")
+                    dfd = pd.DataFrame(ex_dev_recs)
+                    st.dataframe(
+                        dfd.style.format({'편차율': '{:+.1%}'}, na_rep="-")
+                           .background_gradient(subset=['편차'], cmap='RdYlGn_r'),
+                        use_container_width=True, hide_index=True)
+
+            if not is_fail:
+                if ex_as_target:
+                    st.success("🎉 메인 쿼터와 추가 쿼터를 **모두 100% 달성**했습니다!")
+                else:
+                    st.success("🎉 목표 인원을 모두 달성했습니다!")
+            elif not total_fail:
+                st.warning(
+                    f"⚠️ 메인 목표 인원({target_total:,}명)은 채웠지만 개별 쿼터가 "
+                    f"미달입니다. 메인 {len(main_short_recs)}개 셀 / 추가 "
+                    f"{len(ex_short_recs)}개 항목 — 아래 분석을 확인하세요.")
             else:
-                st.success("🎉 목표 인원을 모두 달성했습니다!")
+                st.error("⚠️ 목표 인원을 달성하지 못했습니다. 아래 분석을 확인하세요.")
 
             # ------------------------------------------------------------------
             # ILP 전용: 최적성 보증 + 병목 진단
             # ------------------------------------------------------------------
             if ilp_sol is not None:
                 if ilp_sol.proven_optimal:
+                    extra = ""
+                    if ilp_sol.ex_as_target:
+                        extra = (" 추가 쿼터 부족 합계 "
+                                 f"{sum(ilp_sol.ex_short_total):,}명도 이 조건에서 "
+                                 "최소입니다.")
                     st.success(
                         f"✅ **최적해임이 증명되었습니다.** 이 조건에서 {ilp_sol.total:,}명보다 "
-                        f"많이 뽑는 방법은 존재하지 않습니다. "
+                        f"많이 뽑는 방법은 존재하지 않습니다.{extra} "
                         f"(프로파일 {ilp_sol.n_profiles:,}개로 집약 / {ilp_sol.solve_sec:.2f}초)"
                     )
                 else:
@@ -685,7 +957,8 @@ if data_file:
                                  '이 그룹 상한을 없애면': f"+{gain:,}명 확보 가능"}
                                 for j, gain in sorted(d.group_relax_gain.items(),
                                                       key=lambda x: -x[1])]
-                        st.markdown("**어느 그룹이 막고 있는지**")
+                        st.markdown("**어느 그룹이 막고 있는지** "
+                                    "(해당 그룹의 초과 금지를 풀었을 때)")
                         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                                      hide_index=True)
 
@@ -761,6 +1034,33 @@ if data_file:
                          for k, t in cfg['map'].items()],
                         len(cfg['map'])
                     )
+
+            if plan is not None and plan.feasible and plan_rows:
+                st.divider()
+                st.subheader("🧾 추가 수집 지시서")
+                p1, p2, p3 = st.columns(3)
+                p1.metric("총 추가 수집 필요", f"{plan.total_needed:,}명")
+                p2.metric("대상 메인 셀", f"{len(plan.by_cell)}개")
+                p3.metric("보충 후 최대 편차", f"{plan.max_dev_after:,}명")
+                st.caption(
+                    "메인 쿼터를 100% 채우기 위해 어떤 조건의 응답자를 몇 명 더 "
+                    "확보해야 하는지 역산한 결과입니다. 기존 표본을 최대한 활용하는 "
+                    "전제에서 필요 인원이 최소가 되도록 계산했고, 추가 쿼터 조건은 "
+                    "데이터에 실제로 존재하는 조합만 제시합니다.")
+                st.dataframe(pd.DataFrame(plan_rows), use_container_width=True,
+                             hide_index=True)
+                for _n in plan.notes:
+                    st.warning(f"⚠️ {_n}")
+                if plan.max_dev_after:
+                    st.caption(
+                        f"이 인원을 모두 확보해도 추가 쿼터에 최대 "
+                        f"{plan.max_dev_after:,}명의 편차가 남습니다. 이미 선정이 "
+                        f"확정된 응답자 구성 때문에 피할 수 없는 부분입니다.")
+            elif plan is not None and not plan.feasible:
+                st.divider()
+                st.subheader("🧾 추가 수집 지시서")
+                for _n in (plan.notes or ["계산 결과가 없습니다."]):
+                    st.error(f"❌ {_n}")
 
             if recs:
                 st.divider()
