@@ -25,7 +25,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .dp import RE_LABEL, RE_TAG, items_to_dp_dsl, parse_dp, summarize_dp
+from .dp import (RE_LABEL, RE_TAG, items_to_dp_dsl, parse_dp, split_long_matrices,
+                 summarize_dp)
 
 #: DP 태그 -> ISAS 표기 (납품본은 숫자와 '개' 사이를 띄운다)
 TAGS = {
@@ -523,8 +524,9 @@ def build_isas_docx(doc, **opts) -> bytes:
     return ISASWriter(**opts).write(doc).to_bytes()
 
 
-def parse_isas(text: str):
-    return parse_dp(text)
+def parse_isas(text: str, split_matrix: int = 0):
+    """split_matrix: 행별 표가 이 행 수를 넘으면 여러 문항으로 나눈다(0=끄기)."""
+    return split_long_matrices(parse_dp(text), split_matrix)
 
 
 def summarize_isas(doc) -> dict:
