@@ -227,6 +227,21 @@ def _model_paragraphs(path: str) -> list[str]:
         hwp5.close()
 
 
+#: 'SQ4-1.', 'A3-2-1.', 'B0.' 같은 문항 번호. 되찾은 문단의 제자리를 찾는 데 쓴다.
+_LABEL = re.compile(r"^\s*(SQ|DQ|AQ|[A-Z]|문)\s*(\d+(?:[-_]\d+)*)\s*[.)\]】]", re.I)
+
+
+def _label_key(text: str):
+    """문항 번호를 정렬 가능한 값으로. 'A3-2-1' -> (1, (3, 2, 1))"""
+    m = _LABEL.match(text or "")
+    if not m:
+        return None
+    head = m.group(1).upper()
+    rank = 0 if head in ("SQ", "DQ", "AQ", "문") else ord(head) - ord("A") + 1
+    nums = tuple(int(n) for n in re.split(r"[-_]", m.group(2)))
+    return (rank, nums)
+
+
 def _recover_dropped(path: str, items: list) -> list:
     """XHTML에서 누락된 문단을 이진 구조에서 찾아 제자리에 끼워 넣는다."""
     try:
@@ -252,11 +267,60 @@ def _recover_dropped(path: str, items: list) -> list:
                     cursor = n + 1
                     break
             continue
-        recovered.append((cursor, text))
+        recovered.append((_place(items, text, cursor), text))
 
+    recovered.sort(key=lambda pair: pair[0])
     for offset, (position, text) in enumerate(recovered):
         items.insert(position + offset, ("p", text))
     return items
+
+
+def _place(items, text, cursor) -> int:
+    """되찾은 문단을 넣을 자리.
+
+    글상자 안의 문단은 이진 구조에서 문서 흐름과 다른 순서로 저장된다.
+    문항 번호가 있으면 번호 차례에 맞는 자리를 찾고, 없으면 읽던 자리에 둔다.
+    """
+    key = _label_key(text)
+    if key is None:
+        return cursor
+    for n, (kind, payload) in enumerate(items):
+        blob = payload if kind == "p" else (payload[0][0] if payload and payload[0]
+                                            else "")
+        other = _label_key(blob)
+        if other and other > key:
+            return _before_options(items, n, key)
+    return cursor
+
+
+_OPTION_HEAD = re.compile(r"^\s*[①-⑳➀-➉□☐]")
+#: 보기 뒤에 붙는 지시문. 문항 자리를 찾을 때 함께 건너뛴다.
+_TRAILING = re.compile(r"^\s*[\[（(]?\s*(?:PROG|DP|DATA)\s*[:：]|^\s*※")
+
+
+def _before_options(items, index: int, key) -> int:
+    """보기 목록 앞으로 자리를 물린다. 문항이 자기 보기 뒤에 놓이지 않도록.
+
+    번호가 앞선 문항을 넘어가지는 않는다(A3-4 가 A3-3 앞으로 가면 안 된다).
+    """
+    while index > 0:
+        kind, payload = items[index - 1]
+        if kind == "p":
+            other = _label_key(payload)
+            if other and other < key:
+                break                     # 앞 번호 문항까지만
+        if kind == "p" and _TRAILING.match(payload):
+            index -= 1
+            continue
+        cells = ([payload] if kind == "p"
+                 else [c for r in payload for c in r if c.strip()])
+        # '기타()', '해당 없음'처럼 기호 없는 보기가 섞이므로 과반이면 보기로 본다
+        marked = sum(1 for c in cells if _OPTION_HEAD.match(c) or len(c) < 3)
+        if cells and marked >= len(cells) - 1:
+            index -= 1
+            continue
+        break
+    return index
 
 
 def _items_from_html(soup) -> list[tuple[str, object]]:
