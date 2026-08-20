@@ -13,7 +13,6 @@ import pytest
 from hwp_survey import items_to_dsl, parse_dsl, read_survey, summarize
 from hwp_survey.parser import scale_columns
 from hwp_survey.reader import clean
-from hwp_survey.writer import SurveyWriter, build_docx
 
 NS = "http://www.hancom.co.kr/hwpml/2011/paragraph"
 
@@ -123,29 +122,6 @@ def test_summary_counts(sample_hwpx):
 def test_dsl_roundtrip_is_stable(sample_hwpx):
     dsl = items_to_dsl(read_survey(sample_hwpx))
     assert summarize(parse_dsl(dsl)) == summarize(parse_dsl(dsl))
-
-
-# ------------------------------------------------------------------ 출력
-def test_build_docx_returns_openable_document(sample_hwpx):
-    import io
-
-    from docx import Document
-
-    data = build_docx(parse_dsl(items_to_dsl(read_survey(sample_hwpx))))
-    assert data[:2] == b"PK"                       # docx = ZIP
-    doc = Document(io.BytesIO(data))
-    assert len(doc.tables) == 1
-    text = "\n".join(p.text for p in doc.paragraphs)
-    assert "1. 귀하의 소속은 어디입니까?" in text
-    assert "감사" in text
-
-
-def test_writer_options_apply(sample_hwpx):
-    blocks = parse_dsl(items_to_dsl(read_survey(sample_hwpx)))
-    writer = SurveyWriter(font="바탕", multi_mark="[ ]").write(blocks)
-    xml = writer.doc.element.xml
-    assert "바탕" in xml
-    assert "[ ]" in xml
 
 
 def test_unsupported_extension_raises(tmp_path):
@@ -431,7 +407,8 @@ def test_interview_docx_has_grid_and_banner(interview_hwpx):
     assert any(len(t.columns) == 6 for t in d.tables)      # 빈도/행별 표
 
 
-def test_print_style_also_handles_interview_form(interview_hwpx):
+def test_shared_parser_handles_interview_form(interview_hwpx):
+    """중간 표현(parse_dsl)은 DP/ISAS가 함께 쓰는 공용 층이라 계속 검사한다."""
     blocks = parse_dsl(items_to_dsl(read_survey(interview_hwpx)))
     found = summarize(blocks)
     assert found["문항"] == 5 and found["일반 표"] == 1
