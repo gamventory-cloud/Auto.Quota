@@ -2,8 +2,9 @@
 """명령줄 사용: python -m hwp_survey.cli 설문지.hwp 결과.docx [--dsl 중간.txt]"""
 import argparse
 
-from . import (DPWriter, items_to_dp_dsl, items_to_dsl, parse_dp, parse_dsl,
-               read_survey, summarize, summarize_dp, SurveyWriter)
+from . import (DPWriter, ISASWriter, items_to_dp_dsl, items_to_dsl,
+               items_to_isas_dsl, parse_dp, parse_dsl, parse_isas, read_survey,
+               summarize, summarize_dp, summarize_isas, SurveyWriter)
 
 
 def main():
@@ -14,8 +15,8 @@ def main():
     ap.add_argument("--from-dsl", action="store_true",
                     help="src를 중간 텍스트(.txt)로 간주하고 바로 렌더링")
     ap.add_argument("--font", default=None, help="한글 글꼴")
-    ap.add_argument("--style", choices=["print", "dp"], default="print",
-                    help="print=인쇄용 설문지, dp=리서치사 DP 스크립트")
+    ap.add_argument("--style", choices=["print", "dp", "isas"], default="print",
+                    help="print=인쇄용 설문지, dp=DP 스크립트, isas=ISAS 표준")
     args = ap.parse_args()
 
     if args.from_dsl:
@@ -25,15 +26,19 @@ def main():
         items = read_survey(args.src)
         print(f"추출: 문단 {sum(1 for k, _ in items if k == 'p')}개, "
               f"표 {sum(1 for k, _ in items if k == 'table')}개")
-        dsl = (items_to_dp_dsl(items) if args.style == "dp"
-               else items_to_dsl(items))
+        dsl = {"dp": items_to_dp_dsl, "isas": items_to_isas_dsl,
+               "print": items_to_dsl}[args.style](items)
 
     if args.dsl:
         with open(args.dsl, "w", encoding="utf-8") as f:
             f.write(dsl)
         print("중간 텍스트:", args.dsl)
 
-    if args.style == "dp":
+    if args.style == "isas":
+        doc = parse_isas(dsl)
+        print("인식:", summarize_isas(doc))
+        ISASWriter(**({"font": args.font} if args.font else {})).write(doc).save(args.dst)
+    elif args.style == "dp":
         doc = parse_dp(dsl)
         print("인식:", summarize_dp(doc))
         DPWriter(**({"font": args.font} if args.font else {})).write(doc).save(args.dst)
