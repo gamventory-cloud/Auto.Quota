@@ -849,3 +849,36 @@ def test_options_after_grid_are_not_dropped():
     doc = parse_isas(dsl)
     q = [b for b in doc["blocks"] if b["kind"] == "question"][0]
     assert [o["text"] for o in q["options"]] == ["가격이 비싸서", "원하는 메뉴가 없어서"]
+
+
+def test_letter_part_labels_and_deep_subnumbers(tmp_path):
+    """'B0.' 'A3-2-1.' 처럼 알파벳 파트 번호와 여러 단계 하위 번호를 인식한다."""
+    body = [para("B0. 겪으신 피해 영역을 모두 선택해 주십시오."),
+            para("① 온라인 티켓 예매 ② 현장판매 티켓 구매"),
+            para("A3-2-1. 식음료를 구매하지 않으신 이유는 무엇입니까?"),
+            para("① 가격이 비싸서 ② 원하는 메뉴가 없어서")]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "parts.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+
+    doc = parse_isas(items_to_isas_dsl(read_survey(str(path))))
+    qs = [b for b in doc["blocks"] if b["kind"] == "question"]
+    assert len(qs) == 2                                  # 둘 다 문항으로 인식
+    assert all(len(q["options"]) == 2 for q in qs)
+
+
+def test_recovered_paragraph_placement_keeps_order():
+    """되찾은 문단은 번호 차례에 맞는 자리에 들어간다."""
+    from hwp_survey.reader import _label_key, _place
+
+    items = [("p", "A3-2. 지출 항목별 비용을 기입해 주십시오."),
+             ("table", [["① 가격이 비싸서"], ["② 원하는 메뉴가 없어서"]]),
+             ("p", "A3-3. 총 비용은 어느 범위입니까?"),
+             ("p", "A4. 온라인 예매 경험을 묻습니다.")]
+    assert _label_key("A3-2-1. 왜 구매하지 않으셨습니까?") == (1, (3, 2, 1))
+    # 보기 목록 앞, A3-3 뒤가 아니라 앞 -> 보기가 자기 문항을 따라오게 된다
+    assert _place(items, "A3-2-1. 왜 구매하지 않으셨습니까?", 0) == 1
+    # 번호가 앞선 문항(A3-3)을 넘어가지 않는다
+    assert _place(items, "A3-4. 좌석은 어디였습니까?", 0) == 3
