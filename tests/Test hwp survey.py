@@ -894,3 +894,50 @@ def test_isas_keeps_original_labels_by_default(isas_hwpx):
     assert "S1" in labels and "S2" in labels      # 다시 매기지 않는다
     assert "배문1" in labels
     assert not any(l.startswith("DQ") for l in labels)
+
+
+# =============================== 표 첫 행이 구역 제목 / 한 행이 문항 하나인 표
+@pytest.fixture
+def titled_table_hwpx(tmp_path):
+    """'Ⅵ. …' 제목을 표 안에 넣은 척도 표 + 인적사항(한 행 = 한 문항) 표."""
+    titled = table([["Ⅵ. 다음은 제도적 지원에 관한 의견을 묻는 질문입니다."],
+                    ["", "", "전혀 그렇지않다", "-", "보통이다", "-", "매우 그렇다"],
+                    ["1", "창업자금 지원제도가 도움이 된다.", "①", "②", "③", "④",
+                     "⑤", "⑥", "⑦"],
+                    ["2", "정부의 자금지원이 도움이 된다.", "①", "②", "③", "④",
+                     "⑤", "⑥", "⑦"]])
+    demo = table([["귀하의 성별은?", "① 남성 ② 여성"],
+                  ["귀하의 연령은?", "① 20대 ② 30대 ③ 40대"]])
+    body = [titled, para("Ⅶ. 아래 질문을 읽어보시고 해당하는 답에 체크해 주십시오."),
+            demo]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "titled.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+    return str(path)
+
+
+def test_table_title_row_becomes_section(titled_table_hwpx):
+    """표 첫 행의 'Ⅵ. …' 제목을 문항 행으로 오인하지 않는다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(titled_table_hwpx)))
+    sections = [b["text"] for b in doc["blocks"] if b["kind"] == "section"]
+    assert any("제도적 지원" in s for s in sections)
+
+    matrix = [b for b in doc["blocks"] if b["kind"] == "question"
+              and b["tag"].startswith("행별")][0]
+    assert len(matrix["scale"]) == 7                      # 표 자체 라벨을 쓴다
+    assert matrix["scale"][0] == "전혀 그렇지않다"
+    rows = [o["text"] for o in matrix["options"]]
+    assert rows == ["창업자금 지원제도가 도움이 된다.", "정부의 자금지원이 도움이 된다."]
+    assert not any("Ⅵ." in r for r in rows)               # 제목이 행으로 들어가지 않는다
+
+
+def test_one_question_per_row_table(titled_table_hwpx):
+    """'귀하의 성별은? | ① 남성 ② 여성' 표는 행마다 문항 하나다."""
+    doc = parse_isas(items_to_isas_dsl(read_survey(titled_table_hwpx)))
+    qs = [b for b in doc["blocks"] if b["kind"] == "question"
+          and b["text"].startswith("귀하의")]
+    assert [q["text"] for q in qs] == ["귀하의 성별은?", "귀하의 연령은?"]
+    assert [len(q["options"]) for q in qs] == [2, 3]
+    assert all(q["tag"] == "1개 선택" for q in qs)          # 행별 표가 아니다
