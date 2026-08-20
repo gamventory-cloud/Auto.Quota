@@ -278,18 +278,20 @@ def _recover_dropped(path: str, items: list) -> list:
 def _place(items, text, cursor) -> int:
     """되찾은 문단을 넣을 자리.
 
-    글상자 안의 문단은 이진 구조에서 문서 흐름과 다른 순서로 저장된다.
-    문항 번호가 있으면 번호 차례에 맞는 자리를 찾고, 없으면 읽던 자리에 둔다.
+    기본은 이진 구조에서 읽어온 순서(cursor)를 따른다. 다만 글상자는 문서
+    흐름과 다른 자리에 저장되기도 해서, 같은 계열의 더 큰 번호(A3-3)를 이미
+    지나쳐 버린 경우에만 번호 차례에 맞게 앞으로 되돌린다.
     """
     key = _label_key(text)
     if key is None:
         return cursor
-    for n, (kind, payload) in enumerate(items):
+    for n in range(min(cursor, len(items))):
+        kind, payload = items[n]
         blob = payload if kind == "p" else (payload[0][0] if payload and payload[0]
                                             else "")
         other = _label_key(blob)
-        if other and other > key:
-            return _before_options(items, n, key)
+        if other and other[0] == key[0] and other[1] > key[1]:
+            return _before_options(items, n, key)   # 번호를 앞질렀다
     return cursor
 
 
