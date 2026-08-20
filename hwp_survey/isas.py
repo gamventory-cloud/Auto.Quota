@@ -46,10 +46,16 @@ RE_DEMO = re.compile(r"배경|인적\s*사항|demo|배문", re.I)
 # =====================================================================
 # 1) 중간 텍스트 (DP 문법을 그대로 쓰되 번호와 태그를 ISAS 관행으로)
 # =====================================================================
-def items_to_isas_dsl(items, add_matrix_hint=False, **kwargs) -> str:
+def items_to_isas_dsl(items, add_matrix_hint=False, renumber=False, **kwargs) -> str:
+    """ISAS 중간 텍스트.
+
+    renumber=False(기본): 원본 문항 번호를 그대로 쓴다. [PROG: B0=99 → C파트 이동]
+        처럼 지시문이 원본 번호를 가리키므로, 번호를 바꾸면 지시문과 어긋난다.
+    renumber=True: SQ / AQ / Qk-n / DQ 체계로 다시 매긴다.
+    """
     # ISAS 규칙 1)은 원문 텍스트를 그대로 쓰라고 한다 -> 안내 문장을 덧붙이지 않는다
     dsl = items_to_dp_dsl(items, add_matrix_hint=add_matrix_hint, **kwargs)
-    return renumber_isas(retag_isas(dsl))
+    return renumber_isas(retag_isas(dsl), renumber=renumber)
 
 
 def retag_isas(dsl: str) -> str:
@@ -64,8 +70,10 @@ def retag_isas(dsl: str) -> str:
     return "\n".join(out)
 
 
-def renumber_isas(dsl: str) -> str:
-    """ISAS 번호 체계로 다시 매긴다.
+def renumber_isas(dsl: str, renumber: bool = False) -> str:
+    """문항 번호를 정리한다.
+
+    renumber=False 면 원본 번호를 지키고, 번호가 없는 문항('?.')에만 새로 매긴다.
 
       * 첫 구역(선별/스크리닝) 이전·안쪽 문항 -> SQ1, SQ2 …
       * 참여 동의 문항                        -> AQ
@@ -74,8 +82,10 @@ def renumber_isas(dsl: str) -> str:
       * 배경/인적사항 구역                    -> DQ1, DQ2 …
     """
     lines = dsl.splitlines()
+    if not renumber:
+        return label_placeholders(lines)
     if not any(l.startswith("##") for l in lines):
-        return renumber_without_sections(lines)
+        return renumber_without_sections(lines, renumber=renumber)
 
     # 1) 구역 경계와 구역별 문항 수를 먼저 센다
     zones = []            # (시작줄, 종류, 문항 수)
@@ -114,6 +124,9 @@ def renumber_isas(dsl: str) -> str:
         m = RE_LABEL.match(line)
         body = line[2:].strip() if line.startswith("?.") else m.group(2).strip()
 
+        if not renumber and not line.startswith("?."):
+            continue                              # 원본 번호를 그대로 둔다
+
         if not consent_done and "응답해 주시기" in body and "동의" not in body:
             lines[n] = f"AQ. {body}"              # 참여 동의 문항
             consent_done = True
@@ -134,7 +147,41 @@ def renumber_isas(dsl: str) -> str:
     return "\n".join(lines)
 
 
-def renumber_without_sections(lines) -> str:
+RE_SECTION_LABEL = re.compile(
+    r"^##\s*((?:SQ|DQ|AQ|[A-Z]|문|파트|PART)\s*\d*)\s*[.)\]】]", re.I)
+
+
+def label_placeholders(lines) -> str:
+    """원본 번호는 그대로 두고, 번호가 없는 문항('?.')에만 번호를 붙인다.
+
+    바로 앞 구역이나 문항의 번호를 이어 쓴다(예: '문10' 구역 -> 문10-1, 문10-2).
+    원본에 이미 있는 번호와 부딪히지 않게 하는 것이 목적이다.
+    """
+    base, seq, fallback = None, 0, 0
+    for n, line in enumerate(lines):
+        section = RE_SECTION_LABEL.match(line)
+        if section:
+            base = re.sub(r"\s+", "", section.group(1))
+            seq = 0
+            continue
+        if not is_question_line(line):
+            continue
+        label = RE_LABEL.match(line)
+        if label and not line.startswith("?."):
+            base = re.sub(r"\s+", "", label.group(1))
+            seq = 0
+            continue
+        body = line[2:].strip()
+        if base:
+            seq += 1
+            lines[n] = f"{base}-{seq}. {body}"
+        else:
+            fallback += 1
+            lines[n] = f"Q{fallback}. {body}"
+    return "\n".join(lines)
+
+
+def renumber_without_sections(lines, renumber: bool = False) -> str:
     """구역 표시가 없는 설문지: 첫 행별 문항 앞은 SQ, 그 뒤는 Q."""
     first_matrix = next((n for n, l in enumerate(lines)
                          if is_question_line(l) and "행별" in l), None)
@@ -144,6 +191,8 @@ def renumber_without_sections(lines) -> str:
             continue
         m = RE_LABEL.match(line)
         body = line[2:].strip() if line.startswith("?.") else m.group(2).strip()
+        if not renumber and not line.startswith("?."):
+            continue                              # 원본 번호를 그대로 둔다
         if first_matrix is not None and n >= first_matrix:
             q += 1
             lines[n] = f"Q{q}. {body}"
