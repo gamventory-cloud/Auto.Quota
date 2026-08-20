@@ -226,9 +226,10 @@ def preflight_targets(m_keys, ex_keys_list, main_map, ex_maps,
                 'level': 'error', 'group': j, 'kind': 'group_sum_low',
                 'msg': (f"추가 쿼터 목표 합계가 {cap_sum:,}명인데, 메인 목표 "
                         f"{target_total:,}명을 채우려면 이 그룹에서 최소 {lo:,}명이 "
-                        f"계상되어야 합니다. 초과가 금지되어 있으므로 "
-                        f"**메인 100% 달성이 불가능**합니다. "
-                        f"목표 합계를 {lo:,}명 이상으로 올리세요."),
+                        f"들어와야 합니다. 목표를 넘기는 것을 허용하지 않았으므로 "
+                        f"**메인 쿼터를 다 채울 수 없습니다**. "
+                        f"목표 합계를 {lo:,}명 이상으로 올리거나, 허용 편차를 "
+                        f"'정확히 맞춤'이 아닌 쪽으로 바꾸세요."),
                 'numbers': {'cap_sum': cap_sum, 'need_min': lo, 'target_total': target_total},
             })
         elif cap_sum > hi:
@@ -244,14 +245,14 @@ def preflight_targets(m_keys, ex_keys_list, main_map, ex_maps,
             out.append({
                 'level': 'info', 'group': j, 'kind': 'group_sum_ok',
                 'msg': (f"추가 쿼터 목표 합계 {cap_sum:,}명 — 달성 가능 범위 "
-                        f"{lo:,}~{hi:,}명 안에 있습니다."),
+                        f"{lo:,}~{hi:,}명 안에 있습니다. 맞출 수 있는 범위입니다."),
                 'numbers': {'cap_sum': cap_sum, 'lo': lo, 'hi': hi},
             })
 
         if na_rows:
             out.append({
                 'level': 'warn', 'group': j, 'kind': 'na_rows',
-                'msg': (f"이 그룹의 변수가 무응답인 응답자가 {na_rows:,}명입니다. "
+                'msg': (f"이 항목의 변수가 무응답인 응답자가 {na_rows:,}명입니다. "
                         f"이들을 뽑으면 추가 쿼터에 1도 계상되지 않아, 그만큼 "
                         f"목표 합계를 채울 수 없습니다."),
                 'numbers': {'na_rows': na_rows},
@@ -745,8 +746,8 @@ def plan_recruitment(m_keys, ex_keys_list, main_map, ex_maps,
         return RecruitPlan(
             feasible=False, n_patterns=len(patterns),
             solve_sec=time.perf_counter() - t0,
-            notes=["허용 편차 안에서는 추가 수집으로도 목표를 맞출 수 없습니다. "
-                   "편차 한계를 넓히거나 목표를 조정해야 합니다."])
+            notes=["응답자를 더 모으더라도 지금 허용 편차 안에서는 목표를 맞출 수 "
+                   "없습니다. 편차 한계를 넓히거나 목표를 조정해야 합니다."])
     need = int(round(solver.ObjectiveValue()))
     if st == cp_model.OPTIMAL:
         model.Add(obj1 == need)
@@ -770,8 +771,8 @@ def plan_recruitment(m_keys, ex_keys_list, main_map, ex_maps,
                 if st3 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     solver, st = s3, st3
     else:
-        notes.append("시간 제한 내에 최적성을 증명하지 못했습니다. "
-                     "지시서는 유효하지만 더 적은 인원으로 가능할 수 있습니다.")
+        notes.append("시간 안에 계산을 끝내지 못했습니다. 아래 지시서대로 하면 목표는 "
+                     "채워지지만, 더 적은 인원으로도 가능할 수 있습니다.")
 
     # --- 결과 정리 ---
     plan = RecruitPlan(feasible=True, n_patterns=len(patterns), notes=notes)
@@ -887,7 +888,7 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
             diagnosis=Diagnosis(
                 main_short=dict(main_map),
                 main_avail={k: 0 for k in main_map},
-                main_reason={k: "⚠️ 물리적 부족 (데이터 없음)" for k in main_map},
+                main_reason={k: "⚠️ 표본이 모자람 (데이터 없음)" for k in main_map},
                 arithmetic=pre,
             ),
             n_profiles=0, n_rows_considered=0,
@@ -920,19 +921,18 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
         band_txt = ("±{}명".format(ex_tol_abs) if ex_tol_abs else
                     "±{:.0%}".format(ex_tol_pct) if ex_tol_pct else "편차 0(정확히 맞춤)")
         notes.append(
-            f"추가 쿼터 허용 편차 {band_txt} 안에서는 해가 존재하지 않습니다. "
-            "메인 쿼터를 채우려면 추가 쿼터가 그보다 더 벗어나야 합니다. "
-            "한계를 풀고 편차를 최소화하는 방식으로 다시 계산했습니다.")
+            f"추가 쿼터를 {band_txt} 안에서 맞출 방법이 없습니다. 메인 쿼터를 채우려면 "
+            "추가 쿼터가 그보다 더 벌어질 수밖에 없습니다. 한계를 풀고 벌어지는 폭을 "
+            "최대한 줄이는 쪽으로 다시 계산했습니다.")
         ex_overflow, ex_tol_unlimited = True, True
         (res, used) = _try(ex_overflow=True, ex_tol_unlimited=True)
         ok = res[0]
 
     if ok == "HARD_INFEASIBLE":
         notes.append(
-            "메인 쿼터를 하드 쿼터로 걸면 해가 존재하지 않습니다. 셀별 목표를 "
-            "정확히 채우는 것이 물리적으로 불가능하다는 뜻입니다. 부족을 허용하는 "
-            "방식으로 다시 계산했으니, 아래 부족 분석에서 어느 셀이 불가능한지 "
-            "확인하세요.")
+            "셀별 목표를 하나도 빠짐없이 채우는 것은 불가능합니다. 모자란 셀이 "
+            "생기는 것을 허용하고 다시 계산했으니, 아래 부족 분석에서 어느 셀이 "
+            "안 되는지 확인하세요.")
         main_hard = False
         (res, used) = _try(main_hard=False)
         ok = res[0]
@@ -941,8 +941,8 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
 
     if ok == "GUARD_INFEASIBLE":
         notes.append(
-            f"최소 달성률 {min_fill:.0%} 를 모든 셀에서 만족시킬 수 없어 "
-            "하한 없이 다시 계산했습니다. 일부 셀이 크게 미달할 수 있습니다.")
+            f"모든 셀을 목표의 {min_fill:.0%} 이상으로 채우는 것은 불가능해서, "
+            "그 조건을 빼고 다시 계산했습니다. 일부 셀이 많이 모자랄 수 있습니다.")
         (res, used) = _try(min_fill=0.0)
         (ok, st, solver, n_vars, short_main, short_ex, over_ex, stage_values) = res
 
@@ -1034,10 +1034,10 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
             if avail.get(k, 0) < tgt:
                 p = tgt - avail.get(k, 0)
                 diag.main_reason[k] = (
-                    f"⚠️ 물리적 부족 (보유 {avail.get(k, 0)}명)" if short <= p
-                    else f"⚠️+⚔️ 물리적 {p}명 + 경합 {short - p}명")
+                    f"⚠️ 표본이 모자람 (데이터에 {avail.get(k, 0)}명뿐)" if short <= p
+                    else f"⚠️+⚔️ 표본 부족 {p}명 + 다른 쿼터에 밀림 {short - p}명")
             else:
-                diag.main_reason[k] = "⚔️ 경합 부족 (추가 쿼터에 막힘)"
+                diag.main_reason[k] = "⚔️ 다른 쿼터에 밀림 (추가 쿼터가 막음)"
 
         # 추가 쿼터 부족 사유
         group_sum_bad = {d['group'] for d in pre
@@ -1062,11 +1062,11 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
                     continue
                 diag.ex_short[j][k] = short
                 if avail_k.get(k, 0) < cap:
-                    diag.ex_reason[j][k] = f"⚠️ 물리적 부족 (보유 {avail_k.get(k, 0)}명)"
+                    diag.ex_reason[j][k] = f"⚠️ 표본이 모자람 (데이터에 {avail_k.get(k, 0)}명뿐)"
                 elif j in group_sum_bad:
-                    diag.ex_reason[j][k] = "⚖️ 구조적 (그룹 목표 합계 불일치)"
+                    diag.ex_reason[j][k] = "⚖️ 목표 합계가 안 맞음"
                 else:
-                    diag.ex_reason[j][k] = "⚔️ 경합 부족 (다른 쿼터와 충돌)"
+                    diag.ex_reason[j][k] = "⚔️ 다른 쿼터에 밀림"
 
         # 미달 원인 정량화
         if total < target_total:
