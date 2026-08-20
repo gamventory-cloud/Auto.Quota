@@ -51,6 +51,9 @@ RE_BOX_SPLIT = re.compile(r"[□☐▢]\s*[^□☐▢]+")
 #: '※ 1=전혀 그렇지 않다, 3=보통이다, 5=매우 그렇다' 형태의 척도 안내
 RE_SCALE_NOTE = re.compile(r"(\d)\s*=\s*([^,;/]+)")
 
+#: 표 머리의 구분 열 이름. 보기 라벨이 아니다.
+HEADER_WORDS = {"번호", "문항", "구분", "항목", "내용", "No", "no"}
+
 RE_FOOTNOTE = re.compile(r"^\s*\*{1,3}\s*\S")          # * ** *** 각주
 RE_LEADIN = re.compile(r"^\s*[♣◈▣▶]\s*\S")             # ♣ 다음으로 ...
 RE_FIELDWORK = re.compile(r"^\s*▷?\s*조사원\s*[:：]\s*(.+)$")  # ▷ 조사원: ...
@@ -415,11 +418,31 @@ def scale_header(rows) -> list[str] | None:
     head = [c.strip() for c in rows[0]]
     if any(ch in c for c in head for ch in CIRCLED):
         return None
-    labels = [c for c in head[1:] if c]
+    labels = [c for c in head[1:] if c and c not in HEADER_WORDS]
     if len(labels) < 2:                       # '예 / 아니오' 2점 표도 매트릭스다
         return None
-    body_marks = sum(1 for r in rows[1:] for c in r if c.strip() in list(CIRCLED))
-    return labels if body_marks >= len(labels) else None
+    per_row = [sum(1 for c in r if c.strip() in list(CIRCLED)) for r in rows[1:]]
+    points = max(per_row) if per_row else 0
+    if points < len(labels):
+        return None
+    if points > len(labels):                  # 양 끝만 라벨을 단 척도
+        spread = [""] * points
+        spread[0], spread[-1] = labels[0], labels[-1]
+        labels = [lab or str(i) for i, lab in enumerate(spread, 1)]
+    return labels
+
+
+def option_table(rows) -> list[str] | None:
+    """보기를 여러 칸에 나눠 담은 표. 행 우선(좌→우, 위→아래)으로 읽는다."""
+    cells = [c.strip() for r in rows for c in r if c.strip()]
+    if len(cells) < 2:
+        return None
+    marked = [c for c in cells if c[0] in CIRCLED]
+    if len(marked) < 2 or len(marked) < len(cells) / 2:
+        return None
+    if any(len(c) > 60 for c in cells):        # 문항이 섞인 표는 제외
+        return None
+    return [re.sub(rf"^[{CIRCLED}]\s*", "", c).strip() for c in cells]
 
 
 def grid_lines(rows) -> list[str]:
