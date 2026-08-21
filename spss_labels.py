@@ -53,9 +53,9 @@ utils.py 와의 관계
      - 데이터에 있는 값이 값라벨에 없으면 '오류' (코드 밀림·척도 시작값 오류 신호)
      - 복수응답 저장 방식이 데이터와 다르면 '오류'
      - 생성된 .sav 를 되읽어 라벨이 실제로 들어갔는지 왕복 검증
-8. 값라벨 표기(value_style)
+8. 값라벨 표기(value_style) — 기본값 numbered
+     numbered : `1'  1) 남성'`  (기본. 조사기관 Label 시트 표기와 동일)
      plain    : `1 "남성"`
-     numbered : `1'  1) 남성'`  (조사기관 Label 시트 표기와 동일)
 9. 복수응답 저장 방식(multi_style)
      category  : 열마다 선택한 보기 코드, 미선택은 공백 (기본) -> MRSETS MCGROUP
      position  : 보기별 열이며 그 열은 자기 코드만 (1열=1, 2열=2 …) -> MCGROUP
@@ -84,7 +84,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 
 
@@ -1055,7 +1055,7 @@ def parse_missing(spec: str) -> list[float] | tuple[float, float] | None:
 # ------------------------------------------------------------------ .sps
 
 def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "",
-                 value_style: str = "plain") -> str:
+                 value_style: str = "numbered") -> str:
     L: list[str] = [
         "* ==========================================================",
         "* SPSS 라벨 구문 (자동 생성)",
@@ -1157,7 +1157,7 @@ def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "",
 
 
 def write_syntax(variables: list[Var], path: str | Path, source: str = "",
-                 value_style: str = "plain") -> Path:
+                 value_style: str = "numbered") -> Path:
     path = Path(path)
     # SPSS 한글 호환을 위해 BOM 포함 UTF-8로 저장
     path.write_text(build_syntax(variables, source=source, value_style=value_style),
@@ -1189,7 +1189,7 @@ def load_data(path: str | Path) -> pd.DataFrame:
 
 def write_sav(variables: list[Var], path: str | Path,
               data: pd.DataFrame | None = None,
-              value_style: str = "plain") -> tuple[Path, dict[str, list[str]]]:
+              value_style: str = "numbered") -> tuple[Path, dict[str, list[str]]]:
     """라벨이 적용된 .sav 저장. data가 없으면 0케이스 템플릿을 만든다.
 
     반환: (경로, {'labeled': [...], 'missing_in_data': [...], 'unlabeled_in_data': [...]})
@@ -1644,14 +1644,14 @@ def codebook_upload_to_vars(xlsx_bytes: bytes) -> list[Var]:
 
 
 def syntax_bytes(variables: list[Var], source: str = "",
-                 value_style: str = "plain") -> bytes:
+                 value_style: str = "numbered") -> bytes:
     # SPSS 한글 호환을 위해 BOM 포함
     return build_syntax(variables, source=source,
                         value_style=value_style).encode("utf-8-sig")
 
 
 def sav_bytes(variables: list[Var], data: pd.DataFrame | None = None,
-              value_style: str = "plain") -> tuple[bytes, dict[str, list[str]]]:
+              value_style: str = "numbered") -> tuple[bytes, dict[str, list[str]]]:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "out.sav"
         _, report = write_sav(variables, path, data=data, value_style=value_style)
