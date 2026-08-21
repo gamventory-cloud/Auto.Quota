@@ -41,20 +41,13 @@ st.markdown(_html("""
   --mono:'IBM Plex Mono',ui-monospace,monospace;
 }
 .qm *{font-family:'IBM Plex Sans KR',-apple-system,'Malgun Gothic',sans-serif;}
-.qm-hero{padding:8px 0 22px;border-bottom:1px solid var(--line);margin-bottom:24px;}
+.qm-hero{padding:8px 0 22px;border-bottom:1px solid var(--line);margin-bottom:26px;}
 .qm-eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.18em;
   text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:12px;}
 .qm-title{font-size:44px;font-weight:700;letter-spacing:-.03em;line-height:1.1;
   margin:0 0 10px;color:inherit;}
 .qm-title em{font-style:normal;color:var(--accent);}
 .qm-sub{font-size:15.5px;line-height:1.65;opacity:.72;max-width:58ch;margin:0;}
-.qm-flow{display:flex;flex-wrap:wrap;align-items:center;gap:9px;
-  padding:13px 16px;border:1px solid var(--line);border-radius:10px;
-  background:var(--surface);margin-bottom:26px;}
-.qm-flow-label{font-family:var(--mono);font-size:11px;letter-spacing:.14em;
-  text-transform:uppercase;opacity:.55;margin-right:4px;}
-.qm-step{font-size:13px;font-weight:500;white-space:nowrap;}
-.qm-arrow{opacity:.35;font-size:12px;}
 .qm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;}
 .qm-card{border:1px solid var(--line);border-radius:12px;padding:22px 22px 18px;
   background:var(--surface);position:relative;overflow:hidden;
@@ -90,8 +83,7 @@ st.markdown(_html("""
 
 # ==============================================================================
 # 본문
-#   카드 순서는 사이드바 순서가 아니라 실제 작업 순서를 따른다.
-#   설명 문구는 이 블록만 고치면 된다.
+#   설명 문구와 입출력 칩은 이 블록만 고치면 된다.
 # ==============================================================================
 st.markdown(_html("""
 <div class="qm">
@@ -102,18 +94,6 @@ st.markdown(_html("""
       조사 데이터를 정리하고 쿼터를 맞추는 작업을 한곳에서 처리합니다.
       왼쪽 사이드바에서 도구를 선택하세요.
     </p>
-  </div>
-  <div class="qm-flow">
-    <span class="qm-flow-label">작업 순서</span>
-    <span class="qm-step">설문지 변환</span>
-    <span class="qm-arrow">&rarr;</span>
-    <span class="qm-step">SPSS 라벨링</span>
-    <span class="qm-arrow">&rarr;</span>
-    <span class="qm-step">SPSS 정제</span>
-    <span class="qm-arrow">&rarr;</span>
-    <span class="qm-step">응답시간 변환</span>
-    <span class="qm-arrow">&rarr;</span>
-    <span class="qm-step">쿼터 솔루션</span>
   </div>
   <div class="qm-grid">
     <div class="qm-card feature">
@@ -178,18 +158,17 @@ st.markdown(_html("""
       <div class="qm-stage">데이터 정리</div>
       <h2 class="qm-name">응답시간 변환</h2>
       <p class="qm-desc">
-        응답 시각 기록을 다루기 쉬운 형태로 바꿉니다.
-        불성실 응답을 걸러낼 때 기준으로 쓸 수 있습니다.
+        문항별 체류시간이 세로로 쌓여 있는 데이터를 한 명당 한 줄로 돌립니다.
+        응답자 단위로 붙여야 원자료와 합치거나 불성실 응답을 걸러낼 수 있습니다.
       </p>
       <div class="qm-io">
-        <span class="qm-chip">응답 원자료</span>
+        <span class="qm-chip">체류시간 원자료 (세로)</span>
         <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">응답시간 정리된 데이터</span>
+        <span class="qm-chip out">응답자별 가로 데이터</span>
       </div>
     </div>
   </div>
   <div class="qm-foot">
-    사이드바 순서와 실제 작업 순서는 다릅니다. 위 <b>작업 순서</b>대로 진행하면 됩니다.<br>
     지인들만 사용하는 비공개 도구입니다.
   </div>
 </div>
