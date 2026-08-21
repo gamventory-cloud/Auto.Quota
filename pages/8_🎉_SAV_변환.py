@@ -358,19 +358,26 @@ def num_format(sr: pd.Series) -> str:
     return f"F{width}.2"
 
 
+SAVE_ALL, SAVE_NUM, SAVE_STR = "숫자＋문자", "숫자만", "문자만"
+
+
 def build_sav(df: pd.DataFrame,
               spec: pd.DataFrame,
-              file_label: str = "") -> tuple:
+              file_label: str = "",
+              save_mode: str = SAVE_ALL,
+              always: tuple = ()) -> tuple:
     """
     df    : 원본 표
     spec  : 열마다 한 행. 필요한 칸 —
             포함 / 원본열 / 변수명 / 변수라벨 / 유형 / 측정 / 결측코드
-    반환  : (sav bytes, 값라벨 dict, 경고 목록)
+    save_mode : 숫자＋문자 / 숫자만 / 문자만
+    always    : 저장 범위와 상관없이 남길 열(ID 등)
+    반환  : (sav bytes, 값라벨 dict, 경고 목록, 제외된 열 목록)
     """
     df = df.reset_index(drop=True)
     out, labels, value_labels, measures = {}, {}, {}, {}
     formats, missing_ranges = {}, {}
-    warns = []
+    warns, skipped = [], []
 
     for _, row in spec.iterrows():
         if not row["포함"]:
@@ -385,6 +392,18 @@ def build_sav(df: pd.DataFrame,
 
         if kind == TYPE_AUTO:
             kind = auto_kind(sr)
+
+        # 저장 범위 적용 (항상 남길 열은 건너뛰지 않는다)
+        if str(src) not in set(map(str, always)):
+            if save_mode == SAVE_NUM and kind == TYPE_STR:
+                skipped.append(str(src))
+                continue
+            if save_mode == SAVE_STR:
+                if kind in (TYPE_NUM, TYPE_DATE):
+                    skipped.append(str(src))
+                    continue
+                if kind == TYPE_CODE:                # 코드 대신 원래 글자를 남긴다
+                    kind = TYPE_STR
 
         if kind == TYPE_NUM:
             conv = pd.to_numeric(sr, errors="coerce")
@@ -435,7 +454,11 @@ def build_sav(df: pd.DataFrame,
                 warns.append(f"‘{src}’ 는 숫자 열이 아니라 결측 코드를 건너뜁니다.")
 
     if not out:
-        raise ValueError("내보낼 열이 하나도 없습니다.")
+        raise ValueError(
+            "내보낼 열이 하나도 없습니다."
+            + (f" (저장 범위를 ‘{save_mode}’ 로 두어 {len(skipped)}개가 빠졌습니다)"
+               if skipped else "")
+        )
 
     res = pd.DataFrame(out)
 
@@ -459,7 +482,7 @@ def build_sav(df: pd.DataFrame,
         except OSError:
             pass
 
-    return data, value_labels, warns
+    return data, value_labels, warns, skipped
 
 
 # ==============================================================================
@@ -683,7 +706,7 @@ if st.session_state.get("sav_sig") != sig:
         if blank:
             empties.append(str(c))
         rows.append({
-            "포함": not blank,
+            "포함": True,
             "원본열": str(c),
             "변수명": to_spss_name(c, i, used),
             "변수라벨": str(c),
@@ -700,10 +723,22 @@ if st.session_state.get("sav_sig") != sig:
 st.subheader("열 설정")
 _empty = st.session_state.get("sav_empty") or []
 if _empty:
-    st.info(
-        f"값이 하나도 없는 열 {len(_empty)}개는 ‘포함’을 꺼두었습니다 — "
-        + ", ".join(_empty[:15]) + (" …" if len(_empty) > 15 else "")
-    )
+    e1, e2 = st.columns([3, 1])
+    with e1:
+        st.caption(
+            f"값이 하나도 없는 열이 {len(_empty)}개 있습니다 — "
+            + ", ".join(_empty[:12]) + (" …" if len(_empty) > 12 else "")
+            + "  (문항 구조를 맞추기 위해 기본은 포함입니다)"
+        )
+    with e2:
+        if st.button("빈 열 빼기", **_wide(st.button)):
+            cur = st.session_state["sav_spec"].copy()
+            cur.loc[cur["원본열"].isin(_empty), "포함"] = False
+            st.session_state["sav_spec"] = cur
+            st.session_state["sav_editor_n"] = \
+                st.session_state.get("sav_editor_n", 0) + 1
+            st.session_state.pop("sav_bytes", None)
+            st.rerun()
 st.caption(
     "**변수명** 은 SPSS에서 쓸 이름(영문·숫자·밑줄만)이고, **변수라벨** 은 원래 "
     "한글 이름입니다. **문자→코드화** 를 고르면 응답 텍스트가 1, 2, 3… 숫자로 "
@@ -750,14 +785,31 @@ with b2:
         st.session_state.pop("sav_bytes", None)
         st.rerun()
 
-o1, o2 = st.columns([3, 1])
+o1, o2, o3 = st.columns([2, 2, 1])
 with o1:
+    save_mode = st.radio("저장할 변수", [SAVE_ALL, SAVE_NUM, SAVE_STR],
+                         key="sav_mode_save", horizontal=True,
+                         help="‘숫자만’ 은 글자로 된 변수를 빼고, ‘문자만’ 은 숫자·날짜를 "
+                              "빼고 코드화 대상도 원래 글자 그대로 저장합니다.")
+with o2:
     file_label = st.text_input("파일 설명(선택)", value="",
                                placeholder="예: 2026년 상반기 본조사")
-with o2:
+with o3:
     st.write("")
     st.write("")
     run = st.button("변환 실행", type="primary", **_wide(st.button))
+
+always_cols = []
+if save_mode != SAVE_ALL:
+    cand = [str(c) for c in df.columns]
+    guess = [c for c in cand
+             if str(c).lower() in ("id", "panel_id", "respondent_id", "no")
+             or c == join_key]
+    always_cols = st.multiselect(
+        "저장 범위와 상관없이 남길 열", cand,
+        default=[c for c in dict.fromkeys(guess)][:3], key="sav_always",
+        help="ID 처럼 나중에 다시 붙일 때 필요한 열은 여기에 두면 항상 들어갑니다.",
+    )
 
 # ── 이름 중복 검사 (변환 전에 잡는다) ─────────────────────────────────────
 active = spec[spec["포함"]]
@@ -779,10 +831,13 @@ if run:
     st.session_state["sav_spec"] = spec
     try:
         with st.spinner("SPSS 파일을 만드는 중…"):
-            data, vlabels, warns = build_sav(df, spec, file_label)
+            data, vlabels, warns, skipped = build_sav(
+                df, spec, file_label, save_mode, tuple(always_cols))
         st.session_state["sav_bytes"] = data
         st.session_state["sav_vlabels"] = vlabels
         st.session_state["sav_warns"] = warns
+        st.session_state["sav_skipped"] = skipped
+        st.session_state["sav_mode_used"] = save_mode
     except Exception as e:                           # noqa: BLE001
         st.session_state.pop("sav_bytes", None)
         st.error(f"변환에 실패했습니다 — {e}")
@@ -792,10 +847,19 @@ if st.session_state.get("sav_bytes"):
     for w in st.session_state.get("sav_warns", []):
         st.warning(w)
 
+    _skip = st.session_state.get("sav_skipped") or []
+    _mode = st.session_state.get("sav_mode_used", SAVE_ALL)
+    if _skip:
+        st.caption(
+            f"‘{_mode}’ 라서 {len(_skip)}개 열을 뺐습니다 — "
+            + ", ".join(_skip[:15]) + (" …" if len(_skip) > 15 else "")
+        )
+
+    suffix = {SAVE_NUM: "_숫자", SAVE_STR: "_문자"}.get(_mode, "")
     st.download_button(
         "💾 .sav 내려받기",
         data=data,
-        file_name=os.path.splitext(up.name)[0] + ".sav",
+        file_name=os.path.splitext(up.name)[0] + suffix + ".sav",
         mime="application/octet-stream",
         type="primary",
     )
