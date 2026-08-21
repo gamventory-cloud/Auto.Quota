@@ -26,7 +26,7 @@ assert sl.MODULE_ROLE == "spss_labels", "spss_labels.py 가 아닌 파일이 imp
 # 파일을 교체했는데도 구버전이 돌아 문항이 누락되는 사고를 잡아낸다.
 # (Streamlit 은 import 된 모듈을 메모리에 유지하므로, 모듈 파일만 바꾸고
 #  서버를 재시작하지 않으면 예전 코드가 계속 실행된다.)
-REQUIRED_SL_VERSION = (1, 6)
+REQUIRED_SL_VERSION = (1, 7)
 
 
 def _module_origin(module):
@@ -161,6 +161,15 @@ with st.sidebar:
              "전체 보기 값라벨을 붙이고 SPSS MRSETS 는 MCGROUP 으로 만듭니다. "
              "0/1 더미를 쓰는 경우에만 마지막 항목을 고르세요.",
     )
+    VALUE_STYLES = {
+        '기본  1 "남성"': "plain",
+        "번호 포함  1'  1) 남성'": "numbered",
+    }
+    value_style_label = st.radio(
+        "값라벨 표기", list(VALUE_STYLES), index=0,
+        help="번호 포함은 보기 번호를 라벨 안에 넣습니다. "
+             "Label 시트 표기(`  2) 여성`)와 맞출 때 사용하세요. "
+             ".sps 와 .sav 에 똑같이 적용됩니다.")
     full_labels = st.checkbox(
         "긴 보기 라벨 원문 유지", value=False,
         help="'분노: 설명…' 형태를 '분노'로 줄이지 않습니다. "
@@ -180,6 +189,7 @@ with st.sidebar:
 
 base0 = tuple(p.strip() for p in base0_raw.replace(",", " ").split() if p.strip())
 multi_style = MULTI_CHOICES[multi_label]
+value_style = VALUE_STYLES[value_style_label]
 
 st.subheader("1. 파일 업로드")
 c1, c2 = st.columns(2)
@@ -311,9 +321,10 @@ if st.button("산출물 생성", type="primary"):
     with st.spinner("생성 중…"):
         try:
             if want_sps:
-                files[f"{stem}.sps"] = sl.syntax_bytes(variables, source=str(ss(K_SRC, "")))
+                files[f"{stem}.sps"] = sl.syntax_bytes(
+                    variables, source=str(ss(K_SRC, "")), value_style=value_style)
             if want_sav:
-                blob, report = sl.sav_bytes(variables, data=data)
+                blob, report = sl.sav_bytes(variables, data=data, value_style=value_style)
                 files[f"{stem}.sav"] = blob
                 st.session_state[K_REPORT] = report
             files[f"{stem}_codebook.xlsx"] = sl.codebook_bytes(variables)
