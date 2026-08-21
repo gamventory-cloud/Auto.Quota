@@ -4,6 +4,7 @@
 ║                                                                          ║
 ║  Raw 데이터와 Code북을 비교해 SPSS 변수명 변경 신텍스를 생성합니다.            ║
 ║  매칭 로직(analyze)은 Streamlit 과 분리해 두어 단독 테스트가 가능합니다.       ║
+║  엑셀 내보내기는 excel_style.py 가 원본 서식을 유지한 채 값만 바꿉니다.        ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -19,6 +20,7 @@ import streamlit as st
 
 # (주의) utils 모듈이 같은 폴더나 상위 폴더에 있어야 합니다.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import excel_style
 import utils
 
 assert utils.MODULE_ROLE == "utils", "utils.py 가 아닌 파일이 import 되었습니다."
@@ -89,7 +91,7 @@ def get_priority(status):
 def analyze(df_raw, df_code, label_col=1):
     """Raw 데이터와 Code북을 대조해 변수명 매핑을 만든다.
 
-    label_col: Code북에서 질문 라벨이 들어 있는 열 번호 (0=A, 1=B, 2=C …)
+    label_col: Code북에서 질문 라벨이 들어 있는 열 번호 (1=B, 2=C …)
 
     반환: (final_data, code_updates, warnings)
     """
@@ -246,149 +248,6 @@ def analyze(df_raw, df_code, label_col=1):
     return final_data, {k: v["name"] for k, v in code_updates.items()}, warnings
 
 
-def read_source_sav(file_bytes):
-    """원본 .sav 에서 값라벨·측도·결측을 읽어온다.
-
-    엑셀에는 응답 라벨(1=남성 …)이 들어 있지 않다. 원본 .sav 를 함께 올리면
-    변수명이 바뀌어도 값라벨을 그대로 옮길 수 있다.
-    키는 소문자 원본 변수명이다.
-    """
-    import tempfile
-    from pathlib import Path as _Path
-
-    import pyreadstat
-
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _Path(tmp) / "src.sav"
-        path.write_bytes(file_bytes)
-        # 값라벨을 코드 그대로 두고 읽는다 (apply_value_formats=False)
-        df, meta = pyreadstat.read_sav(str(path), user_missing=True)
-
-    return {
-        "df": df,
-        "value_labels": {k.lower(): v for k, v in (meta.variable_value_labels or {}).items()},
-        "var_labels": {k.lower(): v for k, v in (meta.column_names_to_labels or {}).items() if v},
-        "measures": {k.lower(): v for k, v in (meta.variable_measure or {}).items()},
-        "missing": {k.lower(): v for k, v in (meta.missing_ranges or {}).items()},
-        "columns": list(meta.column_names or []),
-        "columns_lower": {str(c).lower() for c in (meta.column_names or [])},
-    }
-
-
-def sav_safe_name(original):
-    """.sav 저장이 가능한 열 이름으로 정리.
-
-    SPSS 유니코드 모드는 한글 변수명을 허용하므로(`응답일시` 등) 굳이 영문으로
-    바꾸지 않는다. 공백·특수문자·숫자 시작·예약어만 손본다.
-    변경이 필요 없으면 원래 이름을 그대로 돌려준다.
-    """
-    name = str(original).strip()
-    name = re.sub(r"[\s\-]+", "_", name)                 # 공백·하이픈 -> 밑줄
-    name = re.sub(r"[^\w가-힣]", "", name, flags=re.UNICODE)  # 나머지 특수문자 제거
-    name = re.sub(r"__+", "_", name).strip("_")
-    if not name:
-        return ""
-    if name[0].isdigit():
-        name = "V" + name
-    if name.upper() in RESERVED_WORDS:
-        name = name + "_"
-    while len(name.encode("utf-8")) > 64:
-        name = name[:-1]
-    return name
-
-
-def build_sav(df_raw, edited_df, source=None):
-    """변경된 변수명을 적용한 .sav 를 만든다. (bytes, 적용 내역 dict)
-
-    - 변수라벨은 Code북의 '질문 내용' 을 넣는다 (SPSS 한도 256바이트에서 절단).
-    - source 를 주면 원본 .sav 의 값라벨·측도·결측을 새 변수명으로 옮겨 담는다.
-      (엑셀에는 응답 라벨이 없으므로 원본 .sav 가 있어야 살릴 수 있다)
-    - 이름을 바꾸지 않은 열은 그대로 둔다. 단 공백·특수문자가 있으면 저장이
-      실패하므로 그 부분만 정리하고, 바뀐 열은 반환값에 담아 화면에 알린다.
-      (한글 변수명은 SPSS 유니코드 모드에서 유효하므로 유지한다)
-    """
-    import tempfile
-    from pathlib import Path as _Path
-
-    import pyreadstat
-
-    rename_map, label_map = {}, {}
-    for _, row in edited_df.iterrows():
-        old = str(row["Raw 변수명"]).strip()
-        new = str(row["변경할 변수명"]).strip()
-        if new and new.lower() != "nan":
-            rename_map[old] = new
-        label = str(row.get("질문 내용", "")).strip()
-        if label and label != "-":
-            label_map[old] = label
-
-    df = df_raw.copy()
-    names, labels, auto_fixed, used = [], [], [], set()
-    for col in df.columns:
-        original = str(col).strip()
-        name = rename_map.get(original) or sav_safe_name(original)
-        if not name:
-            name = "V" + str(len(names) + 1)
-        if original not in rename_map and name != original:
-            auto_fixed.append(f"{original} → {name}")
-        base = name
-        n = 2
-        while name in used:            # 이름이 겹치면 SPSS 가 파일을 거부한다
-            name = f"{base}_{n}"
-            n += 1
-        used.add(name)
-        names.append(name)
-        labels.append(byte_trim(label_map.get(original, original), 256))
-
-    df.columns = names
-
-    # 원본 .sav 의 값라벨·측도·결측을 새 변수명 기준으로 옮긴다
-    value_labels, measures, missing_ranges = {}, {}, {}
-    carried, not_found = [], []
-    if source:
-        for original, new_name in zip([str(c).strip() for c in df_raw.columns], names):
-            key = original.lower()
-            if key in source["value_labels"]:
-                value_labels[new_name] = source["value_labels"][key]
-                carried.append(new_name)
-            elif key not in source.get("columns_lower", set()):
-                not_found.append(original)
-            if key in source["measures"]:
-                measures[new_name] = source["measures"][key]
-            if key in source["missing"]:
-                missing_ranges[new_name] = source["missing"][key]
-    for name in names:
-        if df[name].dtype == object:
-            converted = pd.to_numeric(df[name], errors="coerce")
-            # 원래 값이 있는데 숫자로 못 바꾼 칸이 하나도 없으면 숫자열로 본다
-            if not (df[name].notna() & converted.isna()).any():
-                df[name] = converted
-            else:
-                df[name] = df[name].astype(object)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        path = _Path(tmp) / "out.sav"
-        pyreadstat.write_sav(
-            df, str(path),
-            column_labels=labels,
-            variable_value_labels=value_labels or None,
-            variable_measure=measures or None,
-            missing_ranges=missing_ranges or None,
-        )
-        return path.read_bytes(), {
-            "vars": len(names), "auto_fixed": auto_fixed,
-            "value_labels": len(value_labels), "not_in_source": not_found,
-        }
-
-
-def byte_trim(text, limit):
-    """UTF-8 바이트 기준 절단 (한글 1자 = 3바이트)."""
-    raw = str(text).encode("utf-8")
-    if len(raw) <= limit:
-        return str(text)
-    return raw[:limit].decode("utf-8", errors="ignore").rstrip()
-
-
 def build_syntax(edited_df, file_stem):
     """RENAME VARIABLES 구문 생성. (구문 문자열, 변환 건수)"""
     pairs = []
@@ -432,30 +291,12 @@ st.markdown("""
 * **기능 2:** Code북에 `문1`, `문2_1`로 표기된 변수를 `Q1`, `Q2_1`로 자동 치환하여 인식
 * **기능 3:** 척도 문항 중복 시 `_1`, `_2` 자동 부여 및 순위 문항(RK) 완벽 매칭
 * **기능 4:** 파생 변수 탐색 시 라벨에 `[기타]` 추가 / 복수응답 Code북 업데이트 시 첫 번째 문항으로 고정
-* **기능 5:** 엑셀 다운로드 시 Code북 시트 자동 갱신 및 순수 데이터(디자인 없음) 내보내기
-* **기능 6:** SPSS 변수명 규칙 검사 — 한글·숫자 시작·예약어·중복을 걸러냅니다
-* **기능 7:** 변수명과 변수라벨이 적용된 **SPSS 데이터(.sav)** 바로 내보내기
+* **기능 5:** SPSS 변수명 규칙 검사 — 한글·숫자 시작·예약어·중복을 걸러냅니다
+* **기능 6:** **원본 엑셀의 서식을 그대로 유지**한 채 내보내기
+  (1행 배경색·굵게·열 너비·틀 고정. 색을 코드에 박지 않고 원본에서 읽어 씁니다)
 """)
 
-st.markdown("### 1. 파일 업로드")
-up1, up2 = st.columns(2)
-with up1:
-    uploaded_file = st.file_uploader("엑셀 파일(.xlsx) — Code북 필수", type=["xlsx"],
-                                     key="spss_file_uploader")
-with up2:
-    up_sav = st.file_uploader("원본 .sav (선택)", type=["sav"], key="spss_src_sav",
-                              help="응답 라벨(1=남성 …)은 엑셀에 없습니다. 원본 .sav 를 올리면 "
-                                   "값라벨·측도·결측을 가져오고, 데이터도 .sav 에서 읽을 수 있습니다.")
-
-source_meta = None
-if up_sav is not None:
-    try:
-        source_meta = read_source_sav(up_sav.getvalue())
-        st.success(f"원본 .sav — 변수 {len(source_meta['columns'])}개, 케이스 "
-                   f"{len(source_meta['df']):,}개, 값라벨 보유 {len(source_meta['value_labels'])}개")
-    except Exception as e:
-        st.error(f"원본 .sav 를 읽지 못했습니다: {type(e).__name__}: {e}")
-        source_meta = None
+uploaded_file = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=["xlsx"], key="spss_file_uploader")
 
 if uploaded_file:
     try:
@@ -476,45 +317,20 @@ if uploaded_file:
         if raw_sheet == code_sheet:
             st.warning("Raw 시트와 Code북 시트가 같습니다. 서로 다른 시트를 선택하세요.")
 
-        use_sav_data = False
-        if source_meta is not None:
-            use_sav_data = st.radio(
-                "분석·저장에 사용할 데이터",
-                [".sav 원본 (권장)", "엑셀 Raw 시트"], horizontal=True, index=0,
-                help=".sav 를 쓰면 자료형·결측이 원본 그대로 유지되고 엑셀과의 불일치도 없습니다.",
-            ).startswith(".sav")
-
-            # 두 파일의 열 구성이 다르면 미리 알린다
-            excel_cols = {str(c).strip().lower()
-                          for c in pd.read_excel(uploaded_file, sheet_name=raw_sheet, nrows=0).columns}
-            sav_cols = source_meta["columns_lower"]
-            only_excel = sorted(excel_cols - sav_cols)
-            only_sav = sorted(sav_cols - excel_cols)
-            if only_excel or only_sav:
-                with st.expander(f"엑셀과 .sav 의 열 구성이 다릅니다 "
-                                 f"(엑셀만 {len(only_excel)}개 / .sav만 {len(only_sav)}개)"):
-                    if only_excel:
-                        st.write("엑셀에만 있음: " + ", ".join(only_excel[:30]))
-                    if only_sav:
-                        st.write(".sav 에만 있음: " + ", ".join(only_sav[:30]))
-
         if st.button("분석 시작", key="analyze_btn"):
             with st.spinner("데이터 분석 및 매칭 중..."):
-                all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
-                df_raw = source_meta["df"] if (source_meta is not None and use_sav_data) \
-                    else all_sheets[raw_sheet]
+                df_raw = pd.read_excel(uploaded_file, sheet_name=raw_sheet)
                 df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
 
                 label_col = "BCDE".index(label_letter) + 1
                 final_data, code_updates, warns = analyze(df_raw, df_code, label_col)
 
-                st.session_state["spss_all_sheets"] = all_sheets
-                st.session_state["spss_df_code"] = df_code
+                # 서식을 살려 내보내려면 원본 파일 자체가 필요하다 (pandas 로는 서식을 못 읽음)
+                st.session_state["spss_original_bytes"] = uploaded_file.getvalue()
+                st.session_state["spss_raw_columns"] = [str(c).strip() for c in df_raw.columns]
+                st.session_state["spss_sheet_names"] = sheet_names
                 st.session_state["spss_target_sheets"] = [raw_sheet]
-                st.session_state["spss_code_sheet"] = code_sheet      # 아래 내보내기에서 사용
-                st.session_state["spss_source_meta"] = source_meta
-                st.session_state["spss_use_sav_data"] = bool(source_meta is not None and use_sav_data)
-                st.session_state["spss_df_for_sav"] = df_raw
+                st.session_state["spss_code_sheet"] = code_sheet
                 st.session_state["spss_code_updates"] = code_updates
                 st.session_state["spss_result_df"] = pd.DataFrame(final_data)
                 # 파일명에 점이 여러 개여도 확장자만 떼어낸다
@@ -573,13 +389,29 @@ if "spss_result_df" in st.session_state:
     st.markdown("---")
     st.markdown("### 3. 파일 내보내기")
 
-    _src = ss("spss_source_meta")
-    if _src is None:
-        st.caption("원본 .sav 없이 생성하면 값라벨(1=남성 …)이 비어 있습니다. "
-                   "1단계에서 원본 .sav 를 함께 올리세요.")
-    else:
-        st.caption(f"값라벨 출처: 원본 .sav (값라벨 보유 변수 {len(_src['value_labels'])}개) · "
-                   f"데이터 출처: {'.sav 원본' if ss('spss_use_sav_data') else '엑셀 Raw 시트'}")
+    sheet_names_all = ss("spss_sheet_names", [])
+    code_sheet_name = ss("spss_code_sheet")
+    selectable = [n for n in sheet_names_all if n != code_sheet_name]
+    default_targets = [n for n in selectable
+                       if n == (ss("spss_target_sheets") or [""])[0]
+                       or "DATA" in n.upper() or "LABEL" in n.upper()]
+
+    st.multiselect("새 변수명 행을 넣을 시트", selectable, default=default_targets,
+                   key="export_targets_select",
+                   help="선택한 시트 맨 위에 새 변수명 행이 추가됩니다. "
+                        "Code북 시트는 A열 값만 바뀌고 배경색은 그대로 유지됩니다.")
+    st.checkbox("원래 변수명 행 남기기 (2행으로 내림)", value=True, key="keep_old_header_cb")
+
+    targets = ss("export_targets_select", [])
+    if "spss_original_bytes" in st.session_state and targets:
+        info = excel_style.preview_header_style(st.session_state["spss_original_bytes"], targets[0])
+        if info:
+            st.caption(
+                f"원본에서 인식한 머리행 서식 — 배경 #{info.get('채우기') or '없음'} · "
+                f"{'굵게' if info.get('굵게') else '보통'} · {info.get('글꼴')} {info.get('크기')}pt"
+                f"{' · 가운데 정렬' if info.get('가운데') else ''}  (출처 {info.get('출처')})")
+        else:
+            st.caption("원본 머리행에서 서식을 찾지 못했습니다. 기본 서식(연노랑 + 굵게)을 적용합니다.")
 
     enc_label = st.radio("신텍스 인코딩", ["cp949 (한글 Windows SPSS)", "utf-8 (유니코드 모드)"],
                          horizontal=True, index=0,
@@ -607,60 +439,34 @@ if "spss_result_df" in st.session_state:
                 edited_df.to_excel(writer, index=False)
             exports["map"] = (out_map.getvalue(), f"{stem}_Mapping.xlsx", len(edited_df))
 
-            if "spss_all_sheets" in st.session_state:
+            if "spss_original_bytes" in st.session_state:
+                # 원본 통합문서를 열어 값만 바꾼다 -> 서식이 그대로 남는다
                 rename_map = {
                     str(r["Raw 변수명"]).strip(): str(r["변경할 변수명"]).strip()
                     for _, r in edited_df.iterrows()
                     if str(r["변경할 변수명"]).strip() not in ("", "nan")
                 }
-                code_sheet_name = ss("spss_code_sheet")
-                target_sheet = (ss("spss_target_sheets") or [""])[0]
-
-                out_data = io.BytesIO()
-                with pd.ExcelWriter(out_data, engine="xlsxwriter") as writer:
-                    for sheet_name, df_sheet in st.session_state["spss_all_sheets"].items():
-                        # Code북 판정을 먼저 한다. Raw 시트와 이름이 같거나 시트명에
-                        # 'LABEL' 이 들어가면 데이터 시트로 오인되어 갱신이 통째로 빠진다.
-                        if sheet_name == code_sheet_name and "spss_df_code" in st.session_state:
-                            df_out = st.session_state["spss_df_code"].copy()
-                            for r_idx, new_name in ss("spss_code_updates", {}).items():
-                                if r_idx < len(df_out):
-                                    df_out.iloc[r_idx, 0] = new_name
-                            df_out.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
-                            continue
-
-                        is_target = (sheet_name == target_sheet
-                                     or "DATA" in sheet_name.upper()
-                                     or "LABEL" in sheet_name.upper())
-                        if is_target:
-                            row1 = [rename_map.get(str(c).strip(), str(c).strip())
-                                    for c in df_sheet.columns]
-                            header = pd.DataFrame([row1, df_sheet.columns.tolist()])
-                        else:
-                            header = pd.DataFrame([df_sheet.columns.tolist()])
-                        df_export = pd.concat([header, pd.DataFrame(df_sheet.values)],
-                                              ignore_index=True)
-                        df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
-                exports["data"] = (out_data.getvalue(), f"{stem}_Renamed.xlsx", 0)
-
-                # .sav — 변수명 변경 + 변수라벨 적용
-                if not dup and not bad:
-                    try:
-                        df_raw_now = ss("spss_df_for_sav")
-                        if df_raw_now is None:
-                            df_raw_now = st.session_state["spss_all_sheets"][target_sheet]
-                        sav_bytes, info = build_sav(df_raw_now, edited_df,
-                                                    source=ss("spss_source_meta"))
-                        exports["sav"] = (sav_bytes, f"{stem}_Renamed.sav", info["vars"])
-                        st.session_state["spss_sav_info"] = info
-                    except Exception as e:
-                        st.error(f".sav 생성 실패: {type(e).__name__}: {e}")
+                raw_cols = ss("spss_raw_columns", [])
+                try:
+                    blob = excel_style.export_renamed_workbook(
+                        st.session_state["spss_original_bytes"],
+                        new_header=[rename_map.get(c, c) for c in raw_cols],
+                        rename_map=rename_map,
+                        target_sheets=targets,
+                        code_sheet=code_sheet_name,
+                        code_updates=ss("spss_code_updates", {}),
+                        keep_old_header=ss("keep_old_header_cb", True),
+                    )
+                    exports["data"] = (blob, f"{stem}_Renamed.xlsx", 0)
+                except Exception as e:
+                    st.error(f"엑셀 내보내기 실패: {type(e).__name__}: {e}")
+                    st.code(traceback.format_exc())
 
             st.session_state["spss_exports"] = exports
 
     exports = ss("spss_exports")
     if exports:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
         with c1:
@@ -676,28 +482,4 @@ if "spss_result_df" in st.session_state:
             if "data" in exports:
                 blob, fname, _ = exports["data"]
                 st.download_button("📊 변환된 데이터(XLSX)", blob, file_name=fname, mime=XLSX_MIME)
-        with c4:
-            if "sav" in exports:
-                blob, fname, nvar = exports["sav"]
-                st.download_button("💾 SPSS 데이터(.sav)", blob, file_name=fname,
-                                   mime="application/octet-stream")
-                labeled = (ss("spss_sav_info") or {}).get("value_labels", 0)
-                st.caption(f"변수 {nvar}개 · 변수라벨 포함"
-                           + (f" · 값라벨 {labeled}개" if labeled else " · 값라벨 없음"))
-            else:
-                st.button("💾 SPSS 데이터(.sav)", disabled=True,
-                          help="변수명 오류를 먼저 해결하세요.")
-
-        info = ss("spss_sav_info")
-        if info and not info.get("value_labels"):
-            st.info("생성된 .sav 에 값라벨이 없습니다. 위에서 원본 .sav 를 올리면 "
-                    "응답 라벨을 그대로 가져옵니다. (또는 .sps 를 원본 .sav 에 실행하면 "
-                    "값라벨이 유지된 채 변수명만 바뀝니다)")
-        if info and info.get("not_in_source"):
-            with st.expander(f"원본 .sav 에 없는 열 {len(info['not_in_source'])}개"):
-                st.write(", ".join(info["not_in_source"][:50]))
-        if info and info["auto_fixed"]:
-            with st.expander(f"sav 생성 시 자동으로 정리한 열 이름 {len(info['auto_fixed'])}개"):
-                st.write(", ".join(info["auto_fixed"][:50]))
-            st.caption("SPSS 변수명 규칙에 맞지 않는 열(한글 헤더 등)은 자동으로 정리했습니다. "
-                       "매핑 테이블에 반영되지 않으니 필요하면 표에서 직접 지정하세요.")
+                st.caption("원본 서식 유지")
