@@ -53,7 +53,10 @@ utils.py 와의 관계
      - 데이터에 있는 값이 값라벨에 없으면 '오류' (코드 밀림·척도 시작값 오류 신호)
      - 복수응답 저장 방식이 데이터와 다르면 '오류'
      - 생성된 .sav 를 되읽어 라벨이 실제로 들어갔는지 왕복 검증
-8. 복수응답 저장 방식(multi_style)
+8. 값라벨 표기(value_style)
+     plain    : `1 "남성"`
+     numbered : `1'  1) 남성'`  (조사기관 Label 시트 표기와 동일)
+9. 복수응답 저장 방식(multi_style)
      category  : 열마다 선택한 보기 코드, 미선택은 공백 (기본) -> MRSETS MCGROUP
      position  : 보기별 열이며 그 열은 자기 코드만 (1열=1, 2열=2 …) -> MCGROUP
      dichotomy : 0=비선택 / 1=선택 더미 -> MRSETS MDGROUP
@@ -81,7 +84,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 
 
@@ -1001,6 +1004,35 @@ def read_codebook(path: str | Path) -> list[Var]:
 MAX_VALLABEL_BYTES = 120   # SPSS 값라벨 한도 (한글 1자 = 3바이트)
 
 
+VALUE_STYLES = ("plain", "numbered")
+
+
+def sq(text: str) -> str:
+    """작은따옴표 리터럴. 내부 따옴표는 두 번 써서 이스케이프."""
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def numbered_label(code: int, label: str) -> str:
+    """`  1) 남성` 형태. 조사기관 Label 시트 표기와 맞추기 위한 방식.
+
+    이미 `1) ` 처럼 번호가 붙어 있으면 중복해서 붙이지 않는다.
+    번호까지 포함해 120바이트 한도에 맞춰 자른다.
+    """
+    text = str(label)
+    if re.match(rf"^\s*{code}\s*\)", text):
+        body = text.strip()
+    else:
+        body = f"{code}) {text.strip()}"
+    return byte_trim(f"  {body}", MAX_VALLABEL_BYTES)
+
+
+def styled_values(var, style: str) -> dict[int, str]:
+    """표기 방식을 적용한 {코드: 라벨}."""
+    if style != "numbered":
+        return {c: byte_trim(lab, MAX_VALLABEL_BYTES) for c, lab in var.values.items()}
+    return {c: numbered_label(c, lab) for c, lab in var.values.items()}
+
+
 def q(text: str) -> str:
     """SPSS 문자열 리터럴. 내부 따옴표는 두 번 써서 이스케이프."""
     return '"' + str(text).replace('"', '""') + '"'
@@ -1022,7 +1054,8 @@ def parse_missing(spec: str) -> list[float] | tuple[float, float] | None:
 
 # ------------------------------------------------------------------ .sps
 
-def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "") -> str:
+def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "",
+                 value_style: str = "plain") -> str:
     L: list[str] = [
         "* ==========================================================",
         "* SPSS 라벨 구문 (자동 생성)",
@@ -1049,8 +1082,13 @@ def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "") ->
         for i, v in enumerate(valued):
             sep = "  " if i == 0 else "  /"
             L.append(f"{sep}{v.name}")
-            for code, label in sorted(v.values.items()):
-                L.append(f"    {code} {q(byte_trim(label, MAX_VALLABEL_BYTES))}")
+            styled = styled_values(v, value_style)
+            for code, label in sorted(styled.items()):
+                if value_style == "numbered":
+                    # `  1'  1) 남성'` — 코드와 라벨을 붙여 쓰는 표기
+                    L.append(f"  {code}{sq(label)}")
+                else:
+                    L.append(f"    {code} {q(label)}")
         L.append(".")
         L.append("")
 
@@ -1118,10 +1156,12 @@ def build_syntax(variables: list[Var], mrsets: bool = True, source: str = "") ->
     return "\n".join(L) + "\n"
 
 
-def write_syntax(variables: list[Var], path: str | Path, source: str = "") -> Path:
+def write_syntax(variables: list[Var], path: str | Path, source: str = "",
+                 value_style: str = "plain") -> Path:
     path = Path(path)
     # SPSS 한글 호환을 위해 BOM 포함 UTF-8로 저장
-    path.write_text(build_syntax(variables, source=source), encoding="utf-8-sig")
+    path.write_text(build_syntax(variables, source=source, value_style=value_style),
+                    encoding="utf-8-sig")
     return path
 
 
@@ -1148,7 +1188,8 @@ def load_data(path: str | Path) -> pd.DataFrame:
 
 
 def write_sav(variables: list[Var], path: str | Path,
-              data: pd.DataFrame | None = None) -> tuple[Path, dict[str, list[str]]]:
+              data: pd.DataFrame | None = None,
+              value_style: str = "plain") -> tuple[Path, dict[str, list[str]]]:
     """라벨이 적용된 .sav 저장. data가 없으면 0케이스 템플릿을 만든다.
 
     반환: (경로, {'labeled': [...], 'missing_in_data': [...], 'unlabeled_in_data': [...]})
@@ -1188,10 +1229,8 @@ def write_sav(variables: list[Var], path: str | Path,
 
     labels_by_col = {v.name: byte_trim(v.label or v.name, MAX_VARLABEL_BYTES) for v in use}
     column_labels = [labels_by_col.get(str(c), "") for c in df.columns]
-    value_labels = {
-        v.name: {code: byte_trim(lab, MAX_VALLABEL_BYTES) for code, lab in v.values.items()}
-        for v in use if v.values
-    }
+    # .sps 와 .sav 의 값라벨 문구를 항상 같게 맞춘다
+    value_labels = {v.name: styled_values(v, value_style) for v in use if v.values}
     measures = {v.name: (v.measure if v.measure in ("nominal", "ordinal", "scale") else "nominal")
                 for v in use}
     missing_ranges: dict[str, list[dict[str, float]]] = {}
@@ -1604,16 +1643,18 @@ def codebook_upload_to_vars(xlsx_bytes: bytes) -> list[Var]:
         return read_codebook(path)
 
 
-def syntax_bytes(variables: list[Var], source: str = "") -> bytes:
+def syntax_bytes(variables: list[Var], source: str = "",
+                 value_style: str = "plain") -> bytes:
     # SPSS 한글 호환을 위해 BOM 포함
-    return build_syntax(variables, source=source).encode("utf-8-sig")
+    return build_syntax(variables, source=source,
+                        value_style=value_style).encode("utf-8-sig")
 
 
-def sav_bytes(variables: list[Var],
-              data: pd.DataFrame | None = None) -> tuple[bytes, dict[str, list[str]]]:
+def sav_bytes(variables: list[Var], data: pd.DataFrame | None = None,
+              value_style: str = "plain") -> tuple[bytes, dict[str, list[str]]]:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "out.sav"
-        _, report = write_sav(variables, path, data=data)
+        _, report = write_sav(variables, path, data=data, value_style=value_style)
         return path.read_bytes(), report
 
 
