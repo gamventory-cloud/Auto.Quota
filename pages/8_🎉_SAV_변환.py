@@ -360,6 +360,23 @@ def num_format(sr: pd.Series) -> str:
 
 SAVE_ALL, SAVE_NUM, SAVE_STR = "숫자＋문자", "숫자만", "문자만"
 
+KEY_NAMES = ("no", "id", "panel_id", "respondent_id")
+ADMIN_END = ("aream",)          # 이 열 바로 앞까지가 관리용 구간(areaM 자체는 포함)
+
+
+def admin_block(cols) -> list:
+    """
+    조사 파일 앞머리의 관리용 열(응답시각·검증 플래그 등)을 찾는다.
+    No·id 는 남기고, 그 뒤부터 areaM 직전까지를 기본 제외 대상으로 본다.
+    경계 열이 없으면 아무것도 빼지 않는다.
+    """
+    names = [str(c) for c in cols]
+    end = next((i for i, c in enumerate(names)
+                if c.strip().lower() in ADMIN_END), None)
+    if end is None:
+        return []
+    return [c for c in names[:end] if c.strip().lower() not in KEY_NAMES]
+
 
 def build_sav(df: pd.DataFrame,
               spec: pd.DataFrame,
@@ -698,6 +715,7 @@ sig = hashlib.md5(
 
 if st.session_state.get("sav_sig") != sig:
     used, rows, empties = set(), [], []
+    admin = set(admin_block(df.columns))
     for i, c in enumerate(df.columns, start=1):
         sr = df[c]
         kind = auto_kind(sr, suggest_code=True)
@@ -706,7 +724,7 @@ if st.session_state.get("sav_sig") != sig:
         if blank:
             empties.append(str(c))
         rows.append({
-            "포함": True,
+            "포함": str(c) not in admin,
             "원본열": str(c),
             "변수명": to_spss_name(c, i, used),
             "변수라벨": str(c),
@@ -717,28 +735,25 @@ if st.session_state.get("sav_sig") != sig:
     st.session_state["sav_spec"] = pd.DataFrame(rows)
     st.session_state["sav_sig"] = sig
     st.session_state["sav_empty"] = empties
+    st.session_state["sav_admin"] = sorted(admin, key=lambda c: list(
+        map(str, df.columns)).index(c))
     st.session_state["sav_editor_n"] = st.session_state.get("sav_editor_n", 0) + 1
     st.session_state.pop("sav_bytes", None)
 
 st.subheader("열 설정")
+_admin = st.session_state.get("sav_admin") or []
 _empty = st.session_state.get("sav_empty") or []
+if _admin:
+    st.caption(
+        f"관리용 열 {len(_admin)}개(응답시각·검증 표시 등, areaM 직전까지)는 ‘포함’을 "
+        "꺼두었습니다. 필요한 것만 다시 켜세요 — "
+        + ", ".join(_admin[:15]) + (" …" if len(_admin) > 15 else "")
+    )
 if _empty:
-    e1, e2 = st.columns([3, 1])
-    with e1:
-        st.caption(
-            f"값이 하나도 없는 열이 {len(_empty)}개 있습니다 — "
-            + ", ".join(_empty[:12]) + (" …" if len(_empty) > 12 else "")
-            + "  (문항 구조를 맞추기 위해 기본은 포함입니다)"
-        )
-    with e2:
-        if st.button("빈 열 빼기", **_wide(st.button)):
-            cur = st.session_state["sav_spec"].copy()
-            cur.loc[cur["원본열"].isin(_empty), "포함"] = False
-            st.session_state["sav_spec"] = cur
-            st.session_state["sav_editor_n"] = \
-                st.session_state.get("sav_editor_n", 0) + 1
-            st.session_state.pop("sav_bytes", None)
-            st.rerun()
+    st.caption(
+        f"값이 하나도 없는 열 {len(_empty)}개도 있습니다(문항 구조를 맞추려고 포함해 "
+        "둡니다) — " + ", ".join(_empty[:12]) + (" …" if len(_empty) > 12 else "")
+    )
 st.caption(
     "**변수명** 은 SPSS에서 쓸 이름(영문·숫자·밑줄만)이고, **변수라벨** 은 원래 "
     "한글 이름입니다. **문자→코드화** 를 고르면 응답 텍스트가 1, 2, 3… 숫자로 "
