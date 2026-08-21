@@ -42,6 +42,23 @@ print("ID 제외됨:", "ID" not in [r["Raw 변수명"] for r in final])
 _, _, w2 = page.analyze(pd.DataFrame(columns=["Q1", "q1"]), pd.DataFrame([["Q1", "SQ1. x"]]), 1)
 print("대소문자 경고:", bool(w2))
 
+# --- .sav 생성 ---
+import numpy as np, pyreadstat, tempfile
+from pathlib import Path
+rng = np.random.default_rng(2); n = 10
+raw = pd.DataFrame({"ID": range(n), "Q1": rng.integers(1, 3, n),
+                    "응답일시": ["a"] * n, "시작 시각": ["b"] * n, "TO": rng.integers(1, 3, n)})
+edited = pd.DataFrame([{"Raw 변수명": "Q1", "질문 내용": "SQ1. 성별", "변경할 변수명": "SQ1"}])
+blob, info = page.build_sav(raw, edited)
+sp = Path(tempfile.mkdtemp()) / "t.sav"; sp.write_bytes(blob)
+sdf, meta = pyreadstat.read_sav(sp)
+print("\nsav 변수:", list(sdf.columns))
+print("sav 자동정리:", info["auto_fixed"])
+print("sav 라벨(SQ1):", meta.column_names_to_labels["SQ1"])
+assert "SQ1" in sdf.columns and "응답일시" in sdf.columns, "한글 변수명은 유지되어야 함"
+assert "시작_시각" in sdf.columns and "TO_" in sdf.columns, "공백·예약어는 정리되어야 함"
+print("sav 검증 통과")
+
 # --- 빈 RENAME 방지 ---
 empty = pd.DataFrame([{"Raw 변수명": "Q1", "변경할 변수명": ""}])
 syn, cnt = page.build_syntax(empty, "test")
