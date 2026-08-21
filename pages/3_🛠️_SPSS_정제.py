@@ -246,6 +246,33 @@ def analyze(df_raw, df_code, label_col=1):
     return final_data, {k: v["name"] for k, v in code_updates.items()}, warnings
 
 
+def read_source_sav(file_bytes):
+    """원본 .sav 에서 값라벨·측도·결측을 읽어온다.
+
+    엑셀에는 응답 라벨(1=남성 …)이 들어 있지 않다. 원본 .sav 를 함께 올리면
+    변수명이 바뀌어도 값라벨을 그대로 옮길 수 있다.
+    키는 소문자 원본 변수명이다.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    import pyreadstat
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _Path(tmp) / "src.sav"
+        path.write_bytes(file_bytes)
+        _, meta = pyreadstat.read_sav(str(path), user_missing=True, metadataonly=True)
+
+    return {
+        "value_labels": {k.lower(): v for k, v in (meta.variable_value_labels or {}).items()},
+        "var_labels": {k.lower(): v for k, v in (meta.column_names_to_labels or {}).items() if v},
+        "measures": {k.lower(): v for k, v in (meta.variable_measure or {}).items()},
+        "missing": {k.lower(): v for k, v in (meta.missing_ranges or {}).items()},
+        "columns": list(meta.column_names or []),
+        "columns_lower": {str(c).lower() for c in (meta.column_names or [])},
+    }
+
+
 def sav_safe_name(original):
     """.sav 저장이 가능한 열 이름으로 정리.
 
@@ -268,11 +295,12 @@ def sav_safe_name(original):
     return name
 
 
-def build_sav(df_raw, edited_df):
+def build_sav(df_raw, edited_df, source=None):
     """변경된 변수명을 적용한 .sav 를 만든다. (bytes, 적용 내역 dict)
 
     - 변수라벨은 Code북의 '질문 내용' 을 넣는다 (SPSS 한도 256바이트에서 절단).
-    - 값라벨은 이 화면이 다루지 않는다. 값라벨이 필요하면 'SPSS 라벨링' 화면을 쓴다.
+    - source 를 주면 원본 .sav 의 값라벨·측도·결측을 새 변수명으로 옮겨 담는다.
+      (엑셀에는 응답 라벨이 없으므로 원본 .sav 가 있어야 살릴 수 있다)
     - 이름을 바꾸지 않은 열은 그대로 둔다. 단 공백·특수문자가 있으면 저장이
       실패하므로 그 부분만 정리하고, 바뀐 열은 반환값에 담아 화면에 알린다.
       (한글 변수명은 SPSS 유니코드 모드에서 유효하므로 유지한다)
@@ -311,6 +339,22 @@ def build_sav(df_raw, edited_df):
         labels.append(byte_trim(label_map.get(original, original), 256))
 
     df.columns = names
+
+    # 원본 .sav 의 값라벨·측도·결측을 새 변수명 기준으로 옮긴다
+    value_labels, measures, missing_ranges = {}, {}, {}
+    carried, not_found = [], []
+    if source:
+        for original, new_name in zip([str(c).strip() for c in df_raw.columns], names):
+            key = original.lower()
+            if key in source["value_labels"]:
+                value_labels[new_name] = source["value_labels"][key]
+                carried.append(new_name)
+            elif key not in source.get("columns_lower", set()):
+                not_found.append(original)
+            if key in source["measures"]:
+                measures[new_name] = source["measures"][key]
+            if key in source["missing"]:
+                missing_ranges[new_name] = source["missing"][key]
     for name in names:
         if df[name].dtype == object:
             converted = pd.to_numeric(df[name], errors="coerce")
@@ -322,8 +366,17 @@ def build_sav(df_raw, edited_df):
 
     with tempfile.TemporaryDirectory() as tmp:
         path = _Path(tmp) / "out.sav"
-        pyreadstat.write_sav(df, str(path), column_labels=labels)
-        return path.read_bytes(), {"vars": len(names), "auto_fixed": auto_fixed}
+        pyreadstat.write_sav(
+            df, str(path),
+            column_labels=labels,
+            variable_value_labels=value_labels or None,
+            variable_measure=measures or None,
+            missing_ranges=missing_ranges or None,
+        )
+        return path.read_bytes(), {
+            "vars": len(names), "auto_fixed": auto_fixed,
+            "value_labels": len(value_labels), "not_in_source": not_found,
+        }
 
 
 def byte_trim(text, limit):
@@ -474,6 +527,22 @@ if "spss_result_df" in st.session_state:
     st.markdown("---")
     st.markdown("### 3. 파일 내보내기")
 
+    st.caption("엑셀에는 응답 라벨(1=남성 …)이 들어 있지 않습니다. 원본 .sav 를 함께 올리면 "
+               "값라벨·측도·결측을 새 변수명으로 옮겨 담습니다.")
+    up_sav = st.file_uploader("원본 .sav (선택 — 응답 라벨 가져오기)", type=["sav"],
+                              key="spss_src_sav")
+    if up_sav is not None:
+        try:
+            src = read_source_sav(up_sav.getvalue())
+            st.session_state["spss_source_meta"] = src
+            st.success(f"원본 .sav 읽기 완료 — 변수 {len(src['columns'])}개, "
+                       f"값라벨 보유 {len(src['value_labels'])}개")
+        except Exception as e:
+            st.error(f"원본 .sav 를 읽지 못했습니다: {type(e).__name__}: {e}")
+            st.session_state.pop("spss_source_meta", None)
+    elif "spss_source_meta" in st.session_state:
+        st.session_state.pop("spss_source_meta", None)
+
     enc_label = st.radio("신텍스 인코딩", ["cp949 (한글 Windows SPSS)", "utf-8 (유니코드 모드)"],
                          horizontal=True, index=0,
                          help="SPSS 가 유니코드 모드면 utf-8 을 선택하세요. 한글이 깨지면 반대로 바꿔 보세요.")
@@ -540,7 +609,8 @@ if "spss_result_df" in st.session_state:
                 if not dup and not bad:
                     try:
                         df_raw_now = st.session_state["spss_all_sheets"][target_sheet]
-                        sav_bytes, info = build_sav(df_raw_now, edited_df)
+                        sav_bytes, info = build_sav(df_raw_now, edited_df,
+                                                    source=ss("spss_source_meta"))
                         exports["sav"] = (sav_bytes, f"{stem}_Renamed.sav", info["vars"])
                         st.session_state["spss_sav_info"] = info
                     except Exception as e:
@@ -571,12 +641,21 @@ if "spss_result_df" in st.session_state:
                 blob, fname, nvar = exports["sav"]
                 st.download_button("💾 SPSS 데이터(.sav)", blob, file_name=fname,
                                    mime="application/octet-stream")
-                st.caption(f"변수 {nvar}개 · 변수라벨 포함")
+                labeled = (ss("spss_sav_info") or {}).get("value_labels", 0)
+                st.caption(f"변수 {nvar}개 · 변수라벨 포함"
+                           + (f" · 값라벨 {labeled}개" if labeled else " · 값라벨 없음"))
             else:
                 st.button("💾 SPSS 데이터(.sav)", disabled=True,
                           help="변수명 오류를 먼저 해결하세요.")
 
         info = ss("spss_sav_info")
+        if info and not info.get("value_labels"):
+            st.info("생성된 .sav 에 값라벨이 없습니다. 위에서 원본 .sav 를 올리면 "
+                    "응답 라벨을 그대로 가져옵니다. (또는 .sps 를 원본 .sav 에 실행하면 "
+                    "값라벨이 유지된 채 변수명만 바뀝니다)")
+        if info and info.get("not_in_source"):
+            with st.expander(f"원본 .sav 에 없는 열 {len(info['not_in_source'])}개"):
+                st.write(", ".join(info["not_in_source"][:50]))
         if info and info["auto_fixed"]:
             with st.expander(f"sav 생성 시 자동으로 정리한 열 이름 {len(info['auto_fixed'])}개"):
                 st.write(", ".join(info["auto_fixed"][:50]))
