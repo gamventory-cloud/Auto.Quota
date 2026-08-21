@@ -463,6 +463,115 @@ def build_sav(df: pd.DataFrame,
 
 
 # ==============================================================================
+# 5-b. 여러 시트 합치기
+# ==============================================================================
+def key_series(sr: pd.Series) -> pd.Series:
+    """연결 키를 문자로 통일한다. 시트마다 50 / '50' / 50.0 으로 읽히는 걸 막는다."""
+    def one(x):
+        v = _as_text(x)
+        if v is None:
+            return None
+        if re.fullmatch(r"-?\d+\.0+", v):            # 50.0 → 50
+            v = v.split(".")[0]
+        return v
+    return pd.Series([one(x) for x in sr.tolist()], dtype=object)
+
+
+def merge_side(frames: dict, key: str, keep_all: bool) -> tuple:
+    """시트를 옆으로 붙인다(같은 응답자, 다른 문항)."""
+    notes, base, base_name = [], None, None
+    seen_cols = set()
+
+    for name, d in frames.items():
+        if key not in d.columns:
+            raise ValueError(f"‘{name}’ 시트에 연결 열 ‘{key}’ 가 없습니다.")
+        d = d.copy()
+        d["__key__"] = key_series(d[key])
+
+        blank_key = int(d["__key__"].isna().sum())
+        if blank_key:
+            notes.append(f"‘{name}’ 시트에서 {key} 가 빈 행 {blank_key}개를 뺐습니다.")
+            d = d[d["__key__"].notna()]
+
+        dup = int(d["__key__"].duplicated().sum())
+        if dup:
+            raise ValueError(
+                f"‘{name}’ 시트에 {key} 가 겹치는 행이 {dup}개 있습니다. "
+                "옆으로 붙이려면 한 사람이 한 행이어야 합니다."
+            )
+
+        if base is None:
+            base, base_name = d, name
+            seen_cols = {c for c in d.columns if c != "__key__"}
+            notes.append(f"‘{name}’ 시트 {len(d):,}행 × {len(d.columns)-1}열로 시작")
+            continue
+
+        drop = [c for c in d.columns
+                if c != "__key__" and c in seen_cols]
+        overlap = [c for c in drop if c != key]
+        if overlap:
+            # 같은 이름의 열이 양쪽에 있을 때, 값까지 같은지 확인한다
+            chk = base[["__key__"] + overlap].merge(
+                d[["__key__"] + overlap], on="__key__", how="inner",
+                suffixes=("__L", "__R"))
+            diff_cols = []
+            for c in overlap:
+                l = chk[f"{c}__L"].map(_as_text)
+                r = chk[f"{c}__R"].map(_as_text)
+                n = int((l != r).sum())
+                if n:
+                    diff_cols.append(f"{c}({n}건)")
+            head = (f"‘{name}’ 시트에도 있는 열 "
+                    f"{', '.join(map(str, overlap[:8]))}"
+                    f"{' 외 %d개' % (len(overlap)-8) if len(overlap) > 8 else ''} 는 "
+                    f"‘{base_name}’ 쪽 값을 씁니다.")
+            if diff_cols:
+                head += ("  ⚠ 값이 다른 열: " + ", ".join(diff_cols[:8])
+                         + " — 어느 쪽이 맞는지 확인하세요.")
+            notes.append(head)
+        d = d.drop(columns=drop)
+
+        only_l = len(set(base["__key__"]) - set(d["__key__"]))
+        only_r = len(set(d["__key__"]) - set(base["__key__"]))
+        if only_l or only_r:
+            notes.append(
+                f"‘{name}’ 시트와 대조: 앞쪽에만 있는 응답자 {only_l}명, "
+                f"이 시트에만 있는 응답자 {only_r}명"
+            )
+
+        base = base.merge(d, on="__key__", how="outer" if keep_all else "inner")
+        seen_cols |= {c for c in d.columns if c != "__key__"}
+        notes.append(f"‘{name}’ 붙인 뒤 {len(base):,}행 × {len(base.columns)-1}열")
+
+    return base.drop(columns="__key__"), notes
+
+
+def merge_stack(frames: dict, add_sheet_col: bool) -> tuple:
+    """시트를 위아래로 잇는다(같은 문항, 다른 응답자)."""
+    notes, parts = [], []
+    all_cols = []
+    for name, d in frames.items():
+        for c in d.columns:
+            if c not in all_cols:
+                all_cols.append(c)
+    for name, d in frames.items():
+        missing = [c for c in all_cols if c not in d.columns]
+        if missing:
+            notes.append(
+                f"‘{name}’ 시트에 없는 열 {len(missing)}개는 빈칸으로 채웁니다 — "
+                + ", ".join(map(str, missing[:8]))
+            )
+        d = d.reindex(columns=all_cols)
+        if add_sheet_col:
+            d.insert(0, "시트", name)
+        parts.append(d)
+        notes.append(f"‘{name}’ 시트 {len(d):,}행")
+    out = pd.concat(parts, ignore_index=True)
+    notes.append(f"합계 {len(out):,}행 × {len(out.columns)}열")
+    return out, notes
+
+
+# ==============================================================================
 # 6. 화면
 # ==============================================================================
 up = st.file_uploader("엑셀 또는 CSV 파일", type=["xlsx", "xls", "csv"])
@@ -472,32 +581,96 @@ if up is None:
 
 raw = up.getvalue()
 
-c1, c2 = st.columns([3, 1])
-with c1:
+try:
     sheets = list_sheets(raw, up.name)
-    sheet = st.selectbox("시트", sheets, key="sav_sheet")
-with c2:
+except Exception as e:                               # noqa: BLE001
+    st.error(f"파일을 열지 못했습니다 — {e}")
+    st.stop()
+
+MODE_SIDE = "옆으로 붙이기 (같은 응답자, 다른 문항)"
+MODE_STACK = "위아래로 잇기 (같은 문항, 다른 응답자)"
+
+merge_mode, join_key, keep_all, add_sheet_col = None, None, True, False
+
+if len(sheets) == 1:
+    sel = sheets
+    c2, = st.columns(1)
     header_row = st.number_input("머리글 행", 1, 50, 1, key="sav_hdr",
                                  help="열 이름이 들어 있는 행 번호")
+else:
+    st.info(f"시트가 {len(sheets)}개입니다. 합쳐서 하나의 .sav 로 만들 수 있습니다.")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        sel = st.multiselect("사용할 시트", sheets, default=sheets, key="sav_sheets")
+    with c2:
+        header_row = st.number_input("머리글 행", 1, 50, 1, key="sav_hdr",
+                                     help="열 이름이 들어 있는 행 번호")
+    if not sel:
+        st.warning("시트를 하나 이상 고르세요.")
+        st.stop()
+    if len(sel) > 1:
+        merge_mode = st.radio("합치는 방식", [MODE_SIDE, MODE_STACK],
+                              key="sav_mode", horizontal=True)
 
+# ── 시트 읽기 ─────────────────────────────────────────────────────────────
+frames = {}
 try:
-    df = read_table(raw, up.name, sheet, int(header_row))
+    for s in sel:
+        d = read_table(raw, up.name, s, int(header_row))
+        d = d.loc[:, [c for c in d.columns if not str(c).startswith("Unnamed:")]]
+        frames[s] = d
 except Exception as e:                               # noqa: BLE001
     st.error(f"파일을 읽지 못했습니다 — {e}")
     st.stop()
 
-df = df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed:")]]
+merge_notes = []
+if len(sel) == 1:
+    df = frames[sel[0]]
+elif merge_mode == MODE_SIDE:
+    common = [c for c in frames[sel[0]].columns
+              if all(c in d.columns for d in frames.values())]
+    if not common:
+        st.error("시트끼리 공통으로 가진 열이 없어 옆으로 붙일 수 없습니다.")
+        st.stop()
+    k1, k2 = st.columns([2, 2])
+    with k1:
+        default_key = next((c for c in common
+                            if str(c).lower() in ("id", "panel_id", "respondent_id")),
+                           common[0])
+        join_key = st.selectbox("연결 열", common,
+                                index=common.index(default_key), key="sav_key",
+                                help="시트끼리 같은 응답자를 알아보는 기준 열")
+    with k2:
+        keep_all = st.radio(
+            "한쪽에만 있는 응답자",
+            ["모두 남기기", "양쪽에 다 있는 사람만"],
+            key="sav_keep", horizontal=True) == "모두 남기기"
+    try:
+        df, merge_notes = merge_side(frames, join_key, keep_all)
+    except Exception as e:                           # noqa: BLE001
+        st.error(f"시트를 붙이지 못했습니다 — {e}")
+        st.stop()
+else:
+    add_sheet_col = st.checkbox("어느 시트에서 왔는지 열로 남기기", value=True,
+                                key="sav_srccol")
+    df, merge_notes = merge_stack(frames, add_sheet_col)
+
 if df.empty or not len(df.columns):
     st.error("읽어들인 표가 비어 있습니다. 머리글 행 번호를 확인해 주세요.")
     st.stop()
 
 st.success(f"{len(df):,}행 × {len(df.columns)}열을 읽었습니다.")
+if merge_notes:
+    with st.expander("시트를 합친 과정", expanded=False):
+        for n in merge_notes:
+            st.write("· " + n)
 with st.expander("원본 미리보기 (앞 20행)", expanded=False):
     st.dataframe(df.head(20).astype(str), **_wide(st.dataframe))
 
 # ── 열 설정 표 ────────────────────────────────────────────────────────────
 sig = hashlib.md5(
-    f"{up.name}|{len(raw)}|{sheet}|{header_row}".encode()
+    f"{up.name}|{len(raw)}|{'/'.join(sel)}|{header_row}|{merge_mode}|"
+    f"{join_key}|{keep_all}|{add_sheet_col}".encode()
 ).hexdigest()
 
 if st.session_state.get("sav_sig") != sig:
