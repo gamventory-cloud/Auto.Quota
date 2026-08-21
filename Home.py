@@ -10,13 +10,28 @@ if not utils.check_password():
     st.stop()
 
 
+def _html(block: str) -> str:
+    """
+    마크다운이 HTML을 건드리지 않도록 한 줄로 눌러서 넘긴다.
+
+    Streamlit 은 st.markdown 에 넘긴 문자열을 먼저 마크다운으로 해석한다.
+    이때 빈 줄 다음에 4칸 이상 들여쓴 줄이 오면 그 부분을 **코드 블록**으로
+    보고 태그를 글자 그대로 출력해 버린다. (카드 div 가 통째로 깨졌던 원인)
+
+    각 줄의 앞뒤 공백을 없애고 빈 줄을 버린 뒤 공백 하나로 이어 붙이면
+    들여쓰기와 빈 줄이 모두 사라져서 이 문제가 생기지 않는다.
+    공백으로 잇는 이유는, 줄바꿈으로 나뉜 한글 문장이 붙어버리는 것을 막기 위해서다.
+    """
+    return " ".join(line.strip() for line in block.splitlines() if line.strip())
+
+
 # ==============================================================================
 # 스타일
 #   - 배경/글자색은 Streamlit 테마를 따라가도록 반투명 + currentColor 로 처리한다.
 #     (라이트/다크 어느 쪽에서도 카드가 겉돌지 않는다)
 #   - 고정색은 강조색 하나뿐이다.
 # ==============================================================================
-st.markdown("""
+st.markdown(_html("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -83,13 +98,13 @@ st.markdown("""
   .qm-card{transition:none;} .qm-card:hover{transform:none;}
 }
 </style>
-""", unsafe_allow_html=True)
+"""), unsafe_allow_html=True)
 
 
 # ==============================================================================
 # 본문
 # ==============================================================================
-st.markdown("""
+st.markdown(_html("""
 <div class="qm">
 
   <div class="qm-hero">
@@ -184,4 +199,4 @@ st.markdown("""
   </div>
 
 </div>
-""", unsafe_allow_html=True)
+"""), unsafe_allow_html=True)
