@@ -167,6 +167,21 @@ st.markdown(_html("""
         <span class="qm-chip out">응답자별 가로 데이터</span>
       </div>
     </div>
+    <div class="qm-card">
+      <div class="qm-stage">내보내기</div>
+      <h2 class="qm-name">SAV 변환</h2>
+      <p class="qm-desc">
+        엑셀·CSV 표를 SPSS에서 바로 열리는 <code>.sav</code> 파일로 만듭니다.
+        한글 열 이름은 변수 라벨로 옮기고, 글자로 적힌 응답은 숫자 코드와 값 라벨로 바꿉니다.
+        문항이 여러 시트에 나뉘어 있으면 <code>id</code> 기준으로 붙여서 한 파일로 내보냅니다.
+      </p>
+      <div class="qm-io">
+        <span class="qm-chip">원자료 .xlsx / .csv</span>
+        <span class="qm-chip">여러 시트</span>
+        <span class="qm-io-arrow">&rarr;</span>
+        <span class="qm-chip out">SPSS .sav</span>
+      </div>
+    </div>
   </div>
   <div class="qm-foot">
     지인들만 사용하는 비공개 도구입니다.
