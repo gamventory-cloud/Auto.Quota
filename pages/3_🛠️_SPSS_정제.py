@@ -261,9 +261,11 @@ def read_source_sav(file_bytes):
     with tempfile.TemporaryDirectory() as tmp:
         path = _Path(tmp) / "src.sav"
         path.write_bytes(file_bytes)
-        _, meta = pyreadstat.read_sav(str(path), user_missing=True, metadataonly=True)
+        # 값라벨을 코드 그대로 두고 읽는다 (apply_value_formats=False)
+        df, meta = pyreadstat.read_sav(str(path), user_missing=True)
 
     return {
+        "df": df,
         "value_labels": {k.lower(): v for k, v in (meta.variable_value_labels or {}).items()},
         "var_labels": {k.lower(): v for k, v in (meta.column_names_to_labels or {}).items() if v},
         "measures": {k.lower(): v for k, v in (meta.variable_measure or {}).items()},
@@ -435,7 +437,25 @@ st.markdown("""
 * **기능 7:** 변수명과 변수라벨이 적용된 **SPSS 데이터(.sav)** 바로 내보내기
 """)
 
-uploaded_file = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=["xlsx"], key="spss_file_uploader")
+st.markdown("### 1. 파일 업로드")
+up1, up2 = st.columns(2)
+with up1:
+    uploaded_file = st.file_uploader("엑셀 파일(.xlsx) — Code북 필수", type=["xlsx"],
+                                     key="spss_file_uploader")
+with up2:
+    up_sav = st.file_uploader("원본 .sav (선택)", type=["sav"], key="spss_src_sav",
+                              help="응답 라벨(1=남성 …)은 엑셀에 없습니다. 원본 .sav 를 올리면 "
+                                   "값라벨·측도·결측을 가져오고, 데이터도 .sav 에서 읽을 수 있습니다.")
+
+source_meta = None
+if up_sav is not None:
+    try:
+        source_meta = read_source_sav(up_sav.getvalue())
+        st.success(f"원본 .sav — 변수 {len(source_meta['columns'])}개, 케이스 "
+                   f"{len(source_meta['df']):,}개, 값라벨 보유 {len(source_meta['value_labels'])}개")
+    except Exception as e:
+        st.error(f"원본 .sav 를 읽지 못했습니다: {type(e).__name__}: {e}")
+        source_meta = None
 
 if uploaded_file:
     try:
@@ -456,10 +476,33 @@ if uploaded_file:
         if raw_sheet == code_sheet:
             st.warning("Raw 시트와 Code북 시트가 같습니다. 서로 다른 시트를 선택하세요.")
 
+        use_sav_data = False
+        if source_meta is not None:
+            use_sav_data = st.radio(
+                "분석·저장에 사용할 데이터",
+                [".sav 원본 (권장)", "엑셀 Raw 시트"], horizontal=True, index=0,
+                help=".sav 를 쓰면 자료형·결측이 원본 그대로 유지되고 엑셀과의 불일치도 없습니다.",
+            ).startswith(".sav")
+
+            # 두 파일의 열 구성이 다르면 미리 알린다
+            excel_cols = {str(c).strip().lower()
+                          for c in pd.read_excel(uploaded_file, sheet_name=raw_sheet, nrows=0).columns}
+            sav_cols = source_meta["columns_lower"]
+            only_excel = sorted(excel_cols - sav_cols)
+            only_sav = sorted(sav_cols - excel_cols)
+            if only_excel or only_sav:
+                with st.expander(f"엑셀과 .sav 의 열 구성이 다릅니다 "
+                                 f"(엑셀만 {len(only_excel)}개 / .sav만 {len(only_sav)}개)"):
+                    if only_excel:
+                        st.write("엑셀에만 있음: " + ", ".join(only_excel[:30]))
+                    if only_sav:
+                        st.write(".sav 에만 있음: " + ", ".join(only_sav[:30]))
+
         if st.button("분석 시작", key="analyze_btn"):
             with st.spinner("데이터 분석 및 매칭 중..."):
                 all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
-                df_raw = all_sheets[raw_sheet]
+                df_raw = source_meta["df"] if (source_meta is not None and use_sav_data) \
+                    else all_sheets[raw_sheet]
                 df_code = pd.read_excel(uploaded_file, sheet_name=code_sheet, header=None)
 
                 label_col = "BCDE".index(label_letter) + 1
@@ -469,6 +512,9 @@ if uploaded_file:
                 st.session_state["spss_df_code"] = df_code
                 st.session_state["spss_target_sheets"] = [raw_sheet]
                 st.session_state["spss_code_sheet"] = code_sheet      # 아래 내보내기에서 사용
+                st.session_state["spss_source_meta"] = source_meta
+                st.session_state["spss_use_sav_data"] = bool(source_meta is not None and use_sav_data)
+                st.session_state["spss_df_for_sav"] = df_raw
                 st.session_state["spss_code_updates"] = code_updates
                 st.session_state["spss_result_df"] = pd.DataFrame(final_data)
                 # 파일명에 점이 여러 개여도 확장자만 떼어낸다
@@ -527,21 +573,13 @@ if "spss_result_df" in st.session_state:
     st.markdown("---")
     st.markdown("### 3. 파일 내보내기")
 
-    st.caption("엑셀에는 응답 라벨(1=남성 …)이 들어 있지 않습니다. 원본 .sav 를 함께 올리면 "
-               "값라벨·측도·결측을 새 변수명으로 옮겨 담습니다.")
-    up_sav = st.file_uploader("원본 .sav (선택 — 응답 라벨 가져오기)", type=["sav"],
-                              key="spss_src_sav")
-    if up_sav is not None:
-        try:
-            src = read_source_sav(up_sav.getvalue())
-            st.session_state["spss_source_meta"] = src
-            st.success(f"원본 .sav 읽기 완료 — 변수 {len(src['columns'])}개, "
-                       f"값라벨 보유 {len(src['value_labels'])}개")
-        except Exception as e:
-            st.error(f"원본 .sav 를 읽지 못했습니다: {type(e).__name__}: {e}")
-            st.session_state.pop("spss_source_meta", None)
-    elif "spss_source_meta" in st.session_state:
-        st.session_state.pop("spss_source_meta", None)
+    _src = ss("spss_source_meta")
+    if _src is None:
+        st.caption("원본 .sav 없이 생성하면 값라벨(1=남성 …)이 비어 있습니다. "
+                   "1단계에서 원본 .sav 를 함께 올리세요.")
+    else:
+        st.caption(f"값라벨 출처: 원본 .sav (값라벨 보유 변수 {len(_src['value_labels'])}개) · "
+                   f"데이터 출처: {'.sav 원본' if ss('spss_use_sav_data') else '엑셀 Raw 시트'}")
 
     enc_label = st.radio("신텍스 인코딩", ["cp949 (한글 Windows SPSS)", "utf-8 (유니코드 모드)"],
                          horizontal=True, index=0,
@@ -608,7 +646,9 @@ if "spss_result_df" in st.session_state:
                 # .sav — 변수명 변경 + 변수라벨 적용
                 if not dup and not bad:
                     try:
-                        df_raw_now = st.session_state["spss_all_sheets"][target_sheet]
+                        df_raw_now = ss("spss_df_for_sav")
+                        if df_raw_now is None:
+                            df_raw_now = st.session_state["spss_all_sheets"][target_sheet]
                         sav_bytes, info = build_sav(df_raw_now, edited_df,
                                                     source=ss("spss_source_meta"))
                         exports["sav"] = (sav_bytes, f"{stem}_Renamed.sav", info["vars"])
