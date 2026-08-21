@@ -48,21 +48,20 @@ st.markdown(_html("""
   margin:0 0 10px;color:inherit;}
 .qm-title em{font-style:normal;color:var(--accent);}
 .qm-sub{font-size:15.5px;line-height:1.65;opacity:.72;max-width:58ch;margin:0;}
-.qm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;}
+.qm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:stretch;}
 .qm-card{border:1px solid var(--line);border-radius:12px;padding:22px 22px 18px;
   background:var(--surface);position:relative;overflow:hidden;
+  display:flex;flex-direction:column;
   transition:transform .16s ease,border-color .16s ease;}
 .qm-card:hover{transform:translateY(-2px);border-color:var(--accent);}
 .qm-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
   background:var(--accent);opacity:0;transition:opacity .16s ease;}
 .qm-card:hover::before{opacity:1;}
-.qm-card.feature{grid-column:1/-1;padding:26px 26px 20px;}
 .qm-card.feature::before{opacity:1;}
-.qm-card.feature .qm-name{font-size:23px;}
 .qm-stage{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;
   text-transform:uppercase;color:var(--accent);margin-bottom:9px;}
 .qm-name{font-size:19px;font-weight:600;letter-spacing:-.02em;margin:0 0 8px;}
-.qm-desc{font-size:14px;line-height:1.6;opacity:.74;margin:0 0 16px;max-width:70ch;}
+.qm-desc{font-size:14px;line-height:1.6;opacity:.74;margin:0 0 16px;flex:1 1 auto;}
 .qm-desc code{font-family:var(--mono);font-size:12.5px;padding:1px 5px;
   border-radius:4px;background:var(--surface);border:1px solid var(--line);}
 .qm-io{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
@@ -73,7 +72,8 @@ st.markdown(_html("""
 .qm-io-arrow{font-family:var(--mono);font-size:12px;opacity:.4;}
 .qm-foot{margin-top:28px;padding-top:18px;border-top:1px solid var(--line);
   font-size:13px;opacity:.6;line-height:1.7;}
-@media (max-width:640px){ .qm-title{font-size:32px;} }
+@media (max-width:1200px){ .qm-grid{grid-template-columns:repeat(2,1fr);} }
+@media (max-width:760px){ .qm-grid{grid-template-columns:1fr;} .qm-title{font-size:32px;} }
 @media (prefers-reduced-motion:reduce){
   .qm-card{transition:none;} .qm-card:hover{transform:none;}
 }
@@ -101,9 +101,8 @@ st.markdown(_html("""
       <h2 class="qm-name">쿼터 솔루션</h2>
       <p class="qm-desc">
         메인 쿼터와 추가 쿼터를 동시에 만족하는 응답자 조합을 찾습니다.
-        이보다 많이 뽑을 수 없다는 것까지 확인하고 끝냅니다.
-        목표를 못 채우면 표본이 모자란 것인지 다른 쿼터에 밀린 것인지 가려내고,
-        어떤 조건의 응답자를 몇 명 더 모아야 하는지까지 알려줍니다.
+        목표를 못 채우면 원인을 가려내고, 어떤 조건의 응답자를
+        몇 명 더 모아야 하는지까지 알려줍니다.
       </p>
       <div class="qm-io">
         <span class="qm-chip">정제된 데이터</span>
@@ -172,8 +171,8 @@ st.markdown(_html("""
       <h2 class="qm-name">SAV 변환</h2>
       <p class="qm-desc">
         엑셀·CSV 표를 SPSS에서 바로 열리는 <code>.sav</code> 파일로 만듭니다.
-        한글 열 이름은 변수 라벨로 옮기고, 글자로 적힌 응답은 숫자 코드와 값 라벨로 바꿉니다.
-        문항이 여러 시트에 나뉘어 있으면 <code>id</code> 기준으로 붙여서 한 파일로 내보냅니다.
+        한글 열 이름은 변수 라벨로, 글자 응답은 숫자 코드와 값 라벨로 바꿉니다.
+        문항이 여러 시트에 나뉘어 있으면 <code>id</code> 기준으로 붙입니다.
       </p>
       <div class="qm-io">
         <span class="qm-chip">원자료 .xlsx / .csv</span>
