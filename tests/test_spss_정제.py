@@ -4,7 +4,9 @@ from unittest.mock import MagicMock
 import pandas as pd
 
 stub = MagicMock(name="streamlit")
-stub.columns.return_value = [MagicMock(), MagicMock(), MagicMock()]
+# st.columns(n) 은 n 개를 언패킹하므로 인자 수에 맞춰 돌려준다
+stub.columns.side_effect = lambda spec, **kw: [
+    MagicMock() for _ in range(spec if isinstance(spec, int) else len(spec))]
 sys.modules["streamlit"] = stub
 sys.path.insert(0, "/home/claude/repo")
 
