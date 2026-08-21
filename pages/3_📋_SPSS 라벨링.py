@@ -162,12 +162,12 @@ with st.sidebar:
              "0/1 더미를 쓰는 경우에만 마지막 항목을 고르세요.",
     )
     VALUE_STYLES = {
-        '기본  1 "남성"': "plain",
         "번호 포함  1'  1) 남성'": "numbered",
+        '번호 없음  1 "남성"': "plain",
     }
     value_style_label = st.radio(
         "값라벨 표기", list(VALUE_STYLES), index=0,
-        help="번호 포함은 보기 번호를 라벨 안에 넣습니다. "
+        help="기본값은 번호 포함입니다. 보기 번호를 라벨 안에 넣어 "
              "Label 시트 표기(`  2) 여성`)와 맞출 때 사용하세요. "
              ".sps 와 .sav 에 똑같이 적용됩니다.")
     full_labels = st.checkbox(
