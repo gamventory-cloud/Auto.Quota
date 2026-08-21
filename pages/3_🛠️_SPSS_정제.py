@@ -246,6 +246,94 @@ def analyze(df_raw, df_code, label_col=1):
     return final_data, {k: v["name"] for k, v in code_updates.items()}, warnings
 
 
+def sav_safe_name(original):
+    """.sav 저장이 가능한 열 이름으로 정리.
+
+    SPSS 유니코드 모드는 한글 변수명을 허용하므로(`응답일시` 등) 굳이 영문으로
+    바꾸지 않는다. 공백·특수문자·숫자 시작·예약어만 손본다.
+    변경이 필요 없으면 원래 이름을 그대로 돌려준다.
+    """
+    name = str(original).strip()
+    name = re.sub(r"[\s\-]+", "_", name)                 # 공백·하이픈 -> 밑줄
+    name = re.sub(r"[^\w가-힣]", "", name, flags=re.UNICODE)  # 나머지 특수문자 제거
+    name = re.sub(r"__+", "_", name).strip("_")
+    if not name:
+        return ""
+    if name[0].isdigit():
+        name = "V" + name
+    if name.upper() in RESERVED_WORDS:
+        name = name + "_"
+    while len(name.encode("utf-8")) > 64:
+        name = name[:-1]
+    return name
+
+
+def build_sav(df_raw, edited_df):
+    """변경된 변수명을 적용한 .sav 를 만든다. (bytes, 적용 내역 dict)
+
+    - 변수라벨은 Code북의 '질문 내용' 을 넣는다 (SPSS 한도 256바이트에서 절단).
+    - 값라벨은 이 화면이 다루지 않는다. 값라벨이 필요하면 'SPSS 라벨링' 화면을 쓴다.
+    - 이름을 바꾸지 않은 열은 그대로 둔다. 단 공백·특수문자가 있으면 저장이
+      실패하므로 그 부분만 정리하고, 바뀐 열은 반환값에 담아 화면에 알린다.
+      (한글 변수명은 SPSS 유니코드 모드에서 유효하므로 유지한다)
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    import pyreadstat
+
+    rename_map, label_map = {}, {}
+    for _, row in edited_df.iterrows():
+        old = str(row["Raw 변수명"]).strip()
+        new = str(row["변경할 변수명"]).strip()
+        if new and new.lower() != "nan":
+            rename_map[old] = new
+        label = str(row.get("질문 내용", "")).strip()
+        if label and label != "-":
+            label_map[old] = label
+
+    df = df_raw.copy()
+    names, labels, auto_fixed, used = [], [], [], set()
+    for col in df.columns:
+        original = str(col).strip()
+        name = rename_map.get(original) or sav_safe_name(original)
+        if not name:
+            name = "V" + str(len(names) + 1)
+        if original not in rename_map and name != original:
+            auto_fixed.append(f"{original} → {name}")
+        base = name
+        n = 2
+        while name in used:            # 이름이 겹치면 SPSS 가 파일을 거부한다
+            name = f"{base}_{n}"
+            n += 1
+        used.add(name)
+        names.append(name)
+        labels.append(byte_trim(label_map.get(original, original), 256))
+
+    df.columns = names
+    for name in names:
+        if df[name].dtype == object:
+            converted = pd.to_numeric(df[name], errors="coerce")
+            # 원래 값이 있는데 숫자로 못 바꾼 칸이 하나도 없으면 숫자열로 본다
+            if not (df[name].notna() & converted.isna()).any():
+                df[name] = converted
+            else:
+                df[name] = df[name].astype(object)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _Path(tmp) / "out.sav"
+        pyreadstat.write_sav(df, str(path), column_labels=labels)
+        return path.read_bytes(), {"vars": len(names), "auto_fixed": auto_fixed}
+
+
+def byte_trim(text, limit):
+    """UTF-8 바이트 기준 절단 (한글 1자 = 3바이트)."""
+    raw = str(text).encode("utf-8")
+    if len(raw) <= limit:
+        return str(text)
+    return raw[:limit].decode("utf-8", errors="ignore").rstrip()
+
+
 def build_syntax(edited_df, file_stem):
     """RENAME VARIABLES 구문 생성. (구문 문자열, 변환 건수)"""
     pairs = []
@@ -291,6 +379,7 @@ st.markdown("""
 * **기능 4:** 파생 변수 탐색 시 라벨에 `[기타]` 추가 / 복수응답 Code북 업데이트 시 첫 번째 문항으로 고정
 * **기능 5:** 엑셀 다운로드 시 Code북 시트 자동 갱신 및 순수 데이터(디자인 없음) 내보내기
 * **기능 6:** SPSS 변수명 규칙 검사 — 한글·숫자 시작·예약어·중복을 걸러냅니다
+* **기능 7:** 변수명과 변수라벨이 적용된 **SPSS 데이터(.sav)** 바로 내보내기
 """)
 
 uploaded_file = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=["xlsx"], key="spss_file_uploader")
@@ -447,11 +536,21 @@ if "spss_result_df" in st.session_state:
                         df_export.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
                 exports["data"] = (out_data.getvalue(), f"{stem}_Renamed.xlsx", 0)
 
+                # .sav — 변수명 변경 + 변수라벨 적용
+                if not dup and not bad:
+                    try:
+                        df_raw_now = st.session_state["spss_all_sheets"][target_sheet]
+                        sav_bytes, info = build_sav(df_raw_now, edited_df)
+                        exports["sav"] = (sav_bytes, f"{stem}_Renamed.sav", info["vars"])
+                        st.session_state["spss_sav_info"] = info
+                    except Exception as e:
+                        st.error(f".sav 생성 실패: {type(e).__name__}: {e}")
+
             st.session_state["spss_exports"] = exports
 
     exports = ss("spss_exports")
     if exports:
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
         with c1:
@@ -467,3 +566,19 @@ if "spss_result_df" in st.session_state:
             if "data" in exports:
                 blob, fname, _ = exports["data"]
                 st.download_button("📊 변환된 데이터(XLSX)", blob, file_name=fname, mime=XLSX_MIME)
+        with c4:
+            if "sav" in exports:
+                blob, fname, nvar = exports["sav"]
+                st.download_button("💾 SPSS 데이터(.sav)", blob, file_name=fname,
+                                   mime="application/octet-stream")
+                st.caption(f"변수 {nvar}개 · 변수라벨 포함")
+            else:
+                st.button("💾 SPSS 데이터(.sav)", disabled=True,
+                          help="변수명 오류를 먼저 해결하세요.")
+
+        info = ss("spss_sav_info")
+        if info and info["auto_fixed"]:
+            with st.expander(f"sav 생성 시 자동으로 정리한 열 이름 {len(info['auto_fixed'])}개"):
+                st.write(", ".join(info["auto_fixed"][:50]))
+            st.caption("SPSS 변수명 규칙에 맞지 않는 열(한글 헤더 등)은 자동으로 정리했습니다. "
+                       "매핑 테이블에 반영되지 않으니 필요하면 표에서 직접 지정하세요.")
