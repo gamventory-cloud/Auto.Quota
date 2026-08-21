@@ -59,6 +59,26 @@ assert "SQ1" in sdf.columns and "응답일시" in sdf.columns, "한글 변수명
 assert "시작_시각" in sdf.columns and "TO_" in sdf.columns, "공백·예약어는 정리되어야 함"
 print("sav 검증 통과")
 
+# --- 원본 .sav 에서 값라벨 이어받기 ---
+src_df = pd.DataFrame({"ID": range(6), "Q1": [1, 2, 1, 2, 1, 2], "Q6": [1, 2, 3, 99, 1, 2]})
+tmpdir = Path(tempfile.mkdtemp()); srcp = tmpdir / "src.sav"
+pyreadstat.write_sav(src_df, str(srcp),
+                     variable_value_labels={"Q1": {1: "남성", 2: "여성"},
+                                            "Q6": {1: "상", 2: "중", 3: "하", 99: "모름"}},
+                     variable_measure={"Q6": "ordinal"},
+                     missing_ranges={"Q6": [{"lo": 99, "hi": 99}]})
+meta = page.read_source_sav(srcp.read_bytes())
+ed2 = pd.DataFrame([{"Raw 변수명": "Q1", "질문 내용": "SQ1. 성별", "변경할 변수명": "SQ1"},
+                    {"Raw 변수명": "Q6", "질문 내용": "SQ6. 계층", "변경할 변수명": "SQ6"}])
+b3, info3 = page.build_sav(src_df, ed2, source=meta)
+op = tmpdir / "out.sav"; op.write_bytes(b3)
+_, m3 = pyreadstat.read_sav(op, user_missing=True)
+print("\n이어받은 값라벨:", m3.variable_value_labels)
+assert m3.variable_value_labels["SQ1"][1.0] == "남성", "값라벨이 새 변수명으로 옮겨져야 함"
+assert m3.missing_ranges.get("SQ6"), "결측 설정도 이어져야 함"
+assert info3["value_labels"] == 2
+print("값라벨 이어받기 통과")
+
 # --- 빈 RENAME 방지 ---
 empty = pd.DataFrame([{"Raw 변수명": "Q1", "변경할 변수명": ""}])
 syn, cnt = page.build_syntax(empty, "test")
