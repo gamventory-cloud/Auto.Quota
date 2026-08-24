@@ -1,5 +1,5 @@
 {
- "sq1": {
+ "SQ1": {
   "label": "귀하의 성별은 무엇입니까? [단수]",
   "vtype": "numeric",
   "measure": "nominal",
@@ -10,7 +10,7 @@
   "missing": "",
   "kind": "single"
  },
- "sq2": {
+ "SQ2": {
   "label": "귀하의 출생년도는 어떻게 되십니까?",
   "vtype": "numeric",
   "measure": "scale",
@@ -18,7 +18,7 @@
   "missing": "",
   "kind": "numeric"
  },
- "sq2_1": {
+ "SQ2_1": {
   "label": "연령",
   "vtype": "numeric",
   "measure": "nominal",
@@ -30,7 +30,7 @@
   "missing": "",
   "kind": "single"
  },
- "sq3": {
+ "SQ3": {
   "label": "현재 거주하시는 곳은 어디입니까? [단수]",
   "vtype": "numeric",
   "measure": "nominal",
@@ -56,7 +56,7 @@
   "missing": "",
   "kind": "single"
  },
- "sq4": {
+ "SQ4": {
   "label": "구매를 시작하신 지 얼마나 되셨습니까? [단수]",
   "vtype": "numeric",
   "measure": "nominal",
@@ -69,7 +69,7 @@
   "missing": "",
   "kind": "single"
  },
- "sq4_1": {
+ "SQ4_1": {
   "label": "구매하기 시작하신 지 몇 년 되셨습니까?",
   "vtype": "numeric",
   "measure": "scale",
@@ -77,7 +77,7 @@
   "missing": "",
   "kind": "numeric"
  },
- "q1": {
+ "Q1": {
   "label": "귀 기관의 유형은 무엇입니까?",
   "vtype": "numeric",
   "measure": "nominal",
@@ -90,7 +90,7 @@
   "missing": "",
   "kind": "single"
  },
- "q2": {
+ "Q2": {
   "label": "귀하께서는 어느 계층에 속한다고 생각하십니까?",
   "vtype": "numeric",
   "measure": "nominal",
@@ -103,7 +103,7 @@
   "missing": "99",
   "kind": "single"
  },
- "q3_1_1": {
+ "Q3_1_1": {
   "label": "적용된 요소기술과 투자금액을 기입하여 주십시오 - 단열(벽체) - 도입 여부",
   "vtype": "numeric",
   "measure": "nominal",
@@ -114,7 +114,7 @@
   "missing": "",
   "kind": "entry_check"
  },
- "q3_1_2": {
+ "Q3_1_2": {
   "label": "적용된 요소기술과 투자금액을 기입하여 주십시오 - 단열(벽체) - 투자금액(만원)",
   "vtype": "numeric",
   "measure": "scale",
@@ -122,7 +122,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q3_2_1": {
+ "Q3_2_1": {
   "label": "적용된 요소기술과 투자금액을 기입하여 주십시오 - 창호 - 도입 여부",
   "vtype": "numeric",
   "measure": "nominal",
@@ -133,7 +133,7 @@
   "missing": "",
   "kind": "entry_check"
  },
- "q3_2_2": {
+ "Q3_2_2": {
   "label": "적용된 요소기술과 투자금액을 기입하여 주십시오 - 창호 - 투자금액(만원)",
   "vtype": "numeric",
   "measure": "scale",
@@ -141,7 +141,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q3_3_1": {
+ "Q3_3_1": {
   "label": "적용된 요소기술과 투자금액을 기입하여 주십시오 - 조명 - 도입 여부",
   "vtype": "numeric",
   "measure": "nominal",
@@ -152,7 +152,7 @@
   "missing": "",
   "kind": "entry_check"
  },
- "q3_3_2": {
+ "Q3_3_2": {
   "label": "적용된 요소기술과 투자금액을 기입하여 주십시오 - 조명 - 투자금액(만원)",
   "vtype": "numeric",
   "measure": "scale",
@@ -160,7 +160,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q4_1": {
+ "Q4_1": {
   "label": "다음 각 문장에 얼마나 동의하십니까? - 눈길을 끈다",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -174,7 +174,7 @@
   "missing": "",
   "kind": "grid"
  },
- "q4_2": {
+ "Q4_2": {
   "label": "다음 각 문장에 얼마나 동의하십니까? - 다른 제품과 다르다",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -188,7 +188,7 @@
   "missing": "",
   "kind": "grid"
  },
- "q4_4": {
+ "Q4_4": {
   "label": "다음 각 문장에 얼마나 동의하십니까? - 구입하고 싶다",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -202,7 +202,7 @@
   "missing": "",
   "kind": "grid"
  },
- "q4_6": {
+ "Q4_6": {
   "label": "다음 각 문장에 얼마나 동의하십니까? - 신뢰가 간다",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -216,7 +216,7 @@
   "missing": "",
   "kind": "grid"
  },
- "q5": {
+ "Q5": {
   "label": "전반적으로 얼마나 만족하십니까?",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -230,7 +230,7 @@
   "missing": "",
   "kind": "scale"
  },
- "q6": {
+ "Q6": {
   "label": "사업 운영에 대한 만족은 어떠십니까?",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -244,7 +244,7 @@
   "missing": "",
   "kind": "scale"
  },
- "q7": {
+ "Q7": {
   "label": "기대했던 것과 비교할 때, 제품 외관이 어떻다고 생각하십니까?",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -258,7 +258,7 @@
   "missing": "",
   "kind": "scale"
  },
- "q8_1": {
+ "Q8_1": {
   "label": "최근 1년 이내 경험한 종류를 모두 선택해 주십시오. [복수] - 카지노",
   "vtype": "numeric",
   "measure": "nominal",
@@ -272,7 +272,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q8_2": {
+ "Q8_2": {
   "label": "최근 1년 이내 경험한 종류를 모두 선택해 주십시오. [복수] - 경마",
   "vtype": "numeric",
   "measure": "nominal",
@@ -286,7 +286,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q8_3": {
+ "Q8_3": {
   "label": "최근 1년 이내 경험한 종류를 모두 선택해 주십시오. [복수] - 복권",
   "vtype": "numeric",
   "measure": "nominal",
@@ -300,7 +300,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q8_4": {
+ "Q8_4": {
   "label": "최근 1년 이내 경험한 종류를 모두 선택해 주십시오. [복수] - 기타( )",
   "vtype": "numeric",
   "measure": "nominal",
@@ -314,7 +314,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q8_5": {
+ "Q8_5": {
   "label": "최근 1년 이내 경험한 종류를 모두 선택해 주십시오. [복수] - 없음",
   "vtype": "numeric",
   "measure": "nominal",
@@ -328,7 +328,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q9_r1": {
+ "Q9_R1": {
   "label": "이용하시는 이유를 순위대로 선택해 주세요 - 1순위",
   "vtype": "numeric",
   "measure": "nominal",
@@ -341,7 +341,7 @@
   "missing": "",
   "kind": "rank"
  },
- "q9_r2": {
+ "Q9_R2": {
   "label": "이용하시는 이유를 순위대로 선택해 주세요 - 2순위",
   "vtype": "numeric",
   "measure": "nominal",
@@ -354,7 +354,7 @@
   "missing": "",
   "kind": "rank"
  },
- "q9_r3": {
+ "Q9_R3": {
   "label": "이용하시는 이유를 순위대로 선택해 주세요 - 3순위",
   "vtype": "numeric",
   "measure": "nominal",
@@ -367,7 +367,7 @@
   "missing": "",
   "kind": "rank"
  },
- "q10_a_1_1": {
+ "Q10_A_1_1": {
   "label": "리모델링 전·후 요금을 기입해 주십시오 - 월평균 전기요금 (만원) - 리모델링 전",
   "vtype": "numeric",
   "measure": "scale",
@@ -375,7 +375,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q10_a_1_2": {
+ "Q10_A_1_2": {
   "label": "리모델링 전·후 요금을 기입해 주십시오 - 월평균 전기요금 (만원) - 리모델링 후",
   "vtype": "numeric",
   "measure": "scale",
@@ -383,7 +383,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q10_a_2_1": {
+ "Q10_A_2_1": {
   "label": "리모델링 전·후 요금을 기입해 주십시오 - 월평균 사용량 (kWh) - 리모델링 전",
   "vtype": "numeric",
   "measure": "scale",
@@ -391,7 +391,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q10_a_2_2": {
+ "Q10_A_2_2": {
   "label": "리모델링 전·후 요금을 기입해 주십시오 - 월평균 사용량 (kWh) - 리모델링 후",
   "vtype": "numeric",
   "measure": "scale",
@@ -399,7 +399,7 @@
   "missing": "",
   "kind": "entry"
  },
- "q11_1": {
+ "Q11_1": {
   "label": "가장 마음에 드는 재료는 무엇인가요? [최소 1개, 최대 2개] - 치즈",
   "vtype": "numeric",
   "measure": "nominal",
@@ -411,7 +411,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q11_2": {
+ "Q11_2": {
   "label": "가장 마음에 드는 재료는 무엇인가요? [최소 1개, 최대 2개] - 토마토",
   "vtype": "numeric",
   "measure": "nominal",
@@ -423,7 +423,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q11_3": {
+ "Q11_3": {
   "label": "가장 마음에 드는 재료는 무엇인가요? [최소 1개, 최대 2개] - 올리브",
   "vtype": "numeric",
   "measure": "nominal",
@@ -435,7 +435,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q12_r1": {
+ "Q12_R1": {
   "label": "활용 분야를 최대 3순위 선택해 주십시오 - 1순위",
   "vtype": "numeric",
   "measure": "nominal",
@@ -448,7 +448,7 @@
   "missing": "",
   "kind": "rank"
  },
- "q12_r2": {
+ "Q12_R2": {
   "label": "활용 분야를 최대 3순위 선택해 주십시오 - 2순위",
   "vtype": "numeric",
   "measure": "nominal",
@@ -461,7 +461,7 @@
   "missing": "",
   "kind": "rank"
  },
- "q12_r3": {
+ "Q12_R3": {
   "label": "활용 분야를 최대 3순위 선택해 주십시오 - 3순위",
   "vtype": "numeric",
   "measure": "nominal",
@@ -474,29 +474,35 @@
   "missing": "",
   "kind": "rank"
  },
- "q13_1": {
+ "Q13_1": {
   "label": "우리 사회는 공정하다고 생각한다",
   "vtype": "numeric",
   "measure": "ordinal",
   "values": {
    "1": "전혀 그렇지 않다",
+   "2": "",
+   "3": "",
+   "4": "",
    "5": "매우 그렇다"
   },
   "missing": "",
   "kind": "scale"
  },
- "q13_2": {
+ "Q13_2": {
   "label": "우리 사회는 투명하다고 생각한다",
   "vtype": "numeric",
   "measure": "ordinal",
   "values": {
    "1": "전혀 그렇지 않다",
+   "2": "",
+   "3": "",
+   "4": "",
    "5": "매우 그렇다"
   },
   "missing": "",
   "kind": "scale"
  },
- "q14": {
+ "Q14": {
   "label": "거주 지역을 선택하여 주십시오",
   "vtype": "numeric",
   "measure": "nominal",
@@ -504,7 +510,7 @@
   "missing": "",
   "kind": "single"
  },
- "q15": {
+ "Q15": {
   "label": "개선이 필요한 점을 자유롭게 적어주십시오",
   "vtype": "string",
   "measure": "nominal",
@@ -512,7 +518,7 @@
   "missing": "",
   "kind": "text"
  },
- "q16_1": {
+ "Q16_1": {
   "label": "언론사 - KBS",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -525,7 +531,7 @@
   "missing": "",
   "kind": "grid"
  },
- "q16_2": {
+ "Q16_2": {
   "label": "언론사 - MBC",
   "vtype": "numeric",
   "measure": "ordinal",
@@ -538,29 +544,35 @@
   "missing": "",
   "kind": "grid"
  },
- "eqd1": {
+ "EQD1": {
   "label": "분배 비례성 (EQD) - 노력한 만큼 보상받는다",
   "vtype": "numeric",
   "measure": "ordinal",
   "values": {
    "1": "전혀 그렇지 않다",
+   "2": "",
+   "3": "",
+   "4": "",
    "5": "매우 그렇다"
   },
   "missing": "",
   "kind": "grid"
  },
- "eqd2": {
+ "EQD2": {
   "label": "분배 비례성 (EQD) - 기회가 공평하게 주어진다",
   "vtype": "numeric",
   "measure": "ordinal",
   "values": {
    "1": "전혀 그렇지 않다",
+   "2": "",
+   "3": "",
+   "4": "",
    "5": "매우 그렇다"
   },
   "missing": "",
   "kind": "grid"
  },
- "com1_1": {
+ "COM1_1": {
   "label": "응답 기관 정보를 기입해 주십시오 - 기관명",
   "vtype": "string",
   "measure": "nominal",
@@ -568,7 +580,7 @@
   "missing": "",
   "kind": "entry"
  },
- "com1_2": {
+ "COM1_2": {
   "label": "응답 기관 정보를 기입해 주십시오 - 담당자 연락처",
   "vtype": "string",
   "measure": "nominal",
@@ -576,7 +588,7 @@
   "missing": "",
   "kind": "entry"
  },
- "com1_3": {
+ "COM1_3": {
   "label": "응답 기관 정보를 기입해 주십시오 - 담당자 이메일",
   "vtype": "string",
   "measure": "nominal",
@@ -584,7 +596,7 @@
   "missing": "",
   "kind": "entry"
  },
- "com1_2_dup2": {
+ "COM1_2_DUP2": {
   "label": "(Com1 응답자만) 다음 중 가장 선호하는 개선안은 무엇입니까? [단수]",
   "vtype": "numeric",
   "measure": "nominal",
@@ -596,7 +608,7 @@
   "missing": "",
   "kind": "single"
  },
- "q17_1": {
+ "Q17_1": {
   "label": "새롭게 도입되었으면 하는 종목을 모두 선택해 주십시오. [복수] - 당구",
   "vtype": "numeric",
   "measure": "nominal",
@@ -609,7 +621,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q17_2": {
+ "Q17_2": {
   "label": "새롭게 도입되었으면 하는 종목을 모두 선택해 주십시오. [복수] - 탁구",
   "vtype": "numeric",
   "measure": "nominal",
@@ -622,7 +634,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q17_3": {
+ "Q17_3": {
   "label": "새롭게 도입되었으면 하는 종목을 모두 선택해 주십시오. [복수] - e스포츠",
   "vtype": "numeric",
   "measure": "nominal",
@@ -635,7 +647,7 @@
   "missing": "",
   "kind": "multi"
  },
- "q17_4": {
+ "Q17_4": {
   "label": "새롭게 도입되었으면 하는 종목을 모두 선택해 주십시오. [복수] - 핸드볼",
   "vtype": "numeric",
   "measure": "nominal",
@@ -648,7 +660,25 @@
   "missing": "",
   "kind": "multi"
  },
- "in1_fail": {
+ "Q18": {
+  "label": "다음 의견에 얼마나 동의하십니까?",
+  "vtype": "numeric",
+  "measure": "ordinal",
+  "values": {
+   "1": "전혀 그렇지 않다",
+   "2": "",
+   "3": "",
+   "4": "",
+   "5": "",
+   "6": "",
+   "7": "",
+   "8": "",
+   "9": "매우 그렇다"
+  },
+  "missing": "",
+  "kind": "scale"
+ },
+ "IN1_FAIL": {
   "label": "DP: 최초 오답여부: IN1_FAIL 변수 만들어주세요",
   "vtype": "numeric",
   "measure": "nominal",
