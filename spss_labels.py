@@ -17,6 +17,12 @@ spss_labels.py — 워드 설문지에서 SPSS 라벨 만들기
 넘기는 편이, SPSS 에서 라벨이 어긋난 걸 나중에 발견하는 것보다 훨씬 싸다.
 설문지가 개정되면 파싱만 다시 돌린다.
 
+변수명 표기
+----------
+기본은 대문자입니다 (`Q13_3_1`, `A4_R1`). 소문자로 바꾸려면 이 파일 상단의
+`VAR_NAME_CASE = "upper"` 를 `"lower"` 로 바꾸면 전체에 적용됩니다.
+SPSS 는 변수명 대소문자를 구분하지 않으므로 데이터 매칭에는 영향이 없습니다.
+
 utils.py 와의 관계
 -----------------
   - 변수명 정리는 utils.sanitize_var_name 을 재사용한다 (SSOT 유지)
@@ -56,6 +62,8 @@ utils.py 와의 관계
 8. 값라벨 표기(value_style) — 기본값 numbered
      numbered : `1'  1) 남성'`  (기본. 조사기관 Label 시트 표기와 동일)
      plain    : `1 "남성"`
+   척도 문항은 라벨 없는 중간 지점도 코드로 남긴다. 양 끝에만 라벨이 붙은
+   7점·9점 척도에서 `2'  2) '` 처럼 번호만 출력된다 (plain 표기에서는 제외).
 9. 복수응답 저장 방식(multi_style)
      category  : 열마다 선택한 보기 코드, 미선택은 공백 (기본) -> MRSETS MCGROUP
      position  : 보기별 열이며 그 열은 자기 코드만 (1열=1, 2열=2 …) -> MCGROUP
@@ -84,7 +92,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.8.0"
+__version__ = "1.10.0"
 
 
 
@@ -183,18 +191,20 @@ def clean(text: str) -> str:
     return text.strip(" .*")
 
 
-def varname(qid: str) -> str:
-    """Q13-3 -> q13_3.
+# 변수명 대소문자. "upper" -> Q1 / "lower" -> q1
+# SPSS 는 변수명 대소문자를 구분하지 않지만, 저장된 표기 그대로 화면에 보인다.
+VAR_NAME_CASE = "upper"
 
-    utils.sanitize_var_name 을 재사용해 변수명 규칙을 한 곳에서 관리한다.
-    그 함수가 처리하지 않는 두 가지만 여기서 덧붙인다.
-      - 소문자 통일 (SPSS 는 대소문자를 구분하지 않지만 코드북 매칭을 위해)
-      - 숫자로 시작하는 이름 방지 (SPSS 변수명은 영문으로 시작해야 함)
-    """
-    name = utils.sanitize_var_name(re.sub(r"[‐–]", "-", str(qid)).strip()).lower()
-    name = re.sub(r"__+", "_", name).strip("_")
-    if not name:
-        name = "var"
+# 순위 변수 접미 (A4_R1 / a4_r1)
+RANK_SFX = "R" if VAR_NAME_CASE == "upper" else "r"
+
+
+def varname(qid: str) -> str:
+    """Q13-3 -> q13_3 (SPSS 변수명 규칙: 영문 시작, 하이픈 불가)."""
+    name = re.sub(r"\s+", "", qid)
+    name = name.upper() if VAR_NAME_CASE == "upper" else name.lower()
+    name = re.sub(r"[-‐–]", "_", name)
+    name = re.sub(r"[^0-9A-Za-z_]", "_", name)
     if not name[:1].isalpha():
         name = "v" + name
     return name
@@ -612,7 +622,17 @@ def build_vars(q: Question, colon_split: bool = True,
     out: list[Var] = []
 
     def vl(d: dict[int, str]) -> dict[int, str]:
+        """라벨이 있는 코드만."""
         return {k: shorten(v, colon_split) for k, v in d.items() if v}
+
+    def vl_scale(d: dict[int, str]) -> dict[int, str]:
+        """척도용. 라벨이 없는 중간 지점도 빈 라벨로 남긴다.
+
+        `1 전혀 그렇지 않다 … 9 매우 그렇다` 처럼 양 끝에만 라벨이 붙은 척도에서
+        중간 코드를 버리면 값라벨이 1, 9 만 나온다. 코드 체계를 그대로 보여주려면
+        2~8 도 빈 라벨로 유지해야 한다.
+        """
+        return {k: shorten(v, colon_split) if v else "" for k, v in d.items()}
 
     # 번호 없는 하이픈 보기는 순서대로 코드를 부여한다 (검수 필요).
     dash_note = ""
@@ -655,7 +675,7 @@ def build_vars(q: Question, colon_split: bool = True,
             n = int(m.group(1)) if m else 3
             ranks = [f"{i}순위" for i in range(1, min(n, 20) + 1)]
         for i, rk in enumerate(ranks, start=1):
-            out.append(Var(f"{base}_r{i}", byte_trim(f"{qlabel} - {rk}", 256),
+            out.append(Var(f"{base}_{RANK_SFX}{i}", byte_trim(f"{qlabel} - {rk}", 256),
                            "numeric", "nominal", vl(q.options), q.qid, kind,
                            note="순위형"))
 
@@ -682,15 +702,15 @@ def build_vars(q: Question, colon_split: bool = True,
                         vname = f"{base}_{suffix}"
                         item_clean = re.sub(r"^\d{1,2}\s*[.)]\s*", "", item)
                     out.append(Var(vname, compose_label(qlabel, item_clean, t.get("title", "")),
-                                   "numeric", "ordinal", vl(t["scale"]), q.qid, "grid",
+                                   "numeric", "ordinal", vl_scale(t["scale"]), q.qid, "grid",
                                    note=SEQ_NOTE if t.get("seq_coded") else ""))
             elif t["kind"] == "scale_item":
                 si += 1
                 item = q.orphan_items[si - 1] if si <= len(q.orphan_items) else f"항목{si}"
                 out.append(Var(f"{base}_{si}", compose_label(qlabel, item),
-                               "numeric", "ordinal", vl(t["scale"]), q.qid, "scale_item"))
+                               "numeric", "ordinal", vl_scale(t["scale"]), q.qid, "scale_item"))
             elif t["kind"] == "scale":
-                out.append(Var(base, qlabel, "numeric", "ordinal", vl(t["scale"]), q.qid, "scale",
+                out.append(Var(base, qlabel, "numeric", "ordinal", vl_scale(t["scale"]), q.qid, "scale",
                                note=SEQ_NOTE if t.get("seq_coded") else ""))
 
     elif kind == "entry":
@@ -726,12 +746,12 @@ def build_vars(q: Question, colon_split: bool = True,
         for i, rk in enumerate(ranks, start=1):
             if q.options:
                 # 순위 칸 표 + 보기 목록 -> 보기 코드를 담는 숫자 순위 변수
-                out.append(Var(f"{base}_r{i}", compose_label(qlabel, rk), "numeric", "nominal",
+                out.append(Var(f"{base}_{RANK_SFX}{i}", compose_label(qlabel, rk), "numeric", "nominal",
                                vl(q.options), q.qid, "rank",
                                note=" / ".join(n for n in ("순위형", dash_note) if n)))
             else:
                 # 응답자가 직접 적는 순위 (사후 코딩 대상)
-                out.append(Var(f"{base}_r{i}", compose_label(qlabel, rk), "string", "nominal",
+                out.append(Var(f"{base}_{RANK_SFX}{i}", compose_label(qlabel, rk), "string", "nominal",
                                {}, q.qid, kind, note="주관식 순위 기입"))
 
     elif kind == "slider":
@@ -836,9 +856,9 @@ def parse_docx(path: str, colon_split: bool = True,
                 # 이름을 몰래 바꾸면 데이터와 어긋나므로 반드시 눈에 띄게 남긴다.
                 original = v.name
                 n = 2
-                while f"{original}_dup{n}" in used:
+                while (f"{original}_DUP{n}" if VAR_NAME_CASE == "upper" else f"{original}_dup{n}") in used:
                     n += 1
-                v.name = f"{original}_dup{n}"
+                v.name = f"{original}_DUP{n}" if VAR_NAME_CASE == "upper" else f"{original}_dup{n}"
                 v.note = (v.note + " / " if v.note else "") + (
                     f"확인필요: 변수명 충돌 (원래 {original}) - 설문지 문항번호 체계 확인")
             used.add(v.name)
@@ -1018,18 +1038,22 @@ def numbered_label(code: int, label: str) -> str:
     이미 `1) ` 처럼 번호가 붙어 있으면 중복해서 붙이지 않는다.
     번호까지 포함해 120바이트 한도에 맞춰 자른다.
     """
-    text = str(label)
+    text = str(label).strip()
+    if not text:
+        # 라벨 없는 중간 척도점: `  2) ` (번호만)
+        return f"  {code}) "
     if re.match(rf"^\s*{code}\s*\)", text):
-        body = text.strip()
+        body = text
     else:
-        body = f"{code}) {text.strip()}"
+        body = f"{code}) {text}"
     return byte_trim(f"  {body}", MAX_VALLABEL_BYTES)
 
 
 def styled_values(var, style: str) -> dict[int, str]:
     """표기 방식을 적용한 {코드: 라벨}."""
     if style != "numbered":
-        return {c: byte_trim(lab, MAX_VALLABEL_BYTES) for c, lab in var.values.items()}
+        # 기존 표기에서는 빈 라벨을 내보내지 않는다
+        return {c: byte_trim(lab, MAX_VALLABEL_BYTES) for c, lab in var.values.items() if lab}
     return {c: numbered_label(c, lab) for c, lab in var.values.items()}
 
 
@@ -1345,13 +1369,15 @@ def check_codebook(variables: list[Var], report: Report | None = None,
             rep.add("오류", v.name, "자료형 불일치",
                     "문자형 변수에 값라벨이 있습니다 (숫자형이어야 함)")
 
-        if not v.values and v.kind not in NO_LABEL_KINDS and v.measure in ("nominal", "ordinal"):
+        if (not any(str(x).strip() for x in v.values.values())
+                and v.kind not in NO_LABEL_KINDS and v.measure in ("nominal", "ordinal")):
             rep.add("주의", v.name, "값라벨 없음",
                     f"{v.measure} 변수인데 값라벨이 없습니다")
 
         # 같은 라벨이 두 코드에 붙은 경우 (보기 복사 실수)
-        dupes = [lab for lab, n in pd.Series(list(v.values.values())).value_counts().items()
-                 if n > 1] if v.values else []
+        labels_only = [lab for lab in v.values.values() if str(lab).strip()]
+        dupes = [lab for lab, n in pd.Series(labels_only).value_counts().items()
+                 if n > 1] if labels_only else []
         for lab in dupes[:2]:
             rep.add("주의", v.name, "값라벨 중복", f"'{lab[:30]}' 이 두 코드에 붙어 있습니다")
 
