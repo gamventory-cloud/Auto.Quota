@@ -67,6 +67,17 @@ check(any(r["상태"] == "매칭 성공 (순위 문항)" for r in final), "순�
 _, _, w2 = page.analyze(pd.DataFrame(columns=["Q1", "q1"]), pd.DataFrame([["Q1", "SQ1. x"]]), 1)
 check(bool(w2), "대소문자만 다른 동명 열 경고")
 
+print("\n[라벨 -> 변수명 매핑]")
+check(page.map_label_name("집단 구분") == "Group", "'집단 구분' -> Group")
+check(page.map_label_name("집단구분") == "Group", "공백 없어도 인식")
+check(page.map_label_name("SQ1. 성별") == "", "등록되지 않은 라벨은 빈 값")
+_raw = pd.DataFrame(columns=["q4", "q12"])
+_code = pd.DataFrame([["q4", "집단 구분"], ["q12", "Q4. 인식 문항"]])
+_final, _, _ = page.analyze(_raw, _code, label_col=1)
+_names = {r["Raw 변수명"]: r["변경할 변수명"] for r in _final}
+check(_names.get("q4") == "Group", f"q4 -> Group (실제 {_names.get('q4')})")
+check(_names.get("q12") == "Q4", f"설문지 Q4 문항은 그대로 (실제 {_names.get('q12')})")
+
 print("\n[신텍스]")
 _, cnt0 = page.build_syntax(pd.DataFrame([{"Raw 변수명": "Q1", "변경할 변수명": ""}]), "t")
 syn, cnt1 = page.build_syntax(pd.DataFrame([{"Raw 변수명": "Q1", "변경할 변수명": "SQ1"}]), "t")
