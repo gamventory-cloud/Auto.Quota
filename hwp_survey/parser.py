@@ -432,6 +432,37 @@ def scale_header(rows) -> list[str] | None:
     return labels
 
 
+def numeric_matrix(rows):
+    """응답 칸이 기호(①) 대신 숫자(1 2 3 4 5)인 리커트 표.
+
+    '번호 | 문항 | 전혀 그렇지 않다 … 매우 그렇다' 처럼 앞에 번호 열이 오고
+    뒤에 문항 열이 오는 형태를 받는다. (labels, ['- 문항', ...]) 를 돌려준다.
+    """
+    if len(rows) < 3:
+        return None
+    head = [c.strip() for c in rows[0]]
+    labels = [c for c in head if c and c not in HEADER_WORDS]
+    if len(labels) < 2:
+        return None
+    if not any(k in " ".join(labels) for k in SCALE_HINTS):
+        return None
+
+    points = [str(n) for n in range(1, len(labels) + 1)]
+    texts = []
+    for row in rows[1:]:
+        cells = [c.strip() for c in row if c.strip()]
+        if len(cells) < len(points) + 1:
+            return None
+        if cells[-len(points):] != points:            # 끝이 1..N 이어야 한다
+            return None
+        lead = cells[: -len(points)]
+        body = max(lead, key=len)                     # 번호 열이 아닌 문항 열
+        if len(body) < 3:
+            return None
+        texts.append(f"- {body}")
+    return (labels, texts) if len(texts) >= 2 else None
+
+
 def titled_matrix(rows):
     """첫 행이 구역 제목인 표. ('제목', 보기 라벨, 문항 행들) 로 나눈다.
 
