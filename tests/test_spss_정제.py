@@ -30,7 +30,21 @@ def check(cond, msg):
         fails += 1
 
 
-print("[변수명 규칙]")
+print("[정적 검사]")
+try:
+    import subprocess
+
+    r = subprocess.run([sys.executable, "-m", "pyflakes",
+                        f"{ROOT}/pages/3_🛠️_SPSS_정제.py", f"{ROOT}/excel_style.py"],
+                       capture_output=True, text=True)
+    # 정의되지 않은 이름은 화면을 눌러봐야 터진다. 배포 전에 여기서 먼저 잡는다.
+    undefined = [l for l in r.stdout.splitlines() if "undefined name" in l]
+    check(not undefined, "정의되지 않은 이름 없음"
+          + ("" if not undefined else f" -> {undefined[:3]}"))
+except Exception as exc:
+    print(f"  건너뜀 (pyflakes 미설치: pip install pyflakes) [{type(exc).__name__}]")
+
+print("\n[변수명 규칙]")
 for cand, fb, want in [("성별", "Q3", "Q3"), ("SQ1", "Q1", "SQ1"), ("1차 구매", "Q7", "Q7"),
                        ("TO", "Q9", "TO_"), ("만족도_1", "Q5_1", "Q5_1")]:
     got = page.make_valid_name(cand, fb)
