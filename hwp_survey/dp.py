@@ -38,8 +38,9 @@ from .parser import (CIRCLED, END, RE_BOX_SPLIT, RE_FIELDWORK, RE_FOOTNOTE,
                      RE_LEADIN, RE_OPT_CODE, RE_OPT_SPLIT, RE_RESP_TAG,
                      RE_ROMAN_HEAD, code_options, detect_label_style, grid_lines,
                      header_matrix, is_banner, is_prose_table, matrix_rows,
-                     option_cell, option_table, qa_rows, scale_columns,
-                     scale_from_note, scale_header, screening_rows, titled_matrix)
+                     numeric_matrix, option_cell, option_table, qa_rows,
+                     scale_columns, scale_from_note, scale_header, screening_rows,
+                     titled_matrix)
 
 # ---------------------------------------------------------------- 상수
 SCALE_5 = ["전혀 그렇지 않다", "그렇지 않다", "보통이다", "그렇다", "매우 그렇다"]
@@ -173,6 +174,11 @@ def items_to_dp_dsl(items, add_matrix_hint=True, add_alone_prog=True) -> str:
             min_marks = max(2, min(3, len(head_labels))) if head_labels else 3
             matrix = matrix_rows(body_rows, min_marks=min_marks)
             head = head_labels or pending_scale
+            if matrix is None:                      # 응답 칸이 숫자인 리커트 표
+                numeric = numeric_matrix(rows)
+                if numeric:
+                    head, matrix = numeric
+                    pending_scale = flush_scale(lines, pending_scale)
             if matrix is None:
                 fallback = header_matrix(body_rows)
                 if fallback:
