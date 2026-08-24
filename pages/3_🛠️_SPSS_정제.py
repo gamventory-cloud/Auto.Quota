@@ -702,6 +702,12 @@ if "spss_result_df" in st.session_state:
 
             if "spss_original_bytes" in st.session_state:
                 # 원본 서식을 유지하기 위해 원본 통합문서를 열어 값만 바꾼다.
+                # {원래 열 이름: 새 이름}. 빈 값과 'nan' 은 변경 대상이 아니다.
+                rename_map = {
+                    str(r["Raw 변수명"]).strip(): str(r["변경할 변수명"]).strip()
+                    for _, r in edited_df.iterrows()
+                    if str(r["변경할 변수명"]).strip() not in ("", "nan")
+                }
                 raw_cols = ss("spss_raw_columns", [])
                 new_header = [rename_map.get(c, c) for c in raw_cols]
                 try:
