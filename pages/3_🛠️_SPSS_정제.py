@@ -37,6 +37,24 @@ RESERVED_WORDS = {"ALL", "AND", "BY", "EQ", "GE", "GT", "LE", "LT",
 # 매핑에서 제외할 관리용 컬럼
 SKIP_COLS = {"no", "id", "번호", "순번"}
 
+# 설문지에 없던 파생 변수의 라벨 -> 변수명.
+# Code북 B열에 문항번호 없이 한글 설명만 있는 행(예: '집단 구분')은 변수명을 만들 수
+# 없어 Code 변수명(Q4)으로 되돌아갑니다. 그러면 설문지의 진짜 Q4 문항과 이름이 겹칩니다.
+# 여기에 등록해두면 그 라벨을 만났을 때 지정한 이름을 씁니다.
+# 새 항목은 이 딕셔너리에 한 줄 추가하면 됩니다. (공백은 무시하고 부분 일치로 찾습니다)
+LABEL_NAME_MAP = {
+    "집단구분": "Group",
+}
+
+
+def map_label_name(label):
+    """라벨에 등록된 문구가 있으면 지정 변수명을 돌려준다. 없으면 빈 문자열."""
+    flat = re.sub(r"\s+", "", str(label or ""))
+    for key, name in LABEL_NAME_MAP.items():
+        if key and key in flat:
+            return name
+    return ""
+
 
 def make_valid_name(candidate, fallback=""):
     """SPSS 변수명 규칙에 맞는 이름을 만든다.
@@ -188,8 +206,11 @@ def analyze(df_raw, df_code, label_col=1):
 
         # 라벨에서 순위 표기 제거
         clean_label = re.sub(r"[\(\[<]?\s*\d+\s*순위\s*[\)\]>]?\s*", "", col_label).strip()
-        current_label_base = utils.extract_base_name(clean_label)
-        if current_label_base:
+        mapped = map_label_name(clean_label)
+        current_label_base = mapped or utils.extract_base_name(clean_label)
+        if mapped:
+            pass                      # 등록된 라벨은 그대로 사용
+        elif current_label_base:
             current_label_base = re.sub(r"^문\s*(\d+)", r"Q\1", current_label_base)
         else:
             current_label_base = col_a_val
