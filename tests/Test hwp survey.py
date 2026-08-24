@@ -990,3 +990,49 @@ def test_matrix_split_keeps_group_header_with_its_rows():
 def test_split_disabled_by_default():
     doc = parse_isas(_matrix_doc(30))
     assert len([b for b in doc["blocks"] if b["kind"] == "question"]) == 1
+
+
+def test_numeric_response_matrix():
+    """응답 칸이 기호(①)가 아니라 숫자(1 2 3 4 5)인 리커트 표."""
+    from hwp_survey.parser import numeric_matrix
+
+    rows = [["번호", "문항", "전혀 그렇지 않다", "그렇지 않다", "보통 이다",
+             "그렇다", "매우 그렇다"],
+            ["1", "나는 눈치를 많이 살피는 편이다.", "1", "2", "3", "4", "5"],
+            ["2", "비판받으면 굴욕감을 느낀다.", "1", "2", "3", "4", "5"]]
+    labels, texts = numeric_matrix(rows)
+    assert labels == ["전혀 그렇지 않다", "그렇지 않다", "보통 이다", "그렇다",
+                      "매우 그렇다"]                       # '번호'·'문항' 열은 제외
+    assert texts == ["- 나는 눈치를 많이 살피는 편이다.",
+                     "- 비판받으면 굴욕감을 느낀다."]        # 번호가 아니라 문항 문장
+
+
+def test_numeric_matrix_ignores_frequency_grid():
+    """0부터 시작하는 빈도 표는 리커트가 아니다."""
+    from hwp_survey.parser import numeric_matrix
+
+    rows = [["평일", "주말"],
+            ["이용 안함", "1일이용", "0", "1"],
+            ["이용 안함", "2일이용", "0", "2"]]
+    assert numeric_matrix(rows) is None
+
+
+def test_numeric_matrix_end_to_end(tmp_path):
+    likert = table([["번호", "문항", "전혀 그렇지 않다", "그렇지 않다", "보통 이다",
+                     "그렇다", "전적으로 그렇다"],
+                    ["1", "나는 눈치를 많이 살피는 편이다.", "1", "2", "3", "4", "5"],
+                    ["2", "비판받으면 굴욕감을 느낀다.", "1", "2", "3", "4", "5"],
+                    ["3", "인생의 목표를 못 잡고 있다.", "1", "2", "3", "4", "5"]])
+    body = [para("부록 1. 내현적 자기애 척도"), likert]
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?><hp:sec xmlns:hp="{NS}">'
+           + "".join(body) + "</hp:sec>")
+    path = tmp_path / "numeric.hwpx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Contents/section0.xml", xml)
+
+    doc = parse_isas(items_to_isas_dsl(read_survey(str(path))))
+    q = [b for b in doc["blocks"] if b["kind"] == "question"][0]
+    assert q["tag"] == "행별 1개 선택"
+    assert q["scale"][-1] == "전적으로 그렇다"            # 표마다 다른 라벨을 지킨다
+    assert len(q["options"]) == 3
+    assert q["options"][0]["text"].startswith("나는 눈치를")
