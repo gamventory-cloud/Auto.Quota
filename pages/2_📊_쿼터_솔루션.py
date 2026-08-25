@@ -67,6 +67,11 @@ v3 변경점 (추가 쿼터 100% 할당)
 20. [버그 수정] preflight_targets 호출에 존재하지 않는 인자를 넘기던 문제
     - main_hard / overflow_weight / ex_tol_* 가 잘못 섞여 들어가 있었다.
       실행 시 TypeError 로 죽는 자리였다. 유효 인자만 넘기도록 수정.
+20-B. [버그 수정] Styler.background_gradient 가 matplotlib 없이 죽던 문제
+    - 추가 쿼터 편차 표에서 ImportError: background_gradient requires matplotlib.
+      matplotlib 은 pandas 필수 의존성이 아니라 로컬 환경에서 터졌다.
+    - Styler 를 걷어내고 st.column_config 로 교체했다. 편차 크기는 색 대신
+      ProgressColumn 막대로 표현하므로 추가 패키지가 필요 없다.
 21. 화면 문구를 일상어로 전면 교체
     - 해(解)/최적성/희소성/섀도 프라이스/프로파일 같은 최적화 용어를 걷어냈다.
       "최적해임이 증명되었습니다" -> "이보다 많이 뽑을 수는 없습니다"
@@ -1006,11 +1011,13 @@ if data_file:
                                 '구분': cfg['name'],
                                 '항목': " / ".join(k) if isinstance(k, tuple) else str(k),
                                 '목표': tgt, '실제': act, '편차': act - tgt,
-                                '편차율': (act - tgt) / tgt if tgt else None})
+                                '편차 크기': abs(act - tgt),
+                                # NumberColumn 의 %% 서식은 0~100 스케일을 쓴다
+                                '편차율': (100.0 * (act - tgt) / tgt) if tgt else None})
                 if ex_dev_recs:
                     mx = max(abs(r['편차']) for r in ex_dev_recs)
                     mxr = max((abs(r['편차율']) for r in ex_dev_recs
-                               if r['편차율'] is not None), default=0)
+                               if r['편차율'] is not None), default=0.0) / 100.0
                     d1, d2, d3 = st.columns(3)
                     d1.metric("📐 편차 발생 항목", f"{len(ex_dev_recs)}개")
                     d2.metric("최대 편차", f"{mx:,}명")
@@ -1019,11 +1026,27 @@ if data_file:
                         "총 선정 인원은 메인 쿼터가 정하므로 그대로이고, 추가 쿼터의 "
                         "개별 항목만 목표 위아래로 나뉘어 흔들립니다. 아래 편차는 "
                         "이 조건에서 가능한 최소값입니다.")
+                    # [수정] Styler.background_gradient 는 matplotlib 가 없으면
+                    # ImportError 로 죽는다. matplotlib 은 pandas 필수 의존성이
+                    # 아니므로, 패키지를 늘리지 않고 Streamlit 기본 기능으로 표현한다.
+                    #   - 편차 크기는 ProgressColumn 막대로 (색 대신 길이)
+                    #   - 편차율은 NumberColumn 서식으로
                     dfd = pd.DataFrame(ex_dev_recs)
                     st.dataframe(
-                        dfd.style.format({'편차율': '{:+.1%}'}, na_rep="-")
-                           .background_gradient(subset=['편차'], cmap='RdYlGn_r'),
-                        use_container_width=True, hide_index=True)
+                        dfd, use_container_width=True, hide_index=True,
+                        column_config={
+                            '목표': st.column_config.NumberColumn(format="%d"),
+                            '실제': st.column_config.NumberColumn(format="%d"),
+                            '편차': st.column_config.NumberColumn(
+                                "편차(명)", format="%+d",
+                                help="양수는 목표보다 많이, 음수는 적게 들어온 인원"),
+                            '편차 크기': st.column_config.ProgressColumn(
+                                "편차 크기", format="%d명", min_value=0,
+                                max_value=int(mx) if mx else 1),
+                            '편차율': st.column_config.NumberColumn(
+                                format="%+.1f%%",
+                                help="목표 대비 벗어난 비율"),
+                        })
 
             if not is_fail:
                 if ex_as_target:
