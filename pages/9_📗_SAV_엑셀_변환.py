@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-SAV → 엑셀 변환 (v1.2)
+SAV → 엑셀 변환 (v1.3)
 
-SPSS .sav 파일을 업로드하면 여러 시트로 구성된 엑셀 파일을 내려받습니다.
+SPSS .sav 파일을 업로드하면 4개 시트로 구성된 엑셀 파일을 내려받습니다.
   · Raw        : 숫자 코드 그대로
   · Label      : 값 레이블로 치환 (레이블 없는 변수는 원래 값 유지)
-  · Code       : 문자형(주관식) 변수만 모아서 — 문자형 변수가 있을 때만 생성
+  · Open       : 키 변수(NO, id) + 문자형(주관식) 변수
+                 문자형 변수가 없어도 키 변수만으로 만든다
   · 변수 가이드 : 변수명 + 변수 설명
 
 이 페이지는 utils.py 없이도 단독으로 동작합니다.
@@ -91,12 +92,10 @@ def build_label(df: pd.DataFrame, value_labels: dict) -> pd.DataFrame:
     return out
 
 
-def find_id_col(df: pd.DataFrame) -> str:
-    """응답자를 되짚을 키 열. NO / id 계열을 우선 찾고 없으면 첫 열."""
-    for cand in ("NO", "No", "no", "ID", "Id", "id", "panel_id"):
-        if cand in df.columns:
-            return cand
-    return df.columns[0]
+def find_key_cols(df: pd.DataFrame) -> list:
+    """응답자를 되짚을 키 열. NO / id 를 원래 순서대로 모으고, 없으면 첫 열."""
+    keys = [c for c in df.columns if str(c).strip().lower() in ("no", "id")]
+    return keys if keys else [df.columns[0]]
 
 
 def find_text_cols(df: pd.DataFrame, var_types: dict) -> list:
@@ -104,9 +103,13 @@ def find_text_cols(df: pd.DataFrame, var_types: dict) -> list:
     return [c for c in df.columns if str(var_types.get(c, "")).lower() == "string"]
 
 
-def build_code(df: pd.DataFrame, text_cols: list, id_col: str) -> pd.DataFrame:
-    """주관식 응답만 모은 시트. 행 순서는 Raw/Label과 동일하게 유지."""
-    cols = ([id_col] if id_col not in text_cols else []) + text_cols
+def build_open(df: pd.DataFrame, text_cols: list, key_cols: list) -> pd.DataFrame:
+    """키 변수 + 주관식 응답. 행 순서는 Raw/Label과 동일하게 유지.
+
+    문자형 변수가 없으면 키 변수만 담긴 시트가 된다. 주관식 코딩을 할 때
+    이 시트에 열을 직접 추가해 쓸 수 있도록 빈 채로라도 만들어 둔다.
+    """
+    cols = list(key_cols) + [c for c in text_cols if c not in key_cols]
     out = df[cols].copy()
     for c in out.columns:
         if c in text_cols:
@@ -129,7 +132,7 @@ def build_guide(df: pd.DataFrame, col_labels: dict) -> pd.DataFrame:
     )
 
 
-def to_excel(sheets: dict) -> bytes:
+def to_excel(sheets: dict, n_keys: int = 1) -> bytes:
     """{시트명: DataFrame} → 엑셀 바이트. 헤더 굵게 + 첫 행 고정."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -142,11 +145,10 @@ def to_excel(sheets: dict) -> bytes:
             if name == "변수 가이드":
                 ws.column_dimensions["A"].width = 18
                 ws.column_dimensions["B"].width = 100
-            elif name == "Code":
+            elif name == "Open":
                 # 주관식 본문은 길어서 좁으면 읽기 어렵다. 열 수가 적어 상한을 두지 않는다.
-                ws.column_dimensions["A"].width = 10
-                for j in range(2, ws.max_column + 1):
-                    ws.column_dimensions[get_column_letter(j)].width = 45
+                for j in range(1, ws.max_column + 1):
+                    ws.column_dimensions[get_column_letter(j)].width = 12 if j <= n_keys else 45
             # Raw / Label 은 너비를 지정하지 않는다.
             # 열이 수백 개까지 늘어날 수 있어, 일부만 지정되면 오히려 들쭉날쭉해진다.
             # 엑셀 기본 너비로 두면 사용자가 전체 선택 후 한 번에 조절할 수 있다.
@@ -171,7 +173,7 @@ except Exception as e:
 n_rows, n_cols = df.shape
 n_labeled = sum(1 for c in df.columns if c in value_labels)
 text_cols = find_text_cols(df, var_types)
-id_col = find_id_col(df)
+key_cols = find_key_cols(df)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("응답자 수", f"{n_rows:,}")
@@ -191,33 +193,32 @@ st.subheader("담을 시트 고르기")
 s1, s2, s3, s4 = st.columns(4)
 want_raw = s1.checkbox("Raw (숫자 코드)", value=True)
 want_label = s2.checkbox("Label (값 레이블)", value=True)
-want_code = s3.checkbox(
-    "Code (문자형 변수)",
-    value=bool(text_cols),
-    disabled=not text_cols,
-    help="SAV에 문자형으로 저장된 변수만 모읍니다." if text_cols else "이 파일에는 문자형 변수가 없습니다.",
+want_open = s3.checkbox(
+    "Open (주관식)",
+    value=True,
+    help="키 변수(" + ", ".join(key_cols) + ")와 문자형 변수를 담습니다.",
 )
 want_guide = s4.checkbox("변수 가이드", value=True)
 
-if not text_cols:
+if want_open and not text_cols:
     st.info(
-        "이 파일에는 문자형 변수가 없어 Code 시트를 만들지 않습니다. "
-        "주관식 응답이 있어야 하는데 비어 있다면, SAV로 내보낼 때 해당 문항이 "
-        "숫자형으로 선언돼 내용이 빠졌을 수 있습니다."
+        "이 파일에는 문자형 변수가 없어 Open 시트에 키 변수("
+        + ", ".join(key_cols)
+        + ")만 담깁니다. 주관식 응답을 옆에 붙여 코딩하실 때 쓰시면 됩니다."
     )
 
-if not (want_raw or want_label or want_code or want_guide):
+if not (want_raw or want_label or want_open or want_guide):
     st.warning("시트를 하나 이상 선택해주세요.")
     st.stop()
 
-# ── 시트 구성 (Raw → Label → Code → 변수 가이드) ──
+# ── 시트 구성 (Raw → Label → Open → 변수 가이드) ──
 sheets = {}
 if want_raw:
     sheets["Raw"] = build_raw(df)
 if want_label:
     sheets["Label"] = build_label(df, value_labels)
-if want_code and text_cols:
-    sheets["Code"] = build_code(df, text_cols, id_col)
+if want_open:
+    sheets["Open"] = build_open(df, text_cols, key_cols)
 if want_guide:
     sheets["변수 가이드"] = build_guide(df, col_labels)
 
@@ -238,7 +239,7 @@ st.divider()
 if st.button("엑셀로 변환하기", type="primary", use_container_width=True):
     with st.spinner("엑셀 파일을 만드는 중입니다…"):
         try:
-            xlsx_bytes = to_excel(sheets)
+            xlsx_bytes = to_excel(sheets, n_keys=len(key_cols))
         except Exception as e:
             st.error(f"엑셀 생성에 실패했습니다: {e}")
             st.stop()
