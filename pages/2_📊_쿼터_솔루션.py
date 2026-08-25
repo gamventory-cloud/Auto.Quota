@@ -78,7 +78,14 @@ v3 변경점 (추가 쿼터 100% 할당)
       "물리적 부족 / 경합 부족"   -> "표본이 모자람 / 다른 쿼터에 밀림"
       "정확해(ILP) / 휴리스틱"    -> "최선 보장(정밀) / 빠른 근사(간이)"
     - 코드 주석과 함수 문서는 원래 용어를 유지한다(유지보수용).
-22. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+22-B. intval 범위 밖 응답자 제외 (최소값 / 최대값 두 칸)
+    - "값이 범위를 벗어난 응답자는 후보에서 제외" + 최소·최대 직접 입력
+    - 메인 쿼터 목표에 없는 키를 부여해 후보 목록에서 빼는 방식이라
+      quota_ilp / utils 를 건드리지 않는다 (main_map.get(k,0) <= 0 이면 제외)
+    - 제외된 응답자는 결과 엑셀 Chk 열에 "제외(intval 범위)" 로 사유가 남는다
+    - 위젯에 분포(최소/중앙값/최대/하위 1%/상위 1%)와 제외 인원을 미리 보여준다
+    - 최소값이 최대값보다 크면 전원 제외되므로 입력 단계에서 경고한다
+23. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
@@ -547,6 +554,46 @@ if data_file:
             "intval 컬럼", cols_all,
             index=_col_idx(cols_all, "intval", "int_val", "intValue")
         ) if use_intval else None
+
+        # 값이 범위를 벗어난 응답자를 후보에서 아예 빼는 필터
+        iv_cap_on, iv_min, iv_max = False, None, None
+        if use_intval and c_int:
+            _iv = pd.to_numeric(
+                pd.Series(df_survey[c_int]).replace('', np.nan), errors='coerce')
+            _valid = _iv.dropna()
+            iv_cap_on = st.checkbox(
+                "값이 범위를 벗어난 응답자는 후보에서 제외", value=False,
+                help="너무 낮거나 너무 높은 응답자를 아예 빼고 싶을 때 씁니다. "
+                     "제외된 응답자는 어떤 셀에도 배정되지 않으므로 표본이 "
+                     "그만큼 줄어듭니다.")
+            if iv_cap_on:
+                _lo = int(_valid.min()) if len(_valid) else 0
+                _hi = int(_valid.max()) if len(_valid) else 1000
+                iv_c1, iv_c2 = st.columns(2)
+                iv_min = iv_c1.number_input(
+                    "최소값 (이 값 미만 제외)", min_value=0,
+                    max_value=max(_hi * 10, 1_000_000), value=_lo, step=1,
+                    help="입력한 값보다 작은 응답자를 제외합니다. 같은 값은 남습니다.")
+                iv_max = iv_c2.number_input(
+                    "최대값 (이 값 초과 제외)", min_value=0,
+                    max_value=max(_hi * 10, 1_000_000), value=_hi, step=1,
+                    help="입력한 값보다 큰 응답자를 제외합니다. 같은 값은 남습니다.")
+                if len(_valid):
+                    st.caption(
+                        f"`{c_int}` 최소 {int(_valid.min()):,} / 중앙값 "
+                        f"{int(_valid.median()):,} / 최대 {int(_valid.max()):,} "
+                        f"· 하위 1% {int(_valid.quantile(0.01)):,} "
+                        f"· 상위 1% {int(_valid.quantile(0.99)):,}")
+                if iv_min > iv_max:
+                    st.error("최소값이 최대값보다 큽니다. 이대로면 전원 제외됩니다.")
+                _lo_n = int((_iv < float(iv_min)).sum())
+                _hi_n = int((_iv > float(iv_max)).sum())
+                _n_over = _lo_n + _hi_n
+                st.caption(
+                    ("제외 대상 없음" if _n_over == 0 else
+                     f"⚠️ 최소 미만 {_lo_n:,}명 + 최대 초과 {_hi_n:,}명 = "
+                     f"{_n_over:,}명 제외 "
+                     f"(남는 후보 {len(df_survey) - _n_over:,}명)"))
         if not use_intval:
             rand_pick = st.checkbox(
                 "동일 조건 응답자 무작위 선택", value=True,
@@ -683,6 +730,32 @@ if data_file:
                         st.warning(
                             f"⚠️ `{c_int}` 컬럼에 숫자가 아닌 값/결측이 {n_bad:,}건 "
                             "있습니다. 해당 응답자는 **가장 먼저 탈락**합니다.")
+
+                # --- intval 상한 초과 제외 ---
+                #  메인 쿼터 목표에 없는 키를 부여하면 솔버와 근사 계산 양쪽에서
+                #  후보 목록에 아예 오르지 않는다. (main_map.get(k, 0) <= 0 이면 제외)
+                #  덕분에 quota_ilp / utils 를 건드리지 않고 처리할 수 있다.
+                iv_over_idx = []
+                if (use_intval and c_int and iv_cap_on
+                        and iv_min is not None and iv_max is not None):
+                    _ivr = pd.to_numeric(
+                        pd.Series(df_survey[c_int]).replace('', np.nan),
+                        errors='coerce')
+                    _lo_m = (_ivr < float(iv_min)).to_numpy()
+                    _hi_m = (_ivr > float(iv_max)).to_numpy()
+                    _over = _lo_m | _hi_m
+                    iv_over_idx = list(df_survey.index[_over])
+                    if iv_over_idx:
+                        _klen = len(m_keys[0]) if m_keys else 1
+                        EXCLUDED = ("__intval_범위밖__",) * _klen
+                        m_keys = [EXCLUDED if _over[i] else k
+                                  for i, k in enumerate(m_keys)]
+                        st.info(
+                            f"ℹ️ `{c_int}` 값이 {int(iv_min):,}~{int(iv_max):,} "
+                            f"범위를 벗어난 {len(iv_over_idx):,}명을 후보에서 "
+                            f"제외했습니다 (최소 미만 {int(_lo_m.sum()):,}명, "
+                            f"최대 초과 {int(_hi_m.sum()):,}명). 남은 후보 "
+                            f"{len(df_survey) - len(iv_over_idx):,}명으로 계산합니다.")
 
             # ======================================================================
             # 실행 (A) 정확해 : 정수계획법
@@ -874,6 +947,10 @@ if data_file:
             df_out = df_survey.copy()
             df_out['Chk'] = "제외"
             df_out.loc[fin_idxs, 'Chk'] = "통과"
+            # 상한 초과로 애초에 후보가 아니었던 응답자는 사유를 남긴다.
+            # (이들은 통과 대상이 될 수 없으므로 "통과" 를 덮어쓸 위험이 없다)
+            if iv_over_idx:
+                df_out.loc[iv_over_idx, 'Chk'] = "제외(intval 범위)"
 
             df_all = df_out.sort_values(by=c_no, ascending=True)
             df_pass = df_out[df_out['Chk'] == "통과"].sort_values(c_no, ascending=True)
@@ -923,6 +1000,10 @@ if data_file:
                     {'항목': '시도 횟수(휴리스틱)', '값': iters},
                     {'항목': '지터(휴리스틱)', '값': jitter},
                     {'항목': 'intval 컬럼', '값': str(c_int)},
+                    {'항목': 'intval 범위 제외',
+                     '값': (f"{int(iv_min):,}~{int(iv_max):,} 범위 밖 "
+                            f"{len(iv_over_idx):,}명 제외"
+                            if iv_over_idx else "사용 안 함")},
                 ]).to_excel(w, index=False, sheet_name='Run_Info')
 
                 for j, cfg in enumerate(ex_configs):
