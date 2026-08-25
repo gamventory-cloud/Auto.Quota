@@ -13,9 +13,29 @@ if [ ! -f "Home.py" ]; then
     hold
 fi
 
-# ── 가상환경 점검
-# 다른 PC 에서 복사해 온 .venv 는 원래 PC 의 파이썬 경로를 가리켜 동작하지 않는다.
-# 파일이 있는지만 보지 말고 실제로 실행되는지 확인한다.
+# ============================================================
+#  1. 최신 코드 받기 (Git 이 있고, 이 폴더가 저장소일 때만)
+# ============================================================
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "[!] 이 폴더에서 수정된 파일이 있어 자동 업데이트를 건너뜁니다."
+        echo "    코드를 직접 고치지 않으셨다면 관리자에게 알려 주세요."
+        echo
+    else
+        echo "[*] 최신 코드를 확인합니다..."
+        if ! git pull --ff-only; then
+            echo "[!] 최신 코드를 받지 못했습니다. 기존 코드로 실행합니다."
+            echo "    인터넷 연결을 확인하거나 관리자에게 문의해 주세요."
+            echo
+        fi
+    fi
+fi
+
+# ============================================================
+#  2. 가상환경 점검
+#     다른 PC 에서 복사해 온 .venv 는 원래 PC 의 파이썬 경로를
+#     가리켜 동작하지 않는다. 있는지만 보지 말고 실행되는지 본다.
+# ============================================================
 if [ -e "$VPY" ] && ! "$VPY" -c "pass" >/dev/null 2>&1; then
     echo "[*] 가상환경이 이 PC 와 맞지 않습니다. 새로 만듭니다..."
     echo "    (다른 PC 에서 복사해 온 경우 정상입니다)"
@@ -35,15 +55,28 @@ if [ ! -x "$VPY" ]; then
     python3 -m venv .venv || hold
 fi
 
-# ── 폴더만 있고 패키지가 없는 경우까지 잡아낸다
-if ! "$VPY" -c "import streamlit" >/dev/null 2>&1; then
-    echo "[*] 필요한 패키지를 설치합니다. 처음 한 번만 하며 몇 분 걸립니다..."
+# ============================================================
+#  3. 패키지 점검
+#     streamlit 이 있는지, requirements.txt 가 바뀌었는지 둘 다 본다.
+#     코드 업데이트로 패키지가 추가됐을 수 있다.
+# ============================================================
+if [ ! -f "requirements.txt" ]; then
+    echo "[X] requirements.txt 가 없습니다."
+    echo "    코드를 내려받은 폴더가 맞는지 확인해 주세요."
+    hold
+fi
+
+NEWHASH=$(cksum requirements.txt 2>/dev/null | awk '{print $1"-"$2}')
+OLDHASH=""
+[ -f ".venv/.reqhash" ] && OLDHASH=$(cat ".venv/.reqhash")
+
+NEED_INSTALL=0
+"$VPY" -c "import streamlit" >/dev/null 2>&1 || NEED_INSTALL=1
+[ -n "$NEWHASH" ] && [ "$NEWHASH" != "$OLDHASH" ] && NEED_INSTALL=1
+
+if [ "$NEED_INSTALL" = "1" ]; then
+    echo "[*] 필요한 패키지를 설치합니다. 몇 분 걸릴 수 있습니다..."
     echo
-    if [ ! -f "requirements.txt" ]; then
-        echo "[X] requirements.txt 가 없습니다."
-        echo "    코드를 내려받은 폴더가 맞는지 확인해 주세요."
-        hold
-    fi
     "$VPY" -m pip install --upgrade pip --quiet
     "$VPY" -m pip install -r requirements.txt
     echo
@@ -59,9 +92,13 @@ if ! "$VPY" -c "import streamlit" >/dev/null 2>&1; then
         echo "      .venv/bin/python -m pip install -r requirements.txt"
         hold
     fi
+    [ -n "$NEWHASH" ] && echo "$NEWHASH" > ".venv/.reqhash"
     echo "[*] 설치가 끝났습니다."
 fi
 
+# ============================================================
+#  4. 실행
+# ============================================================
 echo
 echo "[*] 앱을 실행합니다. 브라우저가 자동으로 열립니다."
 echo "    끄실 때는 이 창에서 Ctrl+C 를 누르세요."
