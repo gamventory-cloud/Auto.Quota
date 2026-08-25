@@ -1,31 +1,22 @@
 streamlit
-pandas
-openpyxl
-XlsxWriter
-chardet
 altair
-joblib
-python-docx
-xlrd
-ortools
-pyreadstat
-python-docx>=1.1
-pyreadstat>=1.2
-openpyxl>=3.1
-streamlit>=1.36
-python-docx>=1.1.0
-pyhwp>=0.1b15
-lxml>=5.0
-beautifulsoup4>=4.12
-olefile>=0.47
-python-docx>=1.1.0
-pyhwp>=0.1b15
-beautifulsoup4>=4.12
-lxml>=5.0
-python-docx>=1.1.0      # 워드 문서 생성
-pyhwp>=0.1b15           # .hwp (HWP 5.x) 읽기
 beautifulsoup4>=4.12    # pyhwp가 내놓는 XHTML 파싱
+chardet
+joblib
 lxml>=5.0               # 위 파서 백엔드 / .hwpx XML
-pypdf>=5.0             # 원본 PDF 텍스트 읽기 (누락 검증)
+olefile>=0.47
+openpyxl
+openpyxl>=3.1
+ortools
+pandas
 pdfplumber>=0.11       # 표 많은 PDF 대비 폴백
- 
+pyhwp>=0.1b15           # .hwp (HWP 5.x) 읽기
+pypdf>=5.0             # 원본 PDF 텍스트 읽기 (누락 검증)
+pyreadstat
+pyreadstat>=1.2
+python-docx
+python-docx>=1.1
+python-docx>=1.1.0      # 워드 문서 생성
+streamlit>=1.36
+xlrd
+XlsxWriter

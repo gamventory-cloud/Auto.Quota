@@ -92,7 +92,7 @@ import utils
 
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 
 
@@ -1597,6 +1597,28 @@ def convert_doc_to_docx(data: bytes) -> bytes:
 
 # ------------------------------------------------------------- 파싱
 
+def describe_upload(data: bytes) -> str:
+    """업로드된 바이트의 실제 정체. 확장자는 믿을 수 없다.
+
+    python-docx 는 파일을 못 열면 원인과 무관하게 PackageNotFoundError 만
+    던지므로(내부적으로 zipfile.is_zipfile 이 OSError 를 삼킨다),
+    파싱 전에 여기서 먼저 걸러 사용자에게 정확한 안내를 준다.
+    """
+    if not data:
+        return "빈 파일"
+    if data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "구형 OLE 문서 (.doc 또는 .hwp)"
+    if data[:4] == b"PK\x03\x04":
+        return "docx"          # zip 계열. 세부 검증은 python-docx 에 맡긴다.
+    if data[:4] == b"HWP ":
+        return "HWP 3.0 문서"
+    if data[:5] == b"{\\rtf":
+        return "RTF 문서"
+    if data[:5] == b"%PDF-":
+        return "PDF 문서"
+    return "알 수 없는 형식"
+
+
 def parse_upload(docx_bytes: bytes, base0: list[str] | None = None,
                  full_labels: bool = False, multi_style: str = "category") -> list[Var]:
     """업로드된 워드 파일 bytes -> 변수 목록.
@@ -1605,10 +1627,23 @@ def parse_upload(docx_bytes: bytes, base0: list[str] | None = None,
     """
     if looks_like_legacy_doc(docx_bytes):
         docx_bytes = convert_doc_to_docx(docx_bytes)
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=True) as tmp:
-        tmp.write(docx_bytes)
-        tmp.flush()
-        variables = parse_docx(tmp.name, colon_split=not full_labels,
+
+    kind = describe_upload(docx_bytes)
+    if kind != "docx":
+        raise LegacyDocError(
+            f"워드 문서(.docx)가 아닙니다. 올리신 파일의 실제 형식: {kind}\n\n"
+            "확장자를 .docx 로 바꾸는 것만으로는 변환되지 않습니다. "
+            "워드나 한/글에서 '다른 이름으로 저장'을 열고 파일 형식을 "
+            "'Word 문서 (*.docx)' 로 선택해 저장한 뒤 올려 주세요."
+        )
+
+    # NamedTemporaryFile 을 쓰면 안 된다.
+    # 핸들이 열려 있는 동안 윈도우에서는 같은 경로를 이름으로 다시 열 수 없어
+    # python-docx 가 PackageNotFoundError 로 실패한다 (리눅스에서는 통과).
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "upload.docx"
+        path.write_bytes(docx_bytes)
+        variables = parse_docx(str(path), colon_split=not full_labels,
                                multi_style=multi_style)
     if base0:
         rebase_values(variables, base0, start=0)
@@ -1687,10 +1722,11 @@ def sav_bytes(variables: list[Var], data: pd.DataFrame | None = None,
 def read_data_upload(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """원자료 업로드(csv/xlsx/sav) -> DataFrame."""
     suffix = Path(filename).suffix.lower() or ".csv"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-        tmp.write(file_bytes)
-        tmp.flush()
-        return load_data(tmp.name)
+    # parse_upload 와 같은 이유로 NamedTemporaryFile 을 쓰지 않는다.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"upload{suffix}"
+        path.write_bytes(file_bytes)
+        return load_data(str(path))
 
 
 # ------------------------------------------------------------- 요약

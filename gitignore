@@ -1,0 +1,32 @@
+# ── 가상환경 ─────────────────────────────
+# 만든 PC 의 파이썬 경로가 절대경로로 박혀 있어 다른 PC 로 옮기면 동작하지 않는다.
+# 각 PC 에서 새로 만들어야 하므로 절대 공유하지 않는다.
+.venv/
+venv/
+env/
+
+# ── 파이썬 ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ── 조사 데이터 (실수로 올리는 일 방지) ──
+# 응답자 원자료는 저장소에 들어가면 안 된다.
+*.sav
+*.xlsx
+*.xls
+*.csv
+*.hwp
+*.hwpx
+!requirements.txt
+
+# ── Streamlit ────────────────────────────
+.streamlit/secrets.toml
+
+# ── OS / 편집기 ──────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
