@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SAV → 엑셀 변환 (v1.1)
+SAV → 엑셀 변환 (v1.2)
 
 SPSS .sav 파일을 업로드하면 여러 시트로 구성된 엑셀 파일을 내려받습니다.
   · Raw        : 숫자 코드 그대로
@@ -143,12 +143,13 @@ def to_excel(sheets: dict) -> bytes:
                 ws.column_dimensions["A"].width = 18
                 ws.column_dimensions["B"].width = 100
             elif name == "Code":
+                # 주관식 본문은 길어서 좁으면 읽기 어렵다. 열 수가 적어 상한을 두지 않는다.
                 ws.column_dimensions["A"].width = 10
-                for j in range(2, min(ws.max_column, 200) + 1):
+                for j in range(2, ws.max_column + 1):
                     ws.column_dimensions[get_column_letter(j)].width = 45
-            else:
-                for j in range(1, min(ws.max_column, 200) + 1):
-                    ws.column_dimensions[get_column_letter(j)].width = 14
+            # Raw / Label 은 너비를 지정하지 않는다.
+            # 열이 수백 개까지 늘어날 수 있어, 일부만 지정되면 오히려 들쭉날쭉해진다.
+            # 엑셀 기본 너비로 두면 사용자가 전체 선택 후 한 번에 조절할 수 있다.
     return buf.getvalue()
 
 
