@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SAV → 엑셀 변환 (v1.3)
+SAV → 엑셀 변환 (v1.4)
 
 SPSS .sav 파일을 업로드하면 4개 시트로 구성된 엑셀 파일을 내려받습니다.
   · Raw        : 숫자 코드 그대로
@@ -21,7 +21,6 @@ import pandas as pd
 import pyreadstat
 import streamlit as st
 from openpyxl.styles import Font
-from openpyxl.utils import get_column_letter
 
 # ──────────────────────────────────────────────────────────────
 # 비밀번호 (utils.py 있으면 사용, 없으면 통과)
@@ -132,7 +131,7 @@ def build_guide(df: pd.DataFrame, col_labels: dict) -> pd.DataFrame:
     )
 
 
-def to_excel(sheets: dict, n_keys: int = 1) -> bytes:
+def to_excel(sheets: dict) -> bytes:
     """{시트명: DataFrame} → 엑셀 바이트. 헤더 굵게 + 첫 행 고정."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -145,12 +144,7 @@ def to_excel(sheets: dict, n_keys: int = 1) -> bytes:
             if name == "변수 가이드":
                 ws.column_dimensions["A"].width = 18
                 ws.column_dimensions["B"].width = 100
-            elif name == "Open":
-                # 주관식 본문은 길어서 좁으면 읽기 어렵다. 열 수가 적어 상한을 두지 않는다.
-                for j in range(1, ws.max_column + 1):
-                    ws.column_dimensions[get_column_letter(j)].width = 12 if j <= n_keys else 45
-            # Raw / Label 은 너비를 지정하지 않는다.
-            # 열이 수백 개까지 늘어날 수 있어, 일부만 지정되면 오히려 들쭉날쭉해진다.
+            # Raw / Label / Open 은 너비를 지정하지 않는다.
             # 엑셀 기본 너비로 두면 사용자가 전체 선택 후 한 번에 조절할 수 있다.
     return buf.getvalue()
 
@@ -239,7 +233,7 @@ st.divider()
 if st.button("엑셀로 변환하기", type="primary", use_container_width=True):
     with st.spinner("엑셀 파일을 만드는 중입니다…"):
         try:
-            xlsx_bytes = to_excel(sheets, n_keys=len(key_cols))
+            xlsx_bytes = to_excel(sheets)
         except Exception as e:
             st.error(f"엑셀 생성에 실패했습니다: {e}")
             st.stop()
