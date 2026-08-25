@@ -1,0 +1,24 @@
+# .streamlit/config.toml
+# 저장소 최상단에 .streamlit 폴더를 만들고 그 안에 config.toml 로 넣으세요.
+# 앱을 재시작하면 적용됩니다.
+
+[theme]
+# 강조 색 (버튼, 선택된 항목, 슬라이더)
+# 기본값은 Streamlit 빨강 #FF4B4B 입니다.
+
+# 아래를 주석 해제해 바꿔 보세요. 한 줄만 살려 두면 됩니다.
+#primaryColor = "#1F4E79"   # 네이비
+#primaryColor = "#2E7D6B"   # 청록 — 차분하고 눈이 편함
+#primaryColor = "#4A5568"   # 슬레이트 — 색을 거의 안 쓰는 느낌
+primaryColor = "#6B4E9E"   # 자주 — 문서 톤과 잘 어울림
+#primaryColor = "#B45309"   # 호박 — 따뜻한 쪽
+
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FB"   # 컨테이너·표 머리글 배경
+textColor = "#22262E"
+
+font = "sans serif"
+
+[client]
+# 우측 상단 햄버거 메뉴에서 개발자용 항목을 숨긴다
+toolbarMode = "minimal"

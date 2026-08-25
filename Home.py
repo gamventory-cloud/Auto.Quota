@@ -1,189 +1,168 @@
 # Home.py
+#
+# 이 파일은 '라우터' 입니다. 페이지를 이동할 때마다 매번 실행되므로
+# 여기에는 공통 설정만 두고, 화면 내용은 각 페이지 파일에 둡니다.
+# 홈 화면의 카드 그리드는 홈화면.py 에 있습니다.
+#
+# ── 파일 경로를 적지 않는 이유 ────────────────────────────────────────
+#   경로를 정확히 적으면 번호 접두사가 바뀌거나 이름을 조금 고쳐도 깨집니다.
+#   그래서 '핵심 단어'로 찾도록 했습니다.
+#   예: ("쿼터",) 는 2___쿼터_솔루션.py 든 쿼터_배분.py 든 찾아냅니다.
+#
+# ── 페이지 추가하는 법 ────────────────────────────────────────────────
+#   PAGES 표에 (찾을 단어, 제외할 단어, 사이드바 이름, 아이콘) 을 넣습니다.
+#   못 찾으면 사이드바에 안내가 뜨고 실제 파일 목록도 함께 보여줍니다.
+# =====================================================================
+
+from pathlib import Path
+
 import streamlit as st
+
 import utils
 
 st.set_page_config(page_title="Quota Master Pro", layout="wide",
                    page_icon="◧", initial_sidebar_state="expanded")
 
-# 비밀번호 체크
 if not utils.check_password():
     st.stop()
 
 
-def _html(block: str) -> str:
-    """
-    마크다운이 HTML을 건드리지 않도록 한 줄로 눌러서 넘긴다.
-
-    Streamlit 은 st.markdown 에 넘긴 문자열을 먼저 마크다운으로 해석한다.
-    이때 빈 줄 다음에 4칸 이상 들여쓴 줄이 오면 그 부분을 **코드 블록**으로
-    보고 태그를 글자 그대로 출력해 버린다. (카드 div 가 통째로 깨졌던 원인)
-
-    각 줄의 앞뒤 공백을 없애고 빈 줄을 버린 뒤 공백 하나로 이어 붙이면
-    들여쓰기와 빈 줄이 모두 사라져서 이 문제가 생기지 않는다.
-    공백으로 잇는 이유는, 줄바꿈으로 나뉜 한글 문장이 붙어버리는 것을 막기 위해서다.
-    """
-    return " ".join(line.strip() for line in block.splitlines() if line.strip())
-
-
-# ==============================================================================
-# 스타일
-#   - 배경/글자색은 Streamlit 테마를 따라가도록 반투명 + currentColor 로 처리한다.
-#     (라이트/다크 어느 쪽에서도 카드가 겉돌지 않는다)
-#   - 고정색은 강조색 하나뿐이다.
-# ==============================================================================
-st.markdown(_html("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-:root{
-  --accent:#0E7C7B;
-  --line:rgba(128,144,170,.28);
-  --surface:rgba(128,144,170,.07);
-  --mono:'IBM Plex Mono',ui-monospace,monospace;
+PAGES: dict = {
+    "시작": [
+        (("홈화면",), (), "홈", "🏠"),
+    ],
+    "표본 확정": [
+        (("쿼터",), (), "쿼터 솔루션", "🎯"),
+    ],
+    "내보내기": [
+        (("SAV", "변환"), ("엑셀",), "Excel → Sav", "💾"),
+        (("SAV", "엑셀"), (), "Sav → Excel", "📗"),
+    ],
+    "자료 준비": [
+        (("라벨",), (), "SPSS 라벨링", "🏷️"),
+        (("설문지",), (), "HWP → Word", "📄"),
+    ],
+    "데이터 정리": [
+        (("정제",), (), "RD 변수명 변환", "🧹"),
+        (("응답시간",), (), "체류시간 변환", "🔄"),
+        (("지역코드",), (), "지역코드 검증", "📍"),
+    ],
 }
-.qm *{font-family:'IBM Plex Sans KR',-apple-system,'Malgun Gothic',sans-serif;}
-.qm-hero{padding:8px 0 22px;border-bottom:1px solid var(--line);margin-bottom:26px;}
-.qm-eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.18em;
-  text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:12px;}
-.qm-title{font-size:44px;font-weight:700;letter-spacing:-.03em;line-height:1.1;
-  margin:0 0 10px;color:inherit;}
-.qm-title em{font-style:normal;color:var(--accent);}
-.qm-sub{font-size:15.5px;line-height:1.65;opacity:.72;max-width:58ch;margin:0;}
-.qm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:stretch;}
-.qm-card{border:1px solid var(--line);border-radius:12px;padding:22px 22px 18px;
-  background:var(--surface);position:relative;overflow:hidden;
-  display:flex;flex-direction:column;
-  transition:transform .16s ease,border-color .16s ease;}
-.qm-card:hover{transform:translateY(-2px);border-color:var(--accent);}
-.qm-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
-  background:var(--accent);opacity:0;transition:opacity .16s ease;}
-.qm-card:hover::before{opacity:1;}
-.qm-card.feature::before{opacity:1;}
-.qm-stage{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;
-  text-transform:uppercase;color:var(--accent);margin-bottom:9px;}
-.qm-name{font-size:19px;font-weight:600;letter-spacing:-.02em;margin:0 0 8px;}
-.qm-desc{font-size:14px;line-height:1.6;opacity:.74;margin:0 0 16px;flex:1 1 auto;}
-.qm-desc code{font-family:var(--mono);font-size:12.5px;padding:1px 5px;
-  border-radius:4px;background:var(--surface);border:1px solid var(--line);}
-.qm-io{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
-  padding-top:14px;border-top:1px dashed var(--line);}
-.qm-chip{font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:5px;
-  border:1px solid var(--line);white-space:nowrap;opacity:.85;}
-.qm-chip.out{border-color:var(--accent);color:var(--accent);opacity:1;}
-.qm-io-arrow{font-family:var(--mono);font-size:12px;opacity:.4;}
-.qm-foot{margin-top:28px;padding-top:18px;border-top:1px solid var(--line);
-  font-size:13px;opacity:.6;line-height:1.7;}
-@media (max-width:1200px){ .qm-grid{grid-template-columns:repeat(2,1fr);} }
-@media (max-width:760px){ .qm-grid{grid-template-columns:1fr;} .qm-title{font-size:32px;} }
-@media (prefers-reduced-motion:reduce){
-  .qm-card{transition:none;} .qm-card:hover{transform:none;}
-}
-</style>
-"""), unsafe_allow_html=True)
+
+HOME_TITLE = "홈"
+HOME_SECTION = "시작"      # 이 구역은 항상 펼쳐진 상태로 위에 둔다
 
 
-# ==============================================================================
-# 본문
-#   설명 문구와 입출력 칩은 이 블록만 고치면 된다.
-# ==============================================================================
-st.markdown(_html("""
-<div class="qm">
-  <div class="qm-hero">
-    <div class="qm-eyebrow">Survey Data Toolkit</div>
-    <h1 class="qm-title">설문지에서 <em>최종 표본</em>까지</h1>
-    <p class="qm-sub">
-      조사 데이터를 정리하고 쿼터를 맞추는 작업을 한곳에서 처리합니다.
-      왼쪽 사이드바에서 도구를 선택하세요.
-    </p>
-  </div>
-  <div class="qm-grid">
-    <div class="qm-card feature">
-      <div class="qm-stage">표본 확정</div>
-      <h2 class="qm-name">쿼터 솔루션</h2>
-      <p class="qm-desc">
-        메인 쿼터와 추가 쿼터를 동시에 만족하는 응답자 조합을 찾습니다.
-        목표를 못 채우면 원인을 가려내고, 어떤 조건의 응답자를
-        몇 명 더 모아야 하는지까지 알려줍니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">정제된 데이터</span>
-        <span class="qm-chip">쿼터표</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">최종 표본</span>
-        <span class="qm-chip out">달성 현황 리포트</span>
-        <span class="qm-chip out">추가 수집 지시서</span>
-      </div>
-    </div>
-    <div class="qm-card">
-      <div class="qm-stage">자료 준비</div>
-      <h2 class="qm-name">설문지 변환</h2>
-      <p class="qm-desc">
-        설문지 워드 파일을 읽어 문항 구조를 분석하고 엑셀 코드북으로 만듭니다.
-        단수·복수·표·순위형을 구분해 정리합니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">설문지 .docx</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">코드북 .xlsx</span>
-      </div>
-    </div>
-    <div class="qm-card">
-      <div class="qm-stage">자료 준비</div>
-      <h2 class="qm-name">SPSS 라벨링</h2>
-      <p class="qm-desc">
-        코드북을 바탕으로 SPSS 초기 세팅 신택스를 만듭니다.
-        변수 라벨과 값 라벨을 한 번에 입힙니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">코드북 .xlsx</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">신택스 .sps</span>
-      </div>
-    </div>
-    <div class="qm-card">
-      <div class="qm-stage">데이터 정리</div>
-      <h2 class="qm-name">SPSS 정제</h2>
-      <p class="qm-desc">
-        원자료와 코드북을 대조해 변수명을 자동으로 맞춥니다.
-        <code>Q1</code>을 <code>SQ1</code>로 바꾸는 식의 작업을 일괄 처리합니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">원자료</span>
-        <span class="qm-chip">코드북</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">변수명 정리된 데이터</span>
-      </div>
-    </div>
-    <div class="qm-card">
-      <div class="qm-stage">데이터 정리</div>
-      <h2 class="qm-name">응답시간 변환</h2>
-      <p class="qm-desc">
-        문항별 체류시간이 세로로 쌓여 있는 데이터를 한 명당 한 줄로 돌립니다.
-        응답자 단위로 붙여야 원자료와 합치거나 불성실 응답을 걸러낼 수 있습니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">체류시간 원자료 (세로)</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">응답자별 가로 데이터</span>
-      </div>
-    </div>
-    <div class="qm-card">
-      <div class="qm-stage">내보내기</div>
-      <h2 class="qm-name">SAV 변환</h2>
-      <p class="qm-desc">
-        엑셀·CSV 표를 SPSS에서 바로 열리는 <code>.sav</code> 파일로 만듭니다.
-        한글 열 이름은 변수 라벨로, 글자 응답은 숫자 코드와 값 라벨로 바꿉니다.
-        문항이 여러 시트에 나뉘어 있으면 <code>id</code> 기준으로 붙입니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">원자료 .xlsx / .csv</span>
-        <span class="qm-chip">여러 시트</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">SPSS .sav</span>
-      </div>
-    </div>
-  </div>
-  <div class="qm-foot">
-    지인들만 사용하는 비공개 도구입니다.
-  </div>
-</div>
-"""), unsafe_allow_html=True)
+# ── 후보 파일 모으기 ─────────────────────────────────────────────────
+# 이 파일이 있는 폴더와 그 아래 한 단계까지 훑는다.
+# pages 폴더 이름이 다르거나 파일이 최상단에 있어도 찾아낸다.
+here = Path(__file__).resolve().parent
+SKIP = {"home.py", "utils.py", "spss_labels.py"}
+
+candidates: list = []
+for p in sorted(here.glob("*.py")):
+    if p.name.lower() not in SKIP:
+        candidates.append(p)
+for sub in sorted(here.iterdir()):
+    if sub.is_dir() and not sub.name.startswith((".", "__")):
+        for p in sorted(sub.glob("*.py")):
+            if p.name.lower() not in SKIP:
+                candidates.append(p)
+
+
+def find_page(want: tuple, avoid: tuple):
+    """파일명에 want 단어가 모두 있고 avoid 단어는 없는 파일. 대소문자 무시."""
+    hits = [
+        p for p in candidates
+        if all(w.lower() in p.stem.lower() for w in want)
+        and not any(w.lower() in p.stem.lower() for w in avoid)
+    ]
+    if not hits:
+        return None
+    # 여러 개면 이름이 짧은 쪽을 고른다
+    return min(hits, key=lambda p: len(p.stem))
+
+
+def file_list() -> str:
+    return "\n".join(p.relative_to(here).as_posix() for p in candidates) or "(없음)"
+
+
+nav: dict = {}
+missing: list = []
+bad_icons: list = []
+used: set = set()
+
+for section, items in PAGES.items():
+    built = []
+    for want, avoid, title, icon in items:
+        hit = find_page(want, avoid)
+        if hit is None or hit in used:
+            missing.append(title)
+            continue
+        used.add(hit)
+        rel = hit.relative_to(here).as_posix()
+        # st.Page 의 icon 은 진짜 이모지만 받는다. 실패하면 아이콘만 버린다.
+        try:
+            pg = st.Page(rel, title=title, icon=icon,
+                         default=(title == HOME_TITLE))
+        except Exception:                             # noqa: BLE001
+            bad_icons.append(f"{title} ({icon})")
+            pg = st.Page(rel, title=title, default=(title == HOME_TITLE))
+        built.append(pg)
+    if built:
+        nav[section] = built
+
+# ── 아무것도 못 찾았을 때: 실제 파일 목록을 보여준다 ─────────────────
+if not nav:
+    st.error("사이드바에 넣을 페이지를 하나도 찾지 못했습니다.")
+    st.write("**이 파일이 있는 폴더**")
+    st.code(str(here))
+    st.write(f"**찾은 .py 파일 {len(candidates)}개**")
+    st.code(file_list())
+    st.caption(
+        "목록에 페이지 파일이 보이는데도 안 잡혔다면 이름을 알려 주세요. "
+        "목록 자체가 비어 있다면 이 Home.py 가 저장소 최상단에 있는지 확인해 주세요."
+    )
+    st.stop()
+
+# ── 사이드바를 직접 그린다 ───────────────────────────────────────────
+# position="hidden" 으로 자동 메뉴를 끄고 아래에서 손으로 만든다.
+# st.navigation 의 expanded 옵션은 '10개 넘으면 더 보기' 식의 잘림 제어라
+# 구역별 접기와는 무관하다.
+page = st.navigation(nav, position="hidden")
+
+if "nav_open" not in st.session_state:
+    st.session_state["nav_open"] = True
+
+with st.sidebar:
+    # 홈은 접힘과 무관하게 항상 보인다
+    for pg in nav.get(HOME_SECTION, []):
+        st.page_link(pg)
+
+    others = {k: v for k, v in nav.items() if k != HOME_SECTION}
+    if others:
+        opened = st.session_state["nav_open"]
+        # tertiary = 테두리 없는 링크 형태. 구역 캡션과 톤이 맞는다.
+        # use_container_width 를 주면 다시 박스처럼 보이므로 쓰지 않는다.
+        if st.button("도구 접기" if opened else "도구 펼치기",
+                     type="tertiary", icon=":material/unfold_less:" if opened
+                     else ":material/unfold_more:"):
+            st.session_state["nav_open"] = not opened
+            st.rerun()
+
+        if st.session_state["nav_open"]:
+            for section, pgs in others.items():
+                st.caption(section)
+                for pg in pgs:
+                    st.page_link(pg)
+
+    if missing:
+        st.warning("목록에서 빠진 페이지 — " + ", ".join(missing))
+        with st.expander("실제 파일 목록 보기"):
+            st.code(str(here))
+            st.code(file_list())
+
+    if bad_icons:
+        st.info("이모지가 아니라 아이콘 없이 표시합니다 — " + ", ".join(bad_icons))
+
+page.run()
