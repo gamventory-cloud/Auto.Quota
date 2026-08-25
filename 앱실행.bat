@@ -23,9 +23,21 @@ if errorlevel 1 goto DIRTY
 git diff --cached --quiet
 if errorlevel 1 goto DIRTY
 
+REM 아직 올리지 않은 커밋이 있으면 pull 이 실패한다.
+REM 관리자 PC 에서만 생기는 정상 상황이므로 따로 안내한다.
+set "AHEAD=0"
+for /f %%N in ('git rev-list --count @{u}..HEAD 2^>nul') do set "AHEAD=%%N"
+if not "%AHEAD%"=="0" goto AHEADMSG
+
 echo [*] 최신 코드를 확인합니다...
 git pull --ff-only
 if errorlevel 1 goto PULLFAIL
+goto SKIPPULL
+
+:AHEADMSG
+echo [*] 올리지 않은 커밋이 %AHEAD%개 있어 업데이트를 건너뜁니다.
+echo     정상입니다. 업로드.bat 으로 올리시면 됩니다.
+echo.
 goto SKIPPULL
 
 :DIRTY
