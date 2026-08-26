@@ -175,15 +175,31 @@ st.markdown(_html("""
     </div>
     <div class="qm-card">
       <div class="qm-stage">데이터 정리</div>
-      <h2 class="qm-name">체류시간 변환</h2>
+      <h2 class="qm-name">행열 변환</h2>
       <p class="qm-desc">
-        페이지별 체류시간이 세로로 쌓여 있는 데이터를 한 명당 한 줄로 돌립니다.
+        데이터의 행과 열 구조를 자유자재로 변환할 수 있습니다.<br>
         응답자 단위로 붙여야 원자료와 합치거나 불성실 응답을 걸러낼 수 있습니다.
       </p>
       <div class="qm-io">
         <span class="qm-chip">체류시간 원자료 (세로)</span>
         <span class="qm-io-arrow">&rarr;</span>
         <span class="qm-chip out">응답자별 가로 데이터</span>
+      </div>
+    </div>
+    <div class="qm-card">
+      <div class="qm-stage">데이터 정리</div>
+      <h2 class="qm-name">데이터 검증</h2>
+      <p class="qm-desc">
+        불성실 응답을 걸러냅니다. 체류시간, 매트릭스 문항의 직진성,
+        중복 응답, 라벨에 없는 코드값을 한 번에 점검합니다.<br>
+        지우지 않고 의심되는 정도만 등급으로 매겨 주므로 판단은 직접 하면 됩니다.
+      </p>
+      <div class="qm-io">
+        <span class="qm-chip">원자료</span>
+        <span class="qm-chip">체류시간</span>
+        <span class="qm-io-arrow">&rarr;</span>
+        <span class="qm-chip out">검토 대상 목록</span>
+        <span class="qm-chip out">검사 설정 저장</span>
       </div>
     </div>
     <div class="qm-card">
