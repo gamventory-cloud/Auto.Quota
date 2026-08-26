@@ -23,10 +23,6 @@ import utils
 st.set_page_config(page_title="Quota Master Pro", layout="wide",
                    page_icon="◧", initial_sidebar_state="expanded")
 
-if not utils.check_password():
-    st.stop()
-
-
 PAGES: dict = {
     "시작": [
         (("홈화면",), (), "홈", "🏠"),
@@ -35,8 +31,8 @@ PAGES: dict = {
         (("쿼터",), (), "쿼터 솔루션", "🎯"),
     ],
     "내보내기": [
-        (("SAV", "변환"), ("엑셀",), "Excel → Sav", "💾"),
         (("SAV", "엑셀"), (), "Sav → Excel", "📗"),
+        (("SAV", "변환"), ("엑셀",), "Excel → Sav", "💾"),
     ],
     "자료 준비": [
         (("라벨",), (), "SPSS 라벨링", "🏷️"),
@@ -125,11 +121,19 @@ if not nav:
     )
     st.stop()
 
-# ── 사이드바를 직접 그린다 ───────────────────────────────────────────
-# position="hidden" 으로 자동 메뉴를 끄고 아래에서 손으로 만든다.
-# st.navigation 의 expanded 옵션은 '10개 넘으면 더 보기' 식의 잘림 제어라
-# 구역별 접기와는 무관하다.
+# ── st.navigation 을 먼저 호출한다 ───────────────────────────────────
+# 이 명령이 실행되는 순간부터 Streamlit 이 pages/ 자동 탐색을 끈다.
+# 비밀번호 확인 뒤에 두면, 로그인 화면에서는 아직 호출되지 않은 상태라
+# 자동 탐색으로 만들어진 옛 사이드바(파일명 그대로인 목록)가 그대로 보인다.
+#
+# position="hidden" 이므로 이 호출 자체는 화면에 아무것도 그리지 않는다.
+# 사이드바는 아래에서 손으로 만든다.
 page = st.navigation(nav, position="hidden")
+
+# ── 비밀번호 ─────────────────────────────────────────────────────────
+# 사이드바를 그리기 전에 막는다. 로그인 화면에는 사이드바가 비어 있게 된다.
+if not utils.check_password():
+    st.stop()
 
 if "nav_open" not in st.session_state:
     st.session_state["nav_open"] = True
