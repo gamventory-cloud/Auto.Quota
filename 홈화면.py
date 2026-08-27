@@ -159,6 +159,22 @@ st.markdown(_html("""
       </div>
     </div>
     <div class="qm-card">
+      <div class="qm-stage">자료 준비</div>
+      <h2 class="qm-name">에디팅 신택스</h2>
+      <p class="qm-desc">
+        DP 문서를 읽어 에디팅 체크 신택스를 만듭니다.<br>
+        보기 수와 <code>PROG</code> 지시문에서 범위·스킵로직 체크를 뽑아내고,
+        만든 신택스를 데이터에 바로 돌려 건수까지 확인합니다.
+      </p>
+      <div class="qm-io">
+        <span class="qm-chip">DP 문서 .docx</span>
+        <span class="qm-chip">원자료</span>
+        <span class="qm-io-arrow">&rarr;</span>
+        <span class="qm-chip out">체크 신택스 .sps</span>
+        <span class="qm-chip out">위반 케이스 목록</span>
+      </div>
+    </div>
+    <div class="qm-card">
       <div class="qm-stage">데이터 정리</div>
       <h2 class="qm-name">RD 변수명 변환</h2>
       <p class="qm-desc">
@@ -184,22 +200,6 @@ st.markdown(_html("""
         <span class="qm-chip">체류시간 원자료 (세로)</span>
         <span class="qm-io-arrow">&rarr;</span>
         <span class="qm-chip out">응답자별 가로 데이터</span>
-      </div>
-    </div>
-    <div class="qm-card">
-      <div class="qm-stage">데이터 정리</div>
-      <h2 class="qm-name">데이터 검증</h2>
-      <p class="qm-desc">
-        불성실 응답을 걸러냅니다. 체류시간, 매트릭스 문항의 직진성,
-        중복 응답, 라벨에 없는 코드값을 한 번에 점검합니다.<br>
-        지우지 않고 의심되는 정도만 등급으로 매겨 주므로 판단은 직접 하면 됩니다.
-      </p>
-      <div class="qm-io">
-        <span class="qm-chip">원자료</span>
-        <span class="qm-chip">체류시간</span>
-        <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">검토 대상 목록</span>
-        <span class="qm-chip out">검사 설정 저장</span>
       </div>
     </div>
     <div class="qm-card">

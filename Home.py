@@ -37,11 +37,11 @@ PAGES: dict = {
     "자료 준비": [
         (("라벨",), (), "SPSS 라벨링", "🏷️"),
         (("설문지",), (), "HWP → Word", "📄"),
+#        (("에디팅",), (), "에디팅 신택스", "🧾"),
     ],
     "데이터 정리": [
         (("정제",), (), "RD 변수명 수정", "🧹"),
         (("행열",), (), "행열 데이터 변환", "🔄"),
-        (("데이터", "검증"), (), "데이터 검증", "🔍"),
         (("지역코드",), (), "지역코드 검증", "📍"),
     ],
 }
@@ -54,7 +54,8 @@ HOME_SECTION = "시작"      # 이 구역은 항상 펼쳐진 상태로 위에 �
 # 이 파일이 있는 폴더와 그 아래 한 단계까지 훑는다.
 # pages 폴더 이름이 다르거나 파일이 최상단에 있어도 찾아낸다.
 here = Path(__file__).resolve().parent
-SKIP = {"home.py", "utils.py", "spss_labels.py"}
+SKIP = {"home.py", "utils.py", "spss_labels.py",
+        "dp_syntax.py", "sps_engine.py"}
 
 candidates: list = []
 for p in sorted(here.glob("*.py")):
