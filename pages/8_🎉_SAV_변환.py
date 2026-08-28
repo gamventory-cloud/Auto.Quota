@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║  파일명 : pages/8___SAV_변환.py                                            ║
 ║  위치   : pages/ 폴더 안                                                   ║
-║  버전   : 1.0                                                             ║
+║  버전   : 1.1                                                             ║
 ║                                                                          ║
 ║  ★ 단일 파일 버전 ★                                                        ║
 ║  utils.py 를 전혀 수정하지 않아도 동작합니다.                                 ║
@@ -18,23 +18,33 @@
 
   ┌ 하는 일 ────────────────────────────────────────────────┐
   │ 1. 열 이름을 SPSS 규칙에 맞게 정리 (한글 이름 → 변수 라벨로) │
-  │ 2. 열마다 숫자/문자/코드화 여부와 측정 수준을 지정          │
-  │ 3. 문자 응답을 1,2,3… 숫자로 바꾸고 값 라벨을 붙임          │
+  │ 2. 열마다 숫자/문자/날짜 여부와 측정 수준을 지정            │
+  │ 3. 개방형 기입 여부를 숫자로 찍어 스킵 로직 검증에 쓰게 함   │
   │ 4. 결측 코드(99, 999 등)를 SPSS 결측값으로 등록            │
+  │ 5. 한 번 맞춘 설정을 파일명으로 기억해 다음에 그대로 적용     │
   └────────────────────────────────────────────────────────┘
+
+설정 저장은 두 군데를 함께 쓴다.
+  · 앱이 도는 컴퓨터의 `.sav_presets/` 폴더 (자동, 같은 파일명이면 알아서 적용)
+  · 내려받은 설정 JSON (Community Cloud 처럼 디스크가 초기화되는 환경용)
+읽을 때는 올린 JSON 을 먼저 보고, 없으면 폴더를 본다.
 """
 
 import io
 import os
 import re
+import json
+import time
 import hashlib
+import pathlib
 import tempfile
 import unicodedata
 
 import pandas as pd
 import streamlit as st
 
-PAGE_VERSION = "1.0"
+PAGE_VERSION = "1.1"
+PRESET_VERSION = 1
 
 # ==============================================================================
 # 0. 선택적 의존성
@@ -112,6 +122,17 @@ def _wide(fn):
     return {}
 
 
+def seed(key: str, val):
+    """
+    위젯 기본값은 여기서만 넣는다.
+    위젯에 value=… 를 주면서 session_state 로도 값을 넣으면 Streamlit 이 경고를
+    띄우므로, 기본값도 session_state 로만 다룬다(비어 있을 때만 채운다).
+    """
+    if val is not None and key not in st.session_state:
+        st.session_state[key] = val
+    return st.session_state.get(key, val)
+
+
 # ==============================================================================
 # 2. 화면 기본 설정
 # ==============================================================================
@@ -123,8 +144,8 @@ if not check_password():
 st.title("💾 엑셀 → SPSS(.sav) 변환")
 st.caption(
     "엑셀이나 CSV 표를 SPSS에서 바로 열 수 있는 .sav 파일로 만듭니다. "
-    "한글 열 이름은 변수 라벨로 옮기고, 문자로 적힌 응답은 숫자 코드와 값 라벨로 "
-    "바꿀 수 있습니다."
+    "한글 열 이름은 변수 라벨로 옮기고, 개방형 응답은 기입 여부만 숫자로 "
+    "바꿔 내보낼 수 있습니다."
 )
 
 if not HAS_PYREADSTAT:
@@ -176,8 +197,11 @@ _SPSS_RESERVED = {
     "TO", "WITH",
 }
 
-TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_CODE, TYPE_DATE, TYPE_FLAG = (
-    "자동", "숫자", "문자", "문자→코드화", "날짜", "문자→응답표시")
+TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_DATE, TYPE_FLAG = (
+    "자동", "숫자", "문자", "날짜", "문자→응답표시")
+# 예전 버전에는 문자를 1,2,3… 으로 바꾸는 ‘문자→코드화’ 가 있었다.
+# 개방형 코딩은 따로 하는 작업이라 없앴고, 옛 설정을 읽을 때만 문자로 바꿔 받는다.
+LEGACY_CODE = "문자→코드화"
 MEASURE_MAP = {"명목": "nominal", "서열": "ordinal", "연속": "scale"}
 FLAG_DEFAULT = 9999
 
@@ -297,7 +321,7 @@ def has_leading_zero(sr: pd.Series) -> bool:
     return False
 
 
-def auto_kind(sr: pd.Series, suggest_code: bool = False) -> str:
+def auto_kind(sr: pd.Series) -> str:
     """열 하나를 보고 유형을 추천한다."""
     if is_datetime_col(sr):
         return TYPE_DATE
@@ -305,20 +329,12 @@ def auto_kind(sr: pd.Series, suggest_code: bool = False) -> str:
         return TYPE_STR
     if looks_numeric(sr):
         return TYPE_NUM
-    if suggest_code:
-        vals = [v for v in text_list(sr) if v is not None]
-        uniq = len(set(vals))
-        # 값이 몇 종류 안 되고, 응답자 수보다 확실히 적을 때만 코드화를 권한다.
-        # (ID 처럼 행마다 다른 값은 코드화하면 라벨만 수백 개 생긴다)
-        if vals and 2 <= uniq <= 30 and uniq <= max(2, len(vals) * 0.6):
-            if max(len(v) for v in vals) <= 40:
-                return TYPE_CODE
     return TYPE_STR
 
 
 def auto_measure(sr: pd.Series, kind: str) -> str:
     """측정 수준 추천. 값이 몇 개 안 되는 정수는 척도가 아니라 범주로 본다."""
-    if kind in (TYPE_STR, TYPE_CODE):
+    if kind in (TYPE_STR, TYPE_FLAG):
         return "명목"
     if kind == TYPE_DATE:
         return "연속"
@@ -362,6 +378,19 @@ def num_format(sr: pd.Series) -> str:
 SAVE_ALL, SAVE_NUM, SAVE_STR = "숫자＋문자", "숫자만", "문자만"
 
 KEY_NAMES = ("no", "id", "panel_id", "respondent_id")
+
+
+def looks_like_key(name) -> bool:
+    """
+    ID 로 보이는 열 이름인지. 응답표시 일괄 적용에서 식별 열을 지키는 데 쓴다.
+    ‘패널ID’ 처럼 한글이 섞인 이름도 걸러야 해서 이름 끝·처음의 id 까지 본다.
+    """
+    n = str(name).strip().lower()
+    if n in KEY_NAMES:
+        return True
+    if "아이디" in n:
+        return True
+    return bool(re.search(r"(^|[_\s]|[가-힣])id$|^id[_\s]", n))
 ADMIN_END = ("aream",)          # 이 열 바로 앞까지가 관리용 구간(areaM 자체는 포함)
 
 
@@ -392,7 +421,7 @@ def build_sav(df: pd.DataFrame,
     save_mode  : 숫자＋문자 / 숫자만 / 문자만
     always     : 저장 범위와 상관없이 남길 열(ID 등)
     flag_value : ‘문자→응답표시’ 로 지정한 열에서 기입된 칸에 찍을 숫자
-    반환  : (sav bytes, 값라벨 dict, 경고 목록, 제외된 열 목록)
+    반환  : (sav bytes, 값라벨, 경고, 제외된 열)
     """
     df = df.reset_index(drop=True)
     out, labels, value_labels, measures = {}, {}, {}, {}
@@ -418,12 +447,9 @@ def build_sav(df: pd.DataFrame,
             if save_mode == SAVE_NUM and kind == TYPE_STR:
                 skipped.append(str(src))
                 continue
-            if save_mode == SAVE_STR:
-                if kind in (TYPE_NUM, TYPE_DATE):
-                    skipped.append(str(src))
-                    continue
-                if kind == TYPE_CODE:                # 코드 대신 원래 글자를 남긴다
-                    kind = TYPE_STR
+            if save_mode == SAVE_STR and kind in (TYPE_NUM, TYPE_DATE):
+                skipped.append(str(src))
+                continue
 
         if kind == TYPE_NUM:
             conv = pd.to_numeric(sr, errors="coerce")
@@ -440,24 +466,6 @@ def build_sav(df: pd.DataFrame,
             if miss > 0:
                 warns.append(f"‘{src}’ 에서 날짜로 못 읽은 값 {miss}개는 빈칸이 됩니다.")
             out[name] = conv.reset_index(drop=True)
-
-        elif kind == TYPE_CODE:
-            txt = text_list(sr)
-            cats = sorted({v for v in txt if v is not None})
-            if len(cats) > 200:
-                warns.append(
-                    f"‘{src}’ 는 서로 다른 값이 {len(cats)}개라 코드화하면 "
-                    "라벨이 지나치게 많아집니다. 문자 그대로 저장했습니다."
-                )
-                out[name] = pd.Series(["" if v is None else v for v in txt],
-                                      dtype=object)
-            else:
-                code = {c: i + 1 for i, c in enumerate(cats)}
-                out[name] = pd.Series(
-                    [None if v is None else float(code[v]) for v in txt],
-                    dtype="float64")
-                value_labels[name] = {float(i): c for c, i in code.items()}
-                formats[name] = "F8.0"
 
         elif kind == TYPE_FLAG:
             txt = text_list(sr)
@@ -626,14 +634,198 @@ def merge_stack(frames: dict, add_sheet_col: bool) -> tuple:
 
 
 # ==============================================================================
-# 6. 화면
+# 5-c. 설정(프리셋) 저장과 읽기
+#   같은 파일명을 다시 올렸을 때 지난 설정을 그대로 씌우기 위한 부분.
+#   저장은 두 군데 — 로컬 폴더(자동)와 내려받는 JSON(수동) — 를 함께 쓴다.
 # ==============================================================================
+SPEC_COLS = ("포함", "원본열", "변수명", "변수라벨", "유형", "측정", "결측코드")
+
+
+def preset_dir():
+    """
+    설정을 둘 폴더를 정한다. 쓰기가 막혀 있으면 None 을 돌려주고,
+    그 경우 화면에서는 JSON 내려받기만 안내한다.
+    Community Cloud 는 앱이 재시작되면 이 폴더가 사라진다(그래서 JSON 이 필요하다).
+    """
+    for base in (pathlib.Path(__file__).resolve().parent.parent,
+                 pathlib.Path(tempfile.gettempdir())):
+        try:
+            d = base / ".sav_presets"
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            return d
+        except Exception:                            # noqa: BLE001, PERF203
+            continue
+    return None
+
+
+def preset_key(filename: str) -> str:
+    """파일명을 폴더에 쓸 수 있는 이름으로 바꾼다."""
+    stem = os.path.splitext(str(filename))[0].strip()
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "_", stem)[:80]
+    return safe or "preset"
+
+
+def make_preset(filename: str, spec: pd.DataFrame, settings: dict) -> dict:
+    """현재 설정을 저장용 딕셔너리로 만든다."""
+    cols = []
+    for _, r in spec.iterrows():
+        cols.append({k: (bool(r[k]) if k == "포함" else str(r[k]))
+                     for k in SPEC_COLS})
+    return {
+        "preset_version": PRESET_VERSION,
+        "page_version": PAGE_VERSION,
+        "source_file": str(filename),
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "settings": settings,
+        "columns": cols,
+    }
+
+
+def write_preset(filename: str, payload: dict):
+    """로컬 폴더에 저장. 실패해도 앱은 계속 돌아간다."""
+    d = preset_dir()
+    if d is None:
+        return None
+    try:
+        p = d / f"{preset_key(filename)}.json"
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                     encoding="utf-8")
+        return p
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def read_preset(filename: str):
+    """로컬 폴더에서 같은 파일명의 설정을 찾는다."""
+    d = preset_dir()
+    if d is None:
+        return None
+    p = d / f"{preset_key(filename)}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def list_presets() -> list:
+    d = preset_dir()
+    if d is None:
+        return []
+    out = []
+    for p in sorted(d.glob("*.json")):
+        try:
+            j = json.loads(p.read_text(encoding="utf-8"))
+            out.append((p.stem, j.get("saved_at", ""), len(j.get("columns", []))))
+        except Exception:                            # noqa: BLE001, PERF203
+            continue
+    return out
+
+
+def valid_preset(payload) -> bool:
+    return bool(isinstance(payload, dict) and payload.get("columns"))
+
+
+def apply_preset(payload: dict, auto_rows: list) -> tuple:
+    """
+    자동 판정 결과(auto_rows)에 지난 설정을 씌운다.
+    이름이 같은 열만 덮어쓰고, 새로 생긴 열은 자동 판정을 그대로 둔다.
+    """
+    saved = {str(c.get("원본열")): c for c in payload.get("columns", [])}
+    rows, matched, added, legacy = [], 0, [], []
+    for r in auto_rows:
+        r = dict(r)
+        s = saved.get(str(r["원본열"]))
+        if s:
+            for k in ("포함", "변수명", "변수라벨", "유형", "측정", "결측코드"):
+                if k in s and str(s[k]) != "":
+                    r[k] = bool(s[k]) if k == "포함" else str(s[k])
+            if "포함" in s:
+                r["포함"] = bool(s["포함"])
+            if r["유형"] == LEGACY_CODE:             # 없어진 유형 → 문자로
+                r["유형"] = TYPE_STR
+                legacy.append(str(r["원본열"]))
+            matched += 1
+        else:
+            added.append(str(r["원본열"]))
+        rows.append(r)
+    gone = [c for c in saved if c not in {str(r["원본열"]) for r in auto_rows}]
+    return pd.DataFrame(rows), {"matched": matched, "added": added, "gone": gone,
+                                "legacy": legacy, "total": len(auto_rows)}
+
+
+
 up = st.file_uploader("엑셀 또는 CSV 파일", type=["xlsx", "xls", "csv"])
 if up is None:
     st.info("파일을 올리면 열 설정 화면이 나타납니다.")
+    saved_list = list_presets()
+    if saved_list:
+        st.caption(
+            "저장된 설정: "
+            + ", ".join(f"{n} ({t[:10]})" for n, t, _ in saved_list[:8])
+            + (" …" if len(saved_list) > 8 else "")
+        )
     st.stop()
 
 raw = up.getvalue()
+
+# ── 지난 설정 찾기 ────────────────────────────────────────────────────────
+with st.expander("지난 설정", expanded=False):
+    st.caption(
+        "한 번 맞춘 열 설정은 파일명으로 기억해 다음에 같은 이름의 파일을 올리면 "
+        "그대로 적용합니다. 앱이 도는 컴퓨터의 `.sav_presets/` 폴더에 저장되는데, "
+        "Community Cloud 는 앱이 재시작되면 이 폴더가 비워집니다. "
+        "그래서 변환할 때 설정 JSON 도 함께 내려받아 두면, 나중에 아래에서 올려 "
+        "되살릴 수 있습니다."
+    )
+    up_preset = st.file_uploader("설정 JSON 올리기", type=["json"],
+                                 key="sav_preset_up")
+    if preset_dir() is None:
+        st.warning("이 환경에서는 폴더에 저장할 수 없어 JSON 방식만 쓸 수 있습니다.")
+    else:
+        st.caption(f"저장 폴더: `{preset_dir()}`")
+
+preset, preset_src = None, ""
+if up_preset is not None:
+    try:
+        cand = json.loads(up_preset.getvalue().decode("utf-8"))
+        if valid_preset(cand):
+            preset, preset_src = cand, f"올린 JSON ({up_preset.name})"
+        else:
+            st.error("올린 JSON 에서 열 설정을 찾지 못했습니다.")
+    except Exception as e:                           # noqa: BLE001
+        st.error(f"설정 JSON 을 읽지 못했습니다 — {e}")
+if preset is None:
+    cand = read_preset(up.name)
+    if valid_preset(cand):
+        preset, preset_src = cand, f"저장 폴더 ({cand.get('saved_at', '')})"
+
+# 전역 설정은 위젯이 만들어지기 전에 넣어야 반영된다. 한 번만 적용하고,
+# 그 뒤 사용자가 직접 바꾼 값을 되돌리지 않는다.
+_ptoken = f"{up.name}|{(preset or {}).get('saved_at', '')}|{preset_src}"
+if preset and st.session_state.get("sav_preset_token") != _ptoken:
+    s = preset.get("settings") or {}
+    for key, val in (("sav_hdr", s.get("header_row")),
+                     ("sav_mode", s.get("merge_mode")),
+                     ("sav_key", s.get("join_key")),
+                     ("sav_keep", s.get("keep_all_label")),
+                     ("sav_srccol", s.get("add_sheet_col")),
+                     ("sav_mode_save", s.get("save_mode")),
+                     ("sav_flagval", s.get("flag_value")),
+                     ("sav_always", s.get("always_cols"))):
+        if val is not None:
+            st.session_state[key] = val
+    st.session_state["sav_preset_token"] = _ptoken
+    st.session_state.pop("sav_sig", None)            # 열 설정도 다시 만들게 한다
+    st.session_state.pop("sav_bytes", None)
+
+if st.session_state.get("sav_preset_off") == _ptoken:
+    preset, preset_src = None, ""
+
 
 try:
     sheets = list_sheets(raw, up.name)
@@ -649,20 +841,24 @@ merge_mode, join_key, keep_all, add_sheet_col = None, None, True, False
 if len(sheets) == 1:
     sel = sheets
     c2, = st.columns(1)
-    header_row = st.number_input("머리글 행", 1, 50, 1, key="sav_hdr",
+    seed("sav_hdr", 1)
+    header_row = st.number_input("머리글 행", 1, 50, key="sav_hdr",
                                  help="열 이름이 들어 있는 행 번호")
 else:
     st.info(f"시트가 {len(sheets)}개입니다. 합쳐서 하나의 .sav 로 만들 수 있습니다.")
     c1, c2 = st.columns([3, 1])
     with c1:
-        sel = st.multiselect("사용할 시트", sheets, default=sheets, key="sav_sheets")
+        seed("sav_sheets", sheets)
+        sel = st.multiselect("사용할 시트", sheets, key="sav_sheets")
     with c2:
-        header_row = st.number_input("머리글 행", 1, 50, 1, key="sav_hdr",
+        seed("sav_hdr", 1)
+        header_row = st.number_input("머리글 행", 1, 50, key="sav_hdr",
                                      help="열 이름이 들어 있는 행 번호")
     if not sel:
         st.warning("시트를 하나 이상 고르세요.")
         st.stop()
     if len(sel) > 1:
+        seed("sav_mode", MODE_SIDE)
         merge_mode = st.radio("합치는 방식", [MODE_SIDE, MODE_STACK],
                               key="sav_mode", horizontal=True)
 
@@ -691,10 +887,13 @@ elif merge_mode == MODE_SIDE:
         default_key = next((c for c in common
                             if str(c).lower() in ("id", "panel_id", "respondent_id")),
                            common[0])
-        join_key = st.selectbox("연결 열", common,
-                                index=common.index(default_key), key="sav_key",
+        if st.session_state.get("sav_key") not in common:
+            st.session_state.pop("sav_key", None)
+        seed("sav_key", default_key)
+        join_key = st.selectbox("연결 열", common, key="sav_key",
                                 help="시트끼리 같은 응답자를 알아보는 기준 열")
     with k2:
+        seed("sav_keep", "모두 남기기")
         keep_all = st.radio(
             "한쪽에만 있는 응답자",
             ["모두 남기기", "양쪽에 다 있는 사람만"],
@@ -705,7 +904,8 @@ elif merge_mode == MODE_SIDE:
         st.error(f"시트를 붙이지 못했습니다 — {e}")
         st.stop()
 else:
-    add_sheet_col = st.checkbox("어느 시트에서 왔는지 열로 남기기", value=True,
+    seed("sav_srccol", True)
+    add_sheet_col = st.checkbox("어느 시트에서 왔는지 열로 남기기",
                                 key="sav_srccol")
     df, merge_notes = merge_stack(frames, add_sheet_col)
 
@@ -732,7 +932,7 @@ if st.session_state.get("sav_sig") != sig:
     admin = set(admin_block(df.columns))
     for i, c in enumerate(df.columns, start=1):
         sr = df[c]
-        kind = auto_kind(sr, suggest_code=True)
+        kind = auto_kind(sr)
         blank = bool(sr.dropna().empty) or all(
             v is None for v in text_list(sr))
         if blank:
@@ -746,7 +946,24 @@ if st.session_state.get("sav_sig") != sig:
             "측정": auto_measure(sr, kind),
             "결측코드": "",
         })
-    st.session_state["sav_spec"] = pd.DataFrame(rows)
+    spec_df = pd.DataFrame(rows)
+    pstat = None
+    if preset:
+        spec_df, pstat = apply_preset(preset, rows)
+        # 프리셋에 없던 새 열은 변수명이 겹칠 수 있어 다시 정리한다
+        seen = set()
+        fixed = []
+        for i, nm in enumerate(spec_df["변수명"].tolist(), start=1):
+            nm = str(nm)
+            if nm.lower() in seen:
+                nm = to_spss_name(nm, i, seen)
+            else:
+                seen.add(nm.lower())
+            fixed.append(nm)
+        spec_df["변수명"] = fixed
+    st.session_state["sav_spec"] = spec_df
+    st.session_state["sav_pstat"] = pstat
+    st.session_state["sav_psrc"] = preset_src if preset else ""
     st.session_state["sav_sig"] = sig
     st.session_state["sav_empty"] = empties
     st.session_state["sav_admin"] = sorted(admin, key=lambda c: list(
@@ -755,9 +972,39 @@ if st.session_state.get("sav_sig") != sig:
     st.session_state.pop("sav_bytes", None)
 
 st.subheader("열 설정")
+
+_pstat = st.session_state.get("sav_pstat")
+if _pstat:
+    p1, p2 = st.columns([4, 1])
+    with p1:
+        msg = (f"지난 설정을 적용했습니다 — {st.session_state.get('sav_psrc', '')} · "
+               f"열 {_pstat['total']}개 중 {_pstat['matched']}개 일치")
+        if _pstat["added"]:
+            msg += (f", 새 열 {len(_pstat['added'])}개는 자동 판정 ("
+                    + ", ".join(_pstat["added"][:6])
+                    + (" …" if len(_pstat["added"]) > 6 else "") + ")")
+        if _pstat["gone"]:
+            msg += f", 지난 설정에만 있던 열 {len(_pstat['gone'])}개는 무시"
+        if _pstat.get("legacy"):
+            msg += (f". 없어진 ‘문자→코드화’ 로 저장돼 있던 열 "
+                    f"{len(_pstat['legacy'])}개는 문자로 바꿨습니다")
+        if _pstat["matched"] < _pstat["total"] * 0.5:
+            st.warning(msg + "  — 일치율이 낮습니다. 다른 조사의 설정이 아닌지 "
+                             "확인하세요.")
+        else:
+            st.info(msg)
+    with p2:
+        st.write("")
+        if st.button("새로 시작", **_wide(st.button),
+                     help="지난 설정을 버리고 자동 판정 결과로 되돌립니다."):
+            st.session_state["sav_preset_off"] = _ptoken
+            for k in ("sav_sig", "sav_bytes", "sav_pstat", "sav_preset_token"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
 _admin = st.session_state.get("sav_admin") or []
 _empty = st.session_state.get("sav_empty") or []
-if _admin:
+if _admin and not _pstat:
     st.caption(
         f"관리용 열 {len(_admin)}개(응답시각·검증 표시 등, areaM 직전까지)는 ‘포함’을 "
         "꺼두었습니다. 필요한 것만 다시 켜세요 — "
@@ -770,9 +1017,8 @@ if _empty:
     )
 st.caption(
     "**변수명** 은 SPSS에서 쓸 이름(영문·숫자·밑줄만)이고, **변수라벨** 은 원래 "
-    "한글 이름입니다. **문자→코드화** 를 고르면 응답 텍스트가 1, 2, 3… 숫자로 "
-    "바뀌고 값 라벨이 함께 저장됩니다. **문자→응답표시** 는 글자를 버리고 "
-    "기입된 칸에만 지정한 숫자를 찍어, SPSS에서 스킵 로직을 검증할 수 있게 합니다."
+    "한글 이름입니다. **문자→응답표시** 는 글자를 버리고 기입된 칸에만 지정한 "
+    "숫자를 찍어, SPSS에서 스킵 로직을 검증할 수 있게 합니다."
 )
 
 spec = st.data_editor(
@@ -787,8 +1033,8 @@ spec = st.data_editor(
         "변수명": st.column_config.TextColumn("SPSS 변수명", required=True),
         "변수라벨": st.column_config.TextColumn("변수 라벨"),
         "유형": st.column_config.SelectboxColumn(
-            "유형", options=[TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_CODE,
-                           TYPE_FLAG, TYPE_DATE],
+            "유형", options=[TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_FLAG,
+                           TYPE_DATE],
             required=True),
         "측정": st.column_config.SelectboxColumn(
             "측정", options=list(MEASURE_MAP), required=True, width="small"),
@@ -816,8 +1062,9 @@ with b2:
         st.session_state.pop("sav_bytes", None)
         st.rerun()
 with b3:
+    seed("sav_flagval", FLAG_DEFAULT)
     flag_value = st.number_input(
-        "응답표시 값", value=FLAG_DEFAULT, step=1, key="sav_flagval",
+        "응답표시 값", step=1, key="sav_flagval",
         help="‘문자→응답표시’ 로 지정한 열에서 기입된 칸에 찍을 숫자입니다. "
              "빈칸은 그대로 결측으로 남습니다.",
     )
@@ -826,10 +1073,10 @@ with b4:
     st.write("")
     if st.button("문자 열 전체 적용", **_wide(st.button),
                  help="‘포함’ 상태이고 유형이 ‘문자’ 인 열을 ‘문자→응답표시’ 로 "
-                      "바꿉니다. id·No 같은 식별 열은 건드리지 않습니다."):
+                      "바꿉니다. id·패널ID 같은 식별 열은 건드리지 않습니다."):
         cur = spec.copy()
-        hit = ((cur["유형"] == TYPE_STR) & cur["포함"]
-               & ~cur["원본열"].str.strip().str.lower().isin(KEY_NAMES))
+        keyish = cur["원본열"].map(looks_like_key)
+        hit = (cur["유형"] == TYPE_STR) & cur["포함"] & ~keyish
         cur.loc[hit, "유형"] = TYPE_FLAG
         cur.loc[hit, "측정"] = "명목"
         st.session_state["sav_spec"] = cur
@@ -846,10 +1093,12 @@ if _nflag:
 
 o1, o2, o3 = st.columns([2, 2, 1])
 with o1:
+    seed("sav_mode_save", SAVE_ALL)
     save_mode = st.radio("저장할 변수", [SAVE_ALL, SAVE_NUM, SAVE_STR],
                          key="sav_mode_save", horizontal=True,
                          help="‘숫자만’ 은 글자로 된 변수를 빼고, ‘문자만’ 은 숫자·날짜를 "
-                              "빼고 코드화 대상도 원래 글자 그대로 저장합니다.")
+                              "뺀 채 글자 변수만 저장합니다. 응답표시로 지정한 "
+                              "열은 어느 쪽에서도 남습니다.")
 with o2:
     file_label = st.text_input("파일 설명(선택)", value="",
                                placeholder="예: 2026년 상반기 본조사")
@@ -864,9 +1113,11 @@ if save_mode != SAVE_ALL:
     guess = [c for c in cand
              if str(c).lower() in ("id", "panel_id", "respondent_id", "no")
              or c == join_key]
+    if any(v not in cand for v in (st.session_state.get("sav_always") or [])):
+        st.session_state.pop("sav_always", None)
+    seed("sav_always", [c for c in dict.fromkeys(guess)][:3])
     always_cols = st.multiselect(
-        "저장 범위와 상관없이 남길 열", cand,
-        default=[c for c in dict.fromkeys(guess)][:3], key="sav_always",
+        "저장 범위와 상관없이 남길 열", cand, key="sav_always",
         help="ID 처럼 나중에 다시 붙일 때 필요한 열은 여기에 두면 항상 들어갑니다.",
     )
 
@@ -898,6 +1149,20 @@ if run:
         st.session_state["sav_warns"] = warns
         st.session_state["sav_skipped"] = skipped
         st.session_state["sav_mode_used"] = save_mode
+
+        payload = make_preset(
+            up.name, spec,
+            {"header_row": int(header_row),
+             "merge_mode": merge_mode,
+             "join_key": join_key,
+             "keep_all_label": ("모두 남기기" if keep_all
+                                else "양쪽에 다 있는 사람만"),
+             "add_sheet_col": bool(add_sheet_col),
+             "save_mode": save_mode,
+             "flag_value": int(flag_value),
+             "always_cols": list(always_cols)})
+        st.session_state["sav_preset_payload"] = payload
+        st.session_state["sav_preset_saved_to"] = write_preset(up.name, payload)
     except Exception as e:                           # noqa: BLE001
         st.session_state.pop("sav_bytes", None)
         st.error(f"변환에 실패했습니다 — {e}")
@@ -916,13 +1181,39 @@ if st.session_state.get("sav_bytes"):
         )
 
     suffix = {SAVE_NUM: "_숫자", SAVE_STR: "_문자"}.get(_mode, "")
-    st.download_button(
-        "💾 .sav 내려받기",
-        data=data,
-        file_name=os.path.splitext(up.name)[0] + suffix + ".sav",
-        mime="application/octet-stream",
-        type="primary",
-    )
+    d1, d2 = st.columns([1, 1])
+    with d1:
+        st.download_button(
+            "💾 .sav 내려받기",
+            data=data,
+            file_name=os.path.splitext(up.name)[0] + suffix + ".sav",
+            mime="application/octet-stream",
+            type="primary",
+            **_wide(st.download_button),
+        )
+    with d2:
+        _payload = st.session_state.get("sav_preset_payload")
+        if _payload:
+            st.download_button(
+                "⚙ 설정 JSON 내려받기",
+                data=json.dumps(_payload, ensure_ascii=False,
+                                indent=1).encode("utf-8"),
+                file_name=preset_key(up.name) + "_설정.json",
+                mime="application/json",
+                **_wide(st.download_button),
+            )
+    _saved_to = st.session_state.get("sav_preset_saved_to")
+    if _saved_to:
+        st.caption(
+            f"설정을 저장했습니다 — 다음에 같은 이름의 파일을 올리면 그대로 "
+            f"적용됩니다. (`{_saved_to}`) 앱이 재시작되면 이 폴더는 비워지니, "
+            "며칠 뒤에도 쓰실 거면 설정 JSON 을 받아두세요."
+        )
+    else:
+        st.caption(
+            "이 환경에서는 설정을 폴더에 저장할 수 없습니다. 설정 JSON 을 받아두면 "
+            "다음에 올려서 되살릴 수 있습니다."
+        )
     st.caption(f"파일 크기 {len(data)/1024:,.0f} KB")
 
     vlabels = st.session_state.get("sav_vlabels", {})
