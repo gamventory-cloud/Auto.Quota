@@ -4,6 +4,7 @@
 .venv/
 venv/
 env/
+.sav_presets/
 
 # ── 관리자 전용 (배포하지 않음) ──
 업로드.bat
