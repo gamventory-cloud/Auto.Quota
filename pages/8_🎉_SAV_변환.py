@@ -18,8 +18,9 @@
 
   ┌ 하는 일 ────────────────────────────────────────────────┐
   │ 1. 열 이름을 SPSS 규칙에 맞게 정리 (한글 이름 → 변수 라벨로) │
-  │ 2. 열마다 숫자/문자/날짜 여부와 측정 수준을 지정            │
-  │ 3. 빈칸에 원하는 값(-1 등)을 채워 넣기                     │
+  │ 2. 열마다 숫자/문자/코드화 여부와 측정 수준을 지정          │
+  │ 3. 문자 응답을 1,2,3… 숫자로 바꾸고 값 라벨을 붙임          │
+  │ 4. 결측 코드(99, 999 등)를 SPSS 결측값으로 등록            │
   └────────────────────────────────────────────────────────┘
 """
 
@@ -33,7 +34,7 @@ import unicodedata
 import pandas as pd
 import streamlit as st
 
-PAGE_VERSION = "1.4"
+PAGE_VERSION = "1.0"
 
 # ==============================================================================
 # 0. 선택적 의존성
@@ -175,8 +176,10 @@ _SPSS_RESERVED = {
     "TO", "WITH",
 }
 
-TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_DATE = ("자동", "숫자", "문자", "날짜")
+TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_CODE, TYPE_DATE, TYPE_FLAG = (
+    "자동", "숫자", "문자", "문자→코드화", "날짜", "문자→응답표시")
 MEASURE_MAP = {"명목": "nominal", "서열": "ordinal", "연속": "scale"}
+FLAG_DEFAULT = 9999
 
 
 def to_spss_name(raw: str, order: int, used: set) -> str:
@@ -294,7 +297,7 @@ def has_leading_zero(sr: pd.Series) -> bool:
     return False
 
 
-def auto_kind(sr: pd.Series) -> str:
+def auto_kind(sr: pd.Series, suggest_code: bool = False) -> str:
     """열 하나를 보고 유형을 추천한다."""
     if is_datetime_col(sr):
         return TYPE_DATE
@@ -302,12 +305,20 @@ def auto_kind(sr: pd.Series) -> str:
         return TYPE_STR
     if looks_numeric(sr):
         return TYPE_NUM
+    if suggest_code:
+        vals = [v for v in text_list(sr) if v is not None]
+        uniq = len(set(vals))
+        # 값이 몇 종류 안 되고, 응답자 수보다 확실히 적을 때만 코드화를 권한다.
+        # (ID 처럼 행마다 다른 값은 코드화하면 라벨만 수백 개 생긴다)
+        if vals and 2 <= uniq <= 30 and uniq <= max(2, len(vals) * 0.6):
+            if max(len(v) for v in vals) <= 40:
+                return TYPE_CODE
     return TYPE_STR
 
 
 def auto_measure(sr: pd.Series, kind: str) -> str:
     """측정 수준 추천. 값이 몇 개 안 되는 정수는 척도가 아니라 범주로 본다."""
-    if kind == TYPE_STR:
+    if kind in (TYPE_STR, TYPE_CODE):
         return "명목"
     if kind == TYPE_DATE:
         return "연속"
@@ -322,6 +333,21 @@ def auto_measure(sr: pd.Series, kind: str) -> str:
 # ==============================================================================
 # 5. .sav 만들기 (순수 함수 — 화면과 분리해서 테스트할 수 있게)
 # ==============================================================================
+def parse_codes(text) -> list:
+    """‘99, 999’ 같은 문자열을 [99.0, 999.0] 으로. 숫자가 아니면 버린다."""
+    if text is None:
+        return []
+    out = []
+    for tok in re.split(r"[,\s]+", str(text).strip()):
+        if not tok:
+            continue
+        try:
+            out.append(float(tok))
+        except ValueError:
+            continue
+    return out
+
+
 def num_format(sr: pd.Series) -> str:
     """전부 정수면 소수점을 없앤다(SPSS에서 1.00 대신 1 로 보이게)."""
     v = sr.dropna()
@@ -358,32 +384,20 @@ def build_sav(df: pd.DataFrame,
               file_label: str = "",
               save_mode: str = SAVE_ALL,
               always: tuple = (),
-              fill_empty: str = "") -> tuple:
+              flag_value: float = FLAG_DEFAULT) -> tuple:
     """
     df    : 원본 표
     spec  : 열마다 한 행. 필요한 칸 —
-            포함 / 원본열 / 변수명 / 변수라벨 / 유형 / 측정
-    save_mode : 숫자＋문자 / 숫자만 / 문자만
-    always    : 저장 범위와 상관없이 남길 열(ID 등)
-    fill_empty : 숫자 열의 빈칸에 채워 넣을 값. "" 면 빈칸으로 둔다.
-                 SPSS 결측값으로 등록하지 않고 일반 값으로 저장한다.
+            포함 / 원본열 / 변수명 / 변수라벨 / 유형 / 측정 / 결측코드
+    save_mode  : 숫자＋문자 / 숫자만 / 문자만
+    always     : 저장 범위와 상관없이 남길 열(ID 등)
+    flag_value : ‘문자→응답표시’ 로 지정한 열에서 기입된 칸에 찍을 숫자
     반환  : (sav bytes, 값라벨 dict, 경고 목록, 제외된 열 목록)
     """
     df = df.reset_index(drop=True)
-    out, labels, measures = {}, {}, {}
-    formats = {}
+    out, labels, value_labels, measures = {}, {}, {}, {}
+    formats, missing_ranges = {}, {}
     warns, skipped = [], []
-
-    # 빈칸 채우기 값 확인 — 숫자로 읽히지 않으면 채우지 않는다
-    fill_val = None
-    if str(fill_empty).strip():
-        try:
-            fill_val = float(str(fill_empty).strip())
-        except ValueError:
-            warns.append(
-                f"빈칸 채우기 값 ‘{fill_empty}’ 을 숫자로 읽을 수 없어 채우지 않았습니다."
-            )
-    filled_total = 0
 
     for _, row in spec.iterrows():
         if not row["포함"]:
@@ -399,8 +413,8 @@ def build_sav(df: pd.DataFrame,
         if kind == TYPE_AUTO:
             kind = auto_kind(sr)
 
-        # 저장 범위 적용 (항상 남길 열은 건너뛰지 않는다)
-        if str(src) not in set(map(str, always)):
+        # 저장 범위 적용 (항상 남길 열과 응답표시는 건너뛰지 않는다)
+        if str(src) not in set(map(str, always)) and kind != TYPE_FLAG:
             if save_mode == SAVE_NUM and kind == TYPE_STR:
                 skipped.append(str(src))
                 continue
@@ -408,6 +422,8 @@ def build_sav(df: pd.DataFrame,
                 if kind in (TYPE_NUM, TYPE_DATE):
                     skipped.append(str(src))
                     continue
+                if kind == TYPE_CODE:                # 코드 대신 원래 글자를 남긴다
+                    kind = TYPE_STR
 
         if kind == TYPE_NUM:
             conv = pd.to_numeric(sr, errors="coerce")
@@ -425,6 +441,35 @@ def build_sav(df: pd.DataFrame,
                 warns.append(f"‘{src}’ 에서 날짜로 못 읽은 값 {miss}개는 빈칸이 됩니다.")
             out[name] = conv.reset_index(drop=True)
 
+        elif kind == TYPE_CODE:
+            txt = text_list(sr)
+            cats = sorted({v for v in txt if v is not None})
+            if len(cats) > 200:
+                warns.append(
+                    f"‘{src}’ 는 서로 다른 값이 {len(cats)}개라 코드화하면 "
+                    "라벨이 지나치게 많아집니다. 문자 그대로 저장했습니다."
+                )
+                out[name] = pd.Series(["" if v is None else v for v in txt],
+                                      dtype=object)
+            else:
+                code = {c: i + 1 for i, c in enumerate(cats)}
+                out[name] = pd.Series(
+                    [None if v is None else float(code[v]) for v in txt],
+                    dtype="float64")
+                value_labels[name] = {float(i): c for c, i in code.items()}
+                formats[name] = "F8.0"
+
+        elif kind == TYPE_FLAG:
+            txt = text_list(sr)
+            filled = sum(1 for v in txt if v is not None)
+            out[name] = pd.Series(
+                [None if v is None else float(flag_value) for v in txt],
+                dtype="float64")
+            value_labels[name] = {float(flag_value): "기입"}
+            formats[name] = num_format(pd.Series([float(flag_value)]))
+            if filled == 0:
+                warns.append(f"‘{src}’ 는 기입된 칸이 없어 전부 빈칸이 됩니다.")
+
         else:                                        # TYPE_STR
             out[name] = pd.Series(
                 [("" if v is None else v) for v in text_list(sr)], dtype=object)
@@ -432,12 +477,12 @@ def build_sav(df: pd.DataFrame,
         labels[name] = str(row["변수라벨"]).strip() or str(src)
         measures[name] = MEASURE_MAP.get(row["측정"], "nominal")
 
-        # ── 빈칸 채우기 (숫자 열만) ──
-        if fill_val is not None and pd.api.types.is_numeric_dtype(out[name]):
-            n_blank = int(out[name].isna().sum())
-            if n_blank:
-                out[name] = out[name].fillna(fill_val)
-                filled_total += n_blank
+        codes = parse_codes(row.get("결측코드", ""))
+        if codes:
+            if pd.api.types.is_numeric_dtype(out[name]):
+                missing_ranges[name] = [{"lo": c, "hi": c} for c in codes]
+            else:
+                warns.append(f"‘{src}’ 는 숫자 열이 아니라 결측 코드를 건너뜁니다.")
 
     if not out:
         raise ValueError(
@@ -445,9 +490,6 @@ def build_sav(df: pd.DataFrame,
             + (f" (저장 범위를 ‘{save_mode}’ 로 두어 {len(skipped)}개가 빠졌습니다)"
                if skipped else "")
         )
-
-    if filled_total:
-        warns.append(f"빈칸 {filled_total:,}개를 {fill_val:g} 로 채웠습니다.")
 
     res = pd.DataFrame(out)
 
@@ -458,8 +500,10 @@ def build_sav(df: pd.DataFrame,
             res, tmp.name,
             file_label=file_label[:64] if file_label else None,
             column_labels=[labels[c] for c in res.columns],
+            variable_value_labels=value_labels or None,
             variable_measure=measures or None,
             variable_format=formats or None,
+            missing_ranges=missing_ranges or None,
         )
         with open(tmp.name, "rb") as f:
             data = f.read()
@@ -469,7 +513,7 @@ def build_sav(df: pd.DataFrame,
         except OSError:
             pass
 
-    return data, warns, skipped
+    return data, value_labels, warns, skipped
 
 
 # ==============================================================================
@@ -688,7 +732,7 @@ if st.session_state.get("sav_sig") != sig:
     admin = set(admin_block(df.columns))
     for i, c in enumerate(df.columns, start=1):
         sr = df[c]
-        kind = auto_kind(sr)
+        kind = auto_kind(sr, suggest_code=True)
         blank = bool(sr.dropna().empty) or all(
             v is None for v in text_list(sr))
         if blank:
@@ -700,6 +744,7 @@ if st.session_state.get("sav_sig") != sig:
             "변수라벨": str(c),
             "유형": kind,
             "측정": auto_measure(sr, kind),
+            "결측코드": "",
         })
     st.session_state["sav_spec"] = pd.DataFrame(rows)
     st.session_state["sav_sig"] = sig
@@ -725,7 +770,9 @@ if _empty:
     )
 st.caption(
     "**변수명** 은 SPSS에서 쓸 이름(영문·숫자·밑줄만)이고, **변수라벨** 은 원래 "
-    "한글 이름입니다."
+    "한글 이름입니다. **문자→코드화** 를 고르면 응답 텍스트가 1, 2, 3… 숫자로 "
+    "바뀌고 값 라벨이 함께 저장됩니다. **문자→응답표시** 는 글자를 버리고 "
+    "기입된 칸에만 지정한 숫자를 찍어, SPSS에서 스킵 로직을 검증할 수 있게 합니다."
 )
 
 spec = st.data_editor(
@@ -740,66 +787,88 @@ spec = st.data_editor(
         "변수명": st.column_config.TextColumn("SPSS 변수명", required=True),
         "변수라벨": st.column_config.TextColumn("변수 라벨"),
         "유형": st.column_config.SelectboxColumn(
-            "유형", options=[TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_DATE],
+            "유형", options=[TYPE_AUTO, TYPE_NUM, TYPE_STR, TYPE_CODE,
+                           TYPE_FLAG, TYPE_DATE],
             required=True),
         "측정": st.column_config.SelectboxColumn(
             "측정", options=list(MEASURE_MAP), required=True, width="small"),
+        "결측코드": st.column_config.TextColumn(
+            "결측 코드", width="small",
+            help="이 열에서 결측으로 볼 값. 쉼표로 여러 개. 예: 99, 999"),
     },
 )
 
-# 배치 원칙
-#   · 관련 있는 항목끼리 테두리 컨테이너로 묶어 위에서 아래로 한 방향 흐름을 만든다.
-#   · 입력란 너비는 실제로 들어갈 값 길이에 맞춘다. 가로를 억지로 채우지 않는다.
-#   · 나란히 놓는 요소는 vertical_alignment 로 정렬한다.
-#     st.write("") 로 여백을 흉내내면 글꼴·도움말 아이콘에 따라 매번 어긋난다.
-#   · 강조 버튼(type="primary")은 화면에 하나만 둔다.
+b1, b2, b3, b4 = st.columns([2, 1, 1.4, 1])
+with b1:
+    bulk = st.text_input(
+        "결측 코드 일괄 입력", value="", placeholder="예: 99, 999",
+        help="옆 버튼을 누르면 숫자 유형인 열의 ‘결측 코드’ 칸을 이 값으로 채웁니다. "
+             "열마다 다르게 두고 싶으면 표에서 직접 고치세요.",
+    )
+with b2:
+    st.write("")
+    st.write("")
+    if st.button("숫자 열에 채우기", **_wide(st.button)):
+        cur = spec.copy()
+        cur.loc[cur["유형"].isin([TYPE_NUM, TYPE_AUTO]), "결측코드"] = bulk.strip()
+        st.session_state["sav_spec"] = cur
+        st.session_state["sav_editor_n"] = st.session_state.get("sav_editor_n", 0) + 1
+        st.session_state.pop("sav_bytes", None)
+        st.rerun()
+with b3:
+    flag_value = st.number_input(
+        "응답표시 값", value=FLAG_DEFAULT, step=1, key="sav_flagval",
+        help="‘문자→응답표시’ 로 지정한 열에서 기입된 칸에 찍을 숫자입니다. "
+             "빈칸은 그대로 결측으로 남습니다.",
+    )
+with b4:
+    st.write("")
+    st.write("")
+    if st.button("문자 열 전체 적용", **_wide(st.button),
+                 help="‘포함’ 상태이고 유형이 ‘문자’ 인 열을 ‘문자→응답표시’ 로 "
+                      "바꿉니다. id·No 같은 식별 열은 건드리지 않습니다."):
+        cur = spec.copy()
+        hit = ((cur["유형"] == TYPE_STR) & cur["포함"]
+               & ~cur["원본열"].str.strip().str.lower().isin(KEY_NAMES))
+        cur.loc[hit, "유형"] = TYPE_FLAG
+        cur.loc[hit, "측정"] = "명목"
+        st.session_state["sav_spec"] = cur
+        st.session_state["sav_editor_n"] = st.session_state.get("sav_editor_n", 0) + 1
+        st.session_state.pop("sav_bytes", None)
+        st.rerun()
 
-# ── 빈칸 처리 ────────────────────────────────────────────────────────────
-with st.container(border=True):
-    st.markdown("**빈칸 처리**")
-    e1, e2 = st.columns([2, 5], vertical_alignment="center")
-    with e1:
-        fill_empty = st.text_input(
-            "빈칸에 넣을 값", value="", placeholder="-1",
-            help="숫자 열의 빈칸에 이 값을 채웁니다. 비워 두면 빈칸 그대로 저장합니다.",
-        )
-    with e2:
-        st.caption(
-            "숫자 열에만 적용됩니다. 문자 열의 빈칸은 그대로 둡니다. "
-            "SPSS 결측값으로 등록하지 않고 일반 값으로 저장하니, "
-            "평균을 낼 때 이 값이 함께 계산됩니다."
-        )
-
-# ── 저장 설정 ────────────────────────────────────────────────────────────
-with st.container(border=True):
-    st.markdown("**저장 설정**")
-    save_mode = st.radio(
-        "저장할 변수", [SAVE_ALL, SAVE_NUM, SAVE_STR],
-        key="sav_mode_save", horizontal=True, label_visibility="collapsed",
-        help="‘숫자만’ 은 글자로 된 변수를 빼고, ‘문자만’ 은 숫자·날짜를 "
-             "빼고 저장합니다.",
+_nflag = int((spec["유형"] == TYPE_FLAG).sum())
+if _nflag:
+    st.caption(
+        f"응답표시로 지정한 열 {_nflag}개는 기입된 칸에 {int(flag_value)} 이 들어가고 "
+        "값 라벨 ‘기입’ 이 붙습니다. 저장 범위와 상관없이 항상 포함됩니다."
     )
 
-    always_cols = []
-    if save_mode != SAVE_ALL:
-        cand = [str(c) for c in df.columns]
-        guess = [c for c in cand
-                 if str(c).lower() in ("id", "panel_id", "respondent_id", "no")
-                 or c == join_key]
-        always_cols = st.multiselect(
-            "항상 남길 열", cand,
-            default=[c for c in dict.fromkeys(guess)][:3], key="sav_always",
-            help="ID 처럼 나중에 다시 붙일 때 필요한 열은 여기에 두면 항상 들어갑니다.",
-        )
+o1, o2, o3 = st.columns([2, 2, 1])
+with o1:
+    save_mode = st.radio("저장할 변수", [SAVE_ALL, SAVE_NUM, SAVE_STR],
+                         key="sav_mode_save", horizontal=True,
+                         help="‘숫자만’ 은 글자로 된 변수를 빼고, ‘문자만’ 은 숫자·날짜를 "
+                              "빼고 코드화 대상도 원래 글자 그대로 저장합니다.")
+with o2:
+    file_label = st.text_input("파일 설명(선택)", value="",
+                               placeholder="예: 2026년 상반기 본조사")
+with o3:
+    st.write("")
+    st.write("")
+    run = st.button("변환 실행", type="primary", **_wide(st.button))
 
-# ── 실행 ─────────────────────────────────────────────────────────────────
-with st.container(border=True):
-    r1, r2 = st.columns([3, 1], vertical_alignment="bottom")
-    with r1:
-        file_label = st.text_input("파일 설명(선택)", value="",
-                                   placeholder="2026년 상반기 본조사")
-    with r2:
-        run = st.button("변환 실행", type="primary", **_wide(st.button))
+always_cols = []
+if save_mode != SAVE_ALL:
+    cand = [str(c) for c in df.columns]
+    guess = [c for c in cand
+             if str(c).lower() in ("id", "panel_id", "respondent_id", "no")
+             or c == join_key]
+    always_cols = st.multiselect(
+        "저장 범위와 상관없이 남길 열", cand,
+        default=[c for c in dict.fromkeys(guess)][:3], key="sav_always",
+        help="ID 처럼 나중에 다시 붙일 때 필요한 열은 여기에 두면 항상 들어갑니다.",
+    )
 
 # ── 이름 중복 검사 (변환 전에 잡는다) ─────────────────────────────────────
 active = spec[spec["포함"]]
@@ -821,10 +890,11 @@ if run:
     st.session_state["sav_spec"] = spec
     try:
         with st.spinner("SPSS 파일을 만드는 중…"):
-            data, warns, skipped = build_sav(
+            data, vlabels, warns, skipped = build_sav(
                 df, spec, file_label, save_mode, tuple(always_cols),
-                fill_empty=fill_empty)
+                float(flag_value))
         st.session_state["sav_bytes"] = data
+        st.session_state["sav_vlabels"] = vlabels
         st.session_state["sav_warns"] = warns
         st.session_state["sav_skipped"] = skipped
         st.session_state["sav_mode_used"] = save_mode
@@ -839,44 +909,45 @@ if st.session_state.get("sav_bytes"):
 
     _skip = st.session_state.get("sav_skipped") or []
     _mode = st.session_state.get("sav_mode_used", SAVE_ALL)
+    if _skip:
+        st.caption(
+            f"‘{_mode}’ 라서 {len(_skip)}개 열을 뺐습니다 — "
+            + ", ".join(_skip[:15]) + (" …" if len(_skip) > 15 else "")
+        )
+
     suffix = {SAVE_NUM: "_숫자", SAVE_STR: "_문자"}.get(_mode, "")
+    st.download_button(
+        "💾 .sav 내려받기",
+        data=data,
+        file_name=os.path.splitext(up.name)[0] + suffix + ".sav",
+        mime="application/octet-stream",
+        type="primary",
+    )
+    st.caption(f"파일 크기 {len(data)/1024:,.0f} KB")
 
-    # 결과는 따로 묶는다. 내려받기는 강조하지 않는다 —
-    # 화면의 강조 버튼은 '변환 실행' 하나뿐이어야 순서가 읽힌다.
-    with st.container(border=True):
-        st.markdown("**변환 결과**")
-        d1, d2 = st.columns([2, 5], vertical_alignment="center")
-        with d1:
-            st.download_button(
-                "💾 .sav 내려받기",
-                data=data,
-                file_name=os.path.splitext(up.name)[0] + suffix + ".sav",
-                mime="application/octet-stream",
-                **_wide(st.download_button),
-            )
-        with d2:
-            st.caption(f"파일 크기 {len(data)/1024:,.0f} KB")
-
-        if _skip:
-            st.caption(
-                f"‘{_mode}’ 라서 {len(_skip)}개 열을 뺐습니다 — "
-                + ", ".join(_skip[:15]) + (" …" if len(_skip) > 15 else "")
-            )
+    vlabels = st.session_state.get("sav_vlabels", {})
+    if vlabels:
+        with st.expander(f"값 라벨 확인 ({len(vlabels)}개 변수)", expanded=False):
+            recs = [{"변수": v, "코드": int(k), "라벨": lab}
+                    for v, m in vlabels.items() for k, lab in sorted(m.items())]
+            st.dataframe(pd.DataFrame(recs), hide_index=True, **_wide(st.dataframe))
 
     with st.expander("저장된 내용 되읽어 확인", expanded=False):
         tmp = tempfile.NamedTemporaryFile(suffix=".sav", delete=False)
         tmp.write(data)
         tmp.close()
         try:
-            back, meta = pyreadstat.read_sav(tmp.name)
+            back, meta = pyreadstat.read_sav(tmp.name, user_missing=True)
             st.write(f"{len(back):,}행 × {len(back.columns)}열")
+            mr = meta.missing_ranges or {}
             st.dataframe(
                 pd.DataFrame({
                     "변수": list(back.columns),
                     "라벨": [meta.column_names_to_labels.get(c, "") for c in back.columns],
                     "형식": [meta.original_variable_types.get(c, "") for c in back.columns],
                     "측정": [meta.variable_measure.get(c, "") for c in back.columns],
-                    "빈칸": [int(back[c].isna().sum()) for c in back.columns],
+                    "결측": [", ".join(str(int(r["lo"])) for r in mr.get(c, []))
+                             for c in back.columns],
                 }),
                 hide_index=True, **_wide(st.dataframe)
             )

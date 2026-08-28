@@ -193,7 +193,7 @@ st.markdown(_html("""
       <div class="qm-stage">데이터 정리</div>
       <h2 class="qm-name">행열 변환</h2>
       <p class="qm-desc">
-        데이터의 행과 열 구조를 자유자재로 변환할 수 있습니다.<br>
+        데이터의 행과 열 구조를 자유롭게 변환할 수 있습니다.<br>
         응답자 단위로 붙여야 원자료와 합치거나 불성실 응답을 걸러낼 수 있습니다.
       </p>
       <div class="qm-io">

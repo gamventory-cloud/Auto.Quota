@@ -90,9 +90,44 @@ from openpyxl.utils import get_column_letter
 
 import utils
 
+W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def element_text(element) -> str:
+    """워드 요소에서 '변경 내용 추적을 모두 적용한' 텍스트를 뽑는다.
+
+    워드에서 추적을 켜고 수정하면 삽입된 글자가 <w:ins> 안으로 들어간다.
+    python-docx 의 paragraph.text 는 문단의 직속 run 만 읽으므로 <w:ins> 안의
+    글자를 통째로 놓친다. 수정된 문항이 빈 문단처럼 보여 문항이 사라진다.
+
+    w:t 를 전부 모으면 삽입분이 포함되고, 삭제분은 w:delText 라는 다른 태그이므로
+    자동으로 제외된다 -> '변경 내용 모두 적용' 상태와 같은 결과.
+    w:tab 은 탭 문자로 되살린다 (보기를 탭으로 나열한 설문지가 많다).
+    """
+    paras = element.findall(".//" + W_NS + "p")
+    if paras:
+        # 표 셀처럼 문단을 여러 개 담은 요소. 문단 사이를 공백으로 이어야
+        # `전혀 그렇지 않다` 가 `전혀그렇지않다` 로 붙지 않는다.
+        return " ".join(_runs_text(p) for p in paras)
+    return _runs_text(element)
+
+
+def _runs_text(element) -> str:
+    parts = []
+    for node in element.iter():
+        tag = node.tag
+        if tag == W_NS + "t":
+            parts.append(node.text or "")
+        elif tag == W_NS + "tab":
+            parts.append("\t")
+        elif tag in (W_NS + "br", W_NS + "cr"):
+            parts.append(" ")
+    return "".join(parts)
+
+
 # 이 파일이 진짜 spss_labels.py 인지 호출부에서 확인하는 표식.
 MODULE_ROLE = "spss_labels"
-__version__ = "1.10.1"
+__version__ = "1.11.1"
 
 
 
@@ -228,8 +263,7 @@ def read_blocks(path: str) -> list[Block]:
         tag = child.tag.split("}")[-1]
         if tag == "p":
             # 문단 내 소프트 리턴(shift+enter)은 한 문장의 일부이므로 공백으로 합친다.
-            para = Paragraph(child, doc)
-            t = re.sub(r"[\n\v\r]+", " ", para.text).strip()
+            t = re.sub(r"[\n\v\r]+", " ", element_text(child)).strip()
             if t and t.strip("\u00a0 "):
                 # 워드 자동 목록(불릿/번호)은 본문 텍스트에 기호·번호가 남지 않는다.
                 # 보기를 불릿으로만 적은 설문지를 놓치지 않으려면 XML 속성을 봐야 한다.
@@ -237,7 +271,8 @@ def read_blocks(path: str) -> list[Block]:
                     ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numPr"))
                 out.append(Block("p", text=t, is_list=is_list))
         elif tag == "tbl":
-            rows = [[c.text.strip() for c in r.cells] for r in Table(child, doc).rows]
+            rows = [[element_text(c._tc).strip() for c in r.cells]
+                    for r in Table(child, doc).rows]
             if rows:
                 out.append(Block("t", rows=rows))
     return out
@@ -454,7 +489,12 @@ def collect_questions(blocks: list[Block]) -> list[Question]:
                 lhits = [RE_OPTION.match(p.strip()) for p in loose]
                 if len(loose) > 1 and all(lhits):
                     codes = [option_code(h) for h in lhits]
-                    if codes == list(range(codes[0], codes[0] + len(codes))):
+                    # 번호가 오름차순이면 인정한다. 추적으로 중간 보기가 삭제되면
+                    # 1,2,3,5 처럼 번호가 끊기므로 '연속'을 요구하면 분리에 실패한다.
+                    # 문장 속의 `2)` 같은 오탐은 시작 번호와 간격으로 걸러낸다.
+                    increasing = all(b > a for a, b in zip(codes, codes[1:]))
+                    max_gap = max(b - a for a, b in zip(codes, codes[1:]))
+                    if increasing and max_gap <= 3:
                         parts, hits = loose, lhits
             if all(hits) and hits:
                 for h in hits:
