@@ -874,6 +874,7 @@ if preset and st.session_state.get("sav_preset_token") != _ptoken:
                      ("sav_key", s.get("join_key")),
                      ("sav_keep", s.get("keep_all_label")),
                      ("sav_srccol", s.get("add_sheet_col")),
+                     ("sav_sheetmode", s.get("sheet_mode")),
                      ("sav_offcol", s.get("offset_col")),
                      ("sav_offstep", s.get("offset_step")),
                      ("sav_mode_save", s.get("save_mode")),
@@ -891,6 +892,10 @@ if st.session_state.get("sav_preset_off") == _ptoken:
 
 MODE_SIDE = "옆으로 붙이기 (같은 응답자, 다른 문항)"
 MODE_STACK = "위아래로 잇기 (같은 문항, 다른 응답자)"
+SHEET_JOIN = "모두 옆으로 붙이기 (문항이 시트로 나뉜 경우)"
+SHEET_ONE = "시트 하나만 쓰기"
+
+sheet_mode = SHEET_ONE
 
 merge_mode, join_key, keep_all, add_sheet_col = None, None, True, False
 offset_col, offset_step = None, 0
@@ -940,40 +945,95 @@ else:
     multi_sheet = [n for n, ss in sheet_map.items() if len(ss) > 1]
     pick = None
     if multi_sheet:
-        shared = [s for s in sheet_map[files[0][0]]
-                  if all(s in ss for ss in sheet_map.values())]
         with c1:
-            if shared:
-                if st.session_state.get("sav_fsheet") not in shared:
-                    st.session_state.pop("sav_fsheet", None)
-                seed("sav_fsheet", shared[0])
-                pick = st.selectbox(
-                    "각 파일에서 읽을 시트", shared, key="sav_fsheet",
-                    help="파일마다 시트가 여럿입니다. 이름이 같은 시트만 골라 보여줍니다.")
-            else:
-                st.warning(
-                    "파일마다 시트 이름이 달라 각 파일의 첫 시트를 읽습니다 — "
-                    + ", ".join(f"{n}: {ss[0]}" for n, ss in sheet_map.items())
-                )
-    for name, data in files:
-        s = pick if (pick and pick in sheet_map[name]) else sheet_map[name][0]
-        parts.append((name, name, data, s))
+            seed("sav_sheetmode", SHEET_JOIN)
+            sheet_mode = st.radio(
+                "파일 안에 시트가 여러 개일 때", [SHEET_JOIN, SHEET_ONE],
+                key="sav_sheetmode", horizontal=True,
+                help="문항이 시트로 쪼개져 있으면 붙여야 하고, 시트가 별개 자료면 "
+                     "하나만 고르면 됩니다.")
+        if sheet_mode == SHEET_ONE:
+            shared = [s for s in sheet_map[files[0][0]]
+                      if all(s in ss for ss in sheet_map.values())]
+            with c1:
+                if shared:
+                    if st.session_state.get("sav_fsheet") not in shared:
+                        st.session_state.pop("sav_fsheet", None)
+                    seed("sav_fsheet", shared[0])
+                    pick = st.selectbox(
+                        "각 파일에서 읽을 시트", shared, key="sav_fsheet",
+                        help="이름이 같은 시트만 보여줍니다.")
+                else:
+                    st.warning(
+                        "파일마다 시트 이름이 달라 각 파일의 첫 시트를 읽습니다 — "
+                        + ", ".join(f"{n}: {ss[0]}" for n, ss in sheet_map.items())
+                    )
+    if sheet_mode == SHEET_JOIN and multi_sheet:
+        # 파일 하나가 곧 여러 시트 → 파일 안에서 먼저 옆으로 붙인다
+        for name, data in files:
+            for s in sheet_map[name]:
+                parts.append((f"{name} :: {s}", name, data, s))
+    else:
+        for name, data in files:
+            s = pick if (pick and pick in sheet_map[name]) else sheet_map[name][0]
+            parts.append((name, name, data, s))
 
-if len(parts) > 1:
+if len(parts) > 1 or multi_file:
     seed("sav_mode", MODE_STACK if multi_file else MODE_SIDE)
     merge_mode = st.radio("합치는 방식", [MODE_STACK, MODE_SIDE],
                           key="sav_mode", horizontal=True)
 
 # ── 읽기 ──────────────────────────────────────────────────────────────────
-frames = {}
+raw_frames = {}
 try:
     for disp, fname, data, sheet in parts:
         d = read_table(data, fname, sheet, int(header_row))
         d = d.loc[:, [c for c in d.columns if not str(c).startswith("Unnamed:")]]
-        frames[disp] = d
+        raw_frames[disp] = d
 except Exception as e:                               # noqa: BLE001
     st.error(f"파일을 읽지 못했습니다 — {e}")
     st.stop()
+
+pre_notes = []
+if sheet_mode == SHEET_JOIN and multi_file and any(
+        len(ss) > 1 for ss in sheet_map.values()):
+    # 1단계 — 파일 하나 안에서 시트를 옆으로 붙인다
+    by_file = {}
+    for (disp, fname, _, sheet) in parts:
+        by_file.setdefault(fname, {})[sheet] = raw_frames[disp]
+
+    all_sheets = [d for m in by_file.values() for d in m.values()]
+    common_in = [c for c in all_sheets[0].columns
+                 if all(c in d.columns for d in all_sheets)]
+    if not common_in:
+        st.error("시트끼리 공통으로 가진 열이 없어 파일 안에서 붙일 수 없습니다. "
+                 "‘시트 하나만 쓰기’ 를 고르세요.")
+        st.stop()
+    _pf = ("id", "panel_id", "respondent_id", "no")
+    _def = next((c for k in _pf for c in common_in
+                 if str(c).strip().lower() == k), common_in[0])
+    if st.session_state.get("sav_skey") not in common_in:
+        st.session_state.pop("sav_skey", None)
+    seed("sav_skey", _def)
+    sheet_key = st.selectbox("시트끼리 연결할 열", common_in, key="sav_skey",
+                             help="한 파일 안의 시트를 같은 응답자 기준으로 붙입니다.")
+
+    frames = {}
+    for fname, sheets_map in by_file.items():
+        if len(sheets_map) == 1:
+            frames[fname] = next(iter(sheets_map.values()))
+            continue
+        try:
+            merged, notes = merge_side(sheets_map, sheet_key, True, "시트")
+        except Exception as e:                       # noqa: BLE001
+            st.error(f"‘{fname}’ 안의 시트를 붙이지 못했습니다 — {e}")
+            st.stop()
+        frames[fname] = merged
+        pre_notes.append(f"[{fname}] 시트 {len(sheets_map)}개를 붙여 "
+                         f"{len(merged):,}행 × {len(merged.columns)}열")
+        pre_notes += ["   " + n for n in notes]
+else:
+    frames = raw_frames
 
 keys = list(frames)
 merge_notes = []
@@ -1040,8 +1100,61 @@ if df.empty or not len(df.columns):
     st.stop()
 
 st.success(f"{len(df):,}행 × {len(df.columns)}열을 읽었습니다.")
-if merge_notes:
-    with st.expander(f"{src_label}를 합친 과정", expanded=False):
+
+# ── 엉뚱한 파일을 함께 올린 건 아닌지 살핀다 ────────────────────────────────
+if len(keys) > 1:
+    col_sets = [set(map(str, d.columns)) for d in frames.values()]
+    shared_cols = set.intersection(*col_sets)
+    smallest = min(len(cs) for cs in col_sets)
+    ratio = len(shared_cols) / max(1, smallest)
+
+    if merge_mode == MODE_SIDE and join_key:
+        key_sets = [set(v for v in key_series(d[join_key]) if v is not None)
+                    for d in frames.values() if join_key in d.columns]
+        both = set.intersection(*key_sets) if key_sets else set()
+        if not both:
+            st.error(
+                f"{src_label}끼리 {join_key} 가 하나도 겹치지 않습니다. 서로 다른 "
+                f"조사를 함께 올렸거나 연결 열을 잘못 고른 것 같습니다. 지금 상태로 "
+                f"변환하면 한 사람의 응답이 여러 행에 흩어집니다."
+            )
+        elif len(both) < min(len(s) for s in key_sets) * 0.5:
+            st.warning(
+                f"{join_key} 가 양쪽에 다 있는 응답자가 {len(both)}명뿐입니다. "
+                f"연결 열이 맞는지 확인하세요."
+            )
+    elif merge_mode == MODE_STACK and ratio < 0.5:
+        # 열은 안 겹치는데 응답자가 같다면, 방향이 틀린 것(옆으로 붙일 자료)이다
+        same_people = None
+        for k in ("id", "panel_id", "respondent_id", "No", "no"):
+            if all(k in d.columns for d in frames.values()):
+                sets = [set(v for v in key_series(d[k]) if v is not None)
+                        for d in frames.values()]
+                inter = set.intersection(*sets)
+                if inter and len(inter) >= min(len(s) for s in sets) * 0.8:
+                    same_people = k
+                    break
+        if same_people:
+            st.warning(
+                f"{src_label}끼리 이름이 같은 열이 {len(shared_cols)}개뿐인데 "
+                f"{same_people} 는 거의 같은 사람들입니다. 같은 응답자의 서로 다른 "
+                f"문항으로 보이니 ‘옆으로 붙이기’ 가 맞지 않을까요? 지금처럼 위아래로 "
+                f"이으면 한 사람이 여러 행으로 나뉩니다."
+            )
+        else:
+            st.warning(
+                f"{src_label}끼리 이름이 같은 열이 {len(shared_cols)}개뿐입니다"
+                f"(적은 쪽 기준 {ratio:.0%}). 서로 다른 조사를 함께 올린 것은 "
+                f"아닌지 확인하세요. 이대로 이으면 한쪽에만 있는 문항은 "
+                f"반대쪽 응답자에게 전부 빈칸으로 들어갑니다."
+            )
+
+if pre_notes or merge_notes:
+    with st.expander("합친 과정", expanded=False):
+        for n in pre_notes:
+            st.write("· " + n)
+        if pre_notes and merge_notes:
+            st.write("---")
         for n in merge_notes:
             st.write("· " + n)
 with st.expander("원본 미리보기 (앞 20행)", expanded=False):
@@ -1051,7 +1164,7 @@ with st.expander("원본 미리보기 (앞 20행)", expanded=False):
 sig = hashlib.md5(
     f"{'|'.join(f'{n}:{len(d)}' for n, d in files)}|{'/'.join(keys)}|"
     f"{header_row}|{merge_mode}|{join_key}|{keep_all}|{add_sheet_col}|"
-    f"{offset_col}|{offset_step}".encode()
+    f"{offset_col}|{offset_step}|{sheet_mode}".encode()
 ).hexdigest()
 
 if st.session_state.get("sav_sig") != sig:
@@ -1299,6 +1412,7 @@ if run:
              "keep_all_label": ("모두 남기기" if keep_all
                                 else "양쪽에 다 있는 사람만"),
              "add_sheet_col": bool(add_sheet_col),
+             "sheet_mode": sheet_mode,
              "offset_col": offset_col,
              "offset_step": int(offset_step),
              "save_mode": save_mode,
