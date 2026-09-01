@@ -228,6 +228,26 @@ def to_spss_name(raw: str, order: int, used: set) -> str:
     return s
 
 
+def assign_names(cols) -> list:
+    """
+    열 이름들을 한꺼번에 SPSS 변수명으로 바꾼다.
+
+    한글 열은 이름이 통째로 날아가 V1, V2 … 같은 임시 이름이 되는데,
+    이걸 먼저 배정하면 뒤에 오는 진짜 `v1`, `v2` 문항이 v1_2 로 밀린다.
+    그래서 살아남는 이름을 먼저 잡아두고, 임시 이름은 그 뒤에 붙인다.
+    """
+    names = [str(c) for c in cols]
+    real = {}
+    used = set()
+    for i, c in enumerate(names):
+        base = re.sub(r"[^0-9A-Za-z_]", "_", unicodedata.normalize("NFKC", c))
+        base = re.sub(r"_{2,}", "_", base).strip("_")
+        if base and re.match(r"^[A-Za-z]", base):    # 이름이 남는 열
+            real[i] = to_spss_name(c, i + 1, used)
+    return [real.get(i) or to_spss_name(c, i + 1, used)
+            for i, c in enumerate(names)]
+
+
 def looks_numeric(sr: pd.Series) -> bool:
     """빈칸을 뺀 값이 전부 숫자로 읽히면 True."""
     v = sr.dropna()
@@ -392,12 +412,13 @@ def looks_like_key(name) -> bool:
         return True
     return bool(re.search(r"(^|[_\s]|[가-힣])id$|^id[_\s]", n))
 ADMIN_END = ("aream",)          # 이 열 바로 앞까지가 관리용 구간(areaM 자체는 포함)
+ADMIN_KEEP = KEY_NAMES + ("intval",)   # 관리용 구간이어도 기본으로 남길 열
 
 
 def admin_block(cols) -> list:
     """
     조사 파일 앞머리의 관리용 열(응답시각·검증 플래그 등)을 찾는다.
-    No·id 는 남기고, 그 뒤부터 areaM 직전까지를 기본 제외 대상으로 본다.
+    No·id·intVal 은 남기고, 그 밖의 열을 areaM 직전까지 기본 제외 대상으로 본다.
     경계 열이 없으면 아무것도 빼지 않는다.
     """
     names = [str(c) for c in cols]
@@ -405,7 +426,7 @@ def admin_block(cols) -> list:
                 if c.strip().lower() in ADMIN_END), None)
     if end is None:
         return []
-    return [c for c in names[:end] if c.strip().lower() not in KEY_NAMES]
+    return [c for c in names[:end] if c.strip().lower() not in ADMIN_KEEP]
 
 
 def build_sav(df: pd.DataFrame,
@@ -539,33 +560,34 @@ def key_series(sr: pd.Series) -> pd.Series:
     return pd.Series([one(x) for x in sr.tolist()], dtype=object)
 
 
-def merge_side(frames: dict, key: str, keep_all: bool) -> tuple:
-    """시트를 옆으로 붙인다(같은 응답자, 다른 문항)."""
+def merge_side(frames: dict, key: str, keep_all: bool,
+               unit: str = "시트") -> tuple:
+    """시트나 파일을 옆으로 붙인다(같은 응답자, 다른 문항)."""
     notes, base, base_name = [], None, None
     seen_cols = set()
 
     for name, d in frames.items():
         if key not in d.columns:
-            raise ValueError(f"‘{name}’ 시트에 연결 열 ‘{key}’ 가 없습니다.")
+            raise ValueError(f"‘{name}’ 에 연결 열 ‘{key}’ 가 없습니다.")
         d = d.copy()
         d["__key__"] = key_series(d[key])
 
         blank_key = int(d["__key__"].isna().sum())
         if blank_key:
-            notes.append(f"‘{name}’ 시트에서 {key} 가 빈 행 {blank_key}개를 뺐습니다.")
+            notes.append(f"‘{name}’ 에서 {key} 가 빈 행 {blank_key}개를 뺐습니다.")
             d = d[d["__key__"].notna()]
 
         dup = int(d["__key__"].duplicated().sum())
         if dup:
             raise ValueError(
-                f"‘{name}’ 시트에 {key} 가 겹치는 행이 {dup}개 있습니다. "
+                f"‘{name}’ 에 {key} 가 겹치는 행이 {dup}개 있습니다. "
                 "옆으로 붙이려면 한 사람이 한 행이어야 합니다."
             )
 
         if base is None:
             base, base_name = d, name
             seen_cols = {c for c in d.columns if c != "__key__"}
-            notes.append(f"‘{name}’ 시트 {len(d):,}행 × {len(d.columns)-1}열로 시작")
+            notes.append(f"‘{name}’ {len(d):,}행 × {len(d.columns)-1}열로 시작")
             continue
 
         drop = [c for c in d.columns
@@ -583,7 +605,7 @@ def merge_side(frames: dict, key: str, keep_all: bool) -> tuple:
                 n = int((l != r).sum())
                 if n:
                     diff_cols.append(f"{c}({n}건)")
-            head = (f"‘{name}’ 시트에도 있는 열 "
+            head = (f"‘{name}’ 에도 있는 열 "
                     f"{', '.join(map(str, overlap[:8]))}"
                     f"{' 외 %d개' % (len(overlap)-8) if len(overlap) > 8 else ''} 는 "
                     f"‘{base_name}’ 쪽 값을 씁니다.")
@@ -597,8 +619,8 @@ def merge_side(frames: dict, key: str, keep_all: bool) -> tuple:
         only_r = len(set(d["__key__"]) - set(base["__key__"]))
         if only_l or only_r:
             notes.append(
-                f"‘{name}’ 시트와 대조: 앞쪽에만 있는 응답자 {only_l}명, "
-                f"이 시트에만 있는 응답자 {only_r}명"
+                f"‘{name}’ 와 대조: 앞쪽에만 있는 응답자 {only_l}명, "
+                f"이 {unit}에만 있는 응답자 {only_r}명"
             )
 
         base = base.merge(d, on="__key__", how="outer" if keep_all else "inner")
@@ -608,27 +630,61 @@ def merge_side(frames: dict, key: str, keep_all: bool) -> tuple:
     return base.drop(columns="__key__"), notes
 
 
-def merge_stack(frames: dict, add_sheet_col: bool) -> tuple:
-    """시트를 위아래로 잇는다(같은 문항, 다른 응답자)."""
+def merge_stack(frames: dict, add_src_col: bool, unit: str = "시트",
+                offset_col=None, offset_step: int = 0) -> tuple:
+    """
+    시트나 파일을 위아래로 잇는다(같은 문항, 다른 응답자).
+
+    offset_col / offset_step 을 주면 파일 순서대로 그 열에 10000, 20000 … 을
+    더한다. 차수별로 No 가 1부터 다시 시작해 겹치는 것을 막기 위한 것이다.
+    """
     notes, parts = [], []
     all_cols = []
     for name, d in frames.items():
         for c in d.columns:
             if c not in all_cols:
                 all_cols.append(c)
-    for name, d in frames.items():
+    for idx, (name, d) in enumerate(frames.items(), start=1):
         missing = [c for c in all_cols if c not in d.columns]
         if missing:
             notes.append(
-                f"‘{name}’ 시트에 없는 열 {len(missing)}개는 빈칸으로 채웁니다 — "
+                f"‘{name}’ 에 없는 열 {len(missing)}개는 빈칸으로 채웁니다 — "
                 + ", ".join(map(str, missing[:8]))
             )
-        d = d.reindex(columns=all_cols)
-        if add_sheet_col:
-            d.insert(0, "시트", name)
+        d = d.reindex(columns=all_cols)               # 새 표라 원본을 건드리지 않는다
+        if offset_col and offset_step and offset_col in d.columns:
+            num = pd.to_numeric(d[offset_col], errors="coerce")
+            lost = int(d[offset_col].notna().sum() - num.notna().sum())
+            add = idx * int(offset_step)
+            d[offset_col] = num + add
+            rng = ""
+            if num.notna().any():
+                rng = f" ({int(num.min()):,}~{int(num.max()):,} → " \
+                      f"{int(num.min()) + add:,}~{int(num.max()) + add:,})"
+            notes.append(f"‘{name}’ 의 {offset_col} 에 {add:,} 을 더했습니다{rng}")
+            if lost:
+                notes.append(
+                    f"  다만 ‘{name}’ 의 {offset_col} 중 숫자가 아닌 값 {lost}개는 "
+                    "빈칸이 됐습니다."
+                )
+        if add_src_col:
+            d = pd.concat(
+                [pd.DataFrame({unit: [name] * len(d)}, index=d.index), d],
+                axis=1)
         parts.append(d)
-        notes.append(f"‘{name}’ 시트 {len(d):,}행")
+        notes.append(f"‘{name}’ {len(d):,}행")
     out = pd.concat(parts, ignore_index=True)
+
+    if offset_col and offset_col in out.columns:
+        dup = int(out[offset_col].duplicated(keep=False).sum())
+        if dup:
+            notes.append(
+                f"⚠ 그래도 {offset_col} 값이 겹치는 행이 {dup}개 있습니다. "
+                "더하는 값을 키우거나 원본을 확인하세요."
+            )
+        else:
+            notes.append(f"{offset_col} 값이 모두 달라졌습니다.")
+
     notes.append(f"합계 {len(out):,}행 × {len(out.columns)}열")
     return out, notes
 
@@ -759,9 +815,11 @@ def apply_preset(payload: dict, auto_rows: list) -> tuple:
 
 
 
-up = st.file_uploader("엑셀 또는 CSV 파일", type=["xlsx", "xls", "csv"])
-if up is None:
-    st.info("파일을 올리면 열 설정 화면이 나타납니다.")
+ups = st.file_uploader("엑셀 또는 CSV 파일", type=["xlsx", "xls", "csv"],
+                       accept_multiple_files=True,
+                       help="1차·2차처럼 파일이 여러 개면 한 번에 올려서 합칠 수 있습니다.")
+if not ups:
+    st.info("파일을 올리면 열 설정 화면이 나타납니다. 여러 개를 함께 올려도 됩니다.")
     saved_list = list_presets()
     if saved_list:
         st.caption(
@@ -771,7 +829,9 @@ if up is None:
         )
     st.stop()
 
-raw = up.getvalue()
+files = [(u.name, u.getvalue()) for u in ups]
+base_name = files[0][0]                              # 프리셋·파일명 기준
+multi_file = len(files) > 1
 
 # ── 지난 설정 찾기 ────────────────────────────────────────────────────────
 with st.expander("지난 설정", expanded=False):
@@ -800,13 +860,13 @@ if up_preset is not None:
     except Exception as e:                           # noqa: BLE001
         st.error(f"설정 JSON 을 읽지 못했습니다 — {e}")
 if preset is None:
-    cand = read_preset(up.name)
+    cand = read_preset(base_name)
     if valid_preset(cand):
         preset, preset_src = cand, f"저장 폴더 ({cand.get('saved_at', '')})"
 
 # 전역 설정은 위젯이 만들어지기 전에 넣어야 반영된다. 한 번만 적용하고,
 # 그 뒤 사용자가 직접 바꾼 값을 되돌리지 않는다.
-_ptoken = f"{up.name}|{(preset or {}).get('saved_at', '')}|{preset_src}"
+_ptoken = f"{base_name}|{len(files)}|{(preset or {}).get('saved_at', '')}|{preset_src}"
 if preset and st.session_state.get("sav_preset_token") != _ptoken:
     s = preset.get("settings") or {}
     for key, val in (("sav_hdr", s.get("header_row")),
@@ -814,6 +874,8 @@ if preset and st.session_state.get("sav_preset_token") != _ptoken:
                      ("sav_key", s.get("join_key")),
                      ("sav_keep", s.get("keep_all_label")),
                      ("sav_srccol", s.get("add_sheet_col")),
+                     ("sav_offcol", s.get("offset_col")),
+                     ("sav_offstep", s.get("offset_step")),
                      ("sav_mode_save", s.get("save_mode")),
                      ("sav_flagval", s.get("flag_value")),
                      ("sav_always", s.get("always_cols"))):
@@ -827,71 +889,113 @@ if st.session_state.get("sav_preset_off") == _ptoken:
     preset, preset_src = None, ""
 
 
-try:
-    sheets = list_sheets(raw, up.name)
-except Exception as e:                               # noqa: BLE001
-    st.error(f"파일을 열지 못했습니다 — {e}")
-    st.stop()
-
 MODE_SIDE = "옆으로 붙이기 (같은 응답자, 다른 문항)"
 MODE_STACK = "위아래로 잇기 (같은 문항, 다른 응답자)"
 
 merge_mode, join_key, keep_all, add_sheet_col = None, None, True, False
+offset_col, offset_step = None, 0
+src_label = "시트"                                    # 합친 출처를 뭐라 부를지
 
-if len(sheets) == 1:
-    sel = sheets
-    c2, = st.columns(1)
-    seed("sav_hdr", 1)
-    header_row = st.number_input("머리글 행", 1, 50, key="sav_hdr",
-                                 help="열 이름이 들어 있는 행 번호")
+try:
+    sheet_map = {name: list_sheets(data, name) for name, data in files}
+except Exception as e:                               # noqa: BLE001
+    st.error(f"파일을 열지 못했습니다 — {e}")
+    st.stop()
+
+# ── 무엇을 읽을지 정하기 ──────────────────────────────────────────────────
+#   파일 하나면 그 안의 시트를, 여러 개면 파일별로 시트 하나씩 읽는다.
+parts = []                                           # (표시이름, 파일명, 원본bytes, 시트)
+if not multi_file:
+    name, data = files[0]
+    sheets = sheet_map[name]
+    if len(sheets) == 1:
+        sel_sheets = sheets
+        seed("sav_hdr", 1)
+        header_row = st.number_input("머리글 행", 1, 50, key="sav_hdr",
+                                     help="열 이름이 들어 있는 행 번호")
+    else:
+        st.info(f"시트가 {len(sheets)}개입니다. 합쳐서 하나의 .sav 로 만들 수 있습니다.")
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            seed("sav_sheets", sheets)
+            sel_sheets = st.multiselect("사용할 시트", sheets, key="sav_sheets")
+        with c2:
+            seed("sav_hdr", 1)
+            header_row = st.number_input("머리글 행", 1, 50, key="sav_hdr",
+                                         help="열 이름이 들어 있는 행 번호")
+        if not sel_sheets:
+            st.warning("시트를 하나 이상 고르세요.")
+            st.stop()
+    parts = [(s, name, data, s) for s in sel_sheets]
 else:
-    st.info(f"시트가 {len(sheets)}개입니다. 합쳐서 하나의 .sav 로 만들 수 있습니다.")
+    src_label = "파일"
+    st.info(f"파일이 {len(files)}개입니다 — "
+            + ", ".join(n for n, _ in files[:5])
+            + (" …" if len(files) > 5 else ""))
     c1, c2 = st.columns([3, 1])
-    with c1:
-        seed("sav_sheets", sheets)
-        sel = st.multiselect("사용할 시트", sheets, key="sav_sheets")
     with c2:
         seed("sav_hdr", 1)
         header_row = st.number_input("머리글 행", 1, 50, key="sav_hdr",
                                      help="열 이름이 들어 있는 행 번호")
-    if not sel:
-        st.warning("시트를 하나 이상 고르세요.")
-        st.stop()
-    if len(sel) > 1:
-        seed("sav_mode", MODE_SIDE)
-        merge_mode = st.radio("합치는 방식", [MODE_SIDE, MODE_STACK],
-                              key="sav_mode", horizontal=True)
+    multi_sheet = [n for n, ss in sheet_map.items() if len(ss) > 1]
+    pick = None
+    if multi_sheet:
+        shared = [s for s in sheet_map[files[0][0]]
+                  if all(s in ss for ss in sheet_map.values())]
+        with c1:
+            if shared:
+                if st.session_state.get("sav_fsheet") not in shared:
+                    st.session_state.pop("sav_fsheet", None)
+                seed("sav_fsheet", shared[0])
+                pick = st.selectbox(
+                    "각 파일에서 읽을 시트", shared, key="sav_fsheet",
+                    help="파일마다 시트가 여럿입니다. 이름이 같은 시트만 골라 보여줍니다.")
+            else:
+                st.warning(
+                    "파일마다 시트 이름이 달라 각 파일의 첫 시트를 읽습니다 — "
+                    + ", ".join(f"{n}: {ss[0]}" for n, ss in sheet_map.items())
+                )
+    for name, data in files:
+        s = pick if (pick and pick in sheet_map[name]) else sheet_map[name][0]
+        parts.append((name, name, data, s))
 
-# ── 시트 읽기 ─────────────────────────────────────────────────────────────
+if len(parts) > 1:
+    seed("sav_mode", MODE_STACK if multi_file else MODE_SIDE)
+    merge_mode = st.radio("합치는 방식", [MODE_STACK, MODE_SIDE],
+                          key="sav_mode", horizontal=True)
+
+# ── 읽기 ──────────────────────────────────────────────────────────────────
 frames = {}
 try:
-    for s in sel:
-        d = read_table(raw, up.name, s, int(header_row))
+    for disp, fname, data, sheet in parts:
+        d = read_table(data, fname, sheet, int(header_row))
         d = d.loc[:, [c for c in d.columns if not str(c).startswith("Unnamed:")]]
-        frames[s] = d
+        frames[disp] = d
 except Exception as e:                               # noqa: BLE001
     st.error(f"파일을 읽지 못했습니다 — {e}")
     st.stop()
 
+keys = list(frames)
 merge_notes = []
-if len(sel) == 1:
-    df = frames[sel[0]]
+if len(keys) == 1:
+    df = frames[keys[0]]
 elif merge_mode == MODE_SIDE:
-    common = [c for c in frames[sel[0]].columns
+    common = [c for c in frames[keys[0]].columns
               if all(c in d.columns for d in frames.values())]
     if not common:
-        st.error("시트끼리 공통으로 가진 열이 없어 옆으로 붙일 수 없습니다.")
+        st.error(f"{src_label}끼리 공통으로 가진 열이 없어 옆으로 붙일 수 없습니다.")
         st.stop()
     k1, k2 = st.columns([2, 2])
     with k1:
-        default_key = next((c for c in common
-                            if str(c).lower() in ("id", "panel_id", "respondent_id")),
-                           common[0])
+        _pref = ("id", "panel_id", "respondent_id", "no")
+        default_key = next(
+            (c for k in _pref for c in common if str(c).strip().lower() == k),
+            common[0])
         if st.session_state.get("sav_key") not in common:
             st.session_state.pop("sav_key", None)
         seed("sav_key", default_key)
         join_key = st.selectbox("연결 열", common, key="sav_key",
-                                help="시트끼리 같은 응답자를 알아보는 기준 열")
+                                help=f"{src_label}끼리 같은 응답자를 알아보는 기준 열")
     with k2:
         seed("sav_keep", "모두 남기기")
         keep_all = st.radio(
@@ -899,15 +1003,37 @@ elif merge_mode == MODE_SIDE:
             ["모두 남기기", "양쪽에 다 있는 사람만"],
             key="sav_keep", horizontal=True) == "모두 남기기"
     try:
-        df, merge_notes = merge_side(frames, join_key, keep_all)
+        df, merge_notes = merge_side(frames, join_key, keep_all, src_label)
     except Exception as e:                           # noqa: BLE001
-        st.error(f"시트를 붙이지 못했습니다 — {e}")
+        st.error(f"{src_label}을 붙이지 못했습니다 — {e}")
         st.stop()
 else:
-    seed("sav_srccol", True)
-    add_sheet_col = st.checkbox("어느 시트에서 왔는지 열로 남기기",
-                                key="sav_srccol")
-    df, merge_notes = merge_stack(frames, add_sheet_col)
+    s1, s2, s3 = st.columns([1.6, 1.6, 1])
+    with s1:
+        seed("sav_srccol", True)
+        add_sheet_col = st.checkbox(f"어느 {src_label}에서 왔는지 열로 남기기",
+                                    key="sav_srccol")
+    # 차수마다 No 가 1부터 다시 시작하는 경우가 많아 겹친다 → 번호를 띄워준다
+    num_cands = [str(c) for c in frames[keys[0]].columns
+                 if all(c in d.columns for d in frames.values())
+                 and looks_numeric(frames[keys[0]][c])]
+    with s2:
+        opts = ["(사용 안 함)"] + num_cands
+        if st.session_state.get("sav_offcol") not in opts:
+            st.session_state.pop("sav_offcol", None)
+        seed("sav_offcol", "No" if "No" in num_cands else "(사용 안 함)")
+        offset_col = st.selectbox(
+            f"{src_label}마다 번호 띄울 열", opts, key="sav_offcol",
+            help="차수마다 1부터 다시 매긴 일련번호가 겹치지 않게, 순서대로 "
+                 "10000·20000 … 을 더합니다.")
+    with s3:
+        seed("sav_offstep", 10000)
+        offset_step = st.number_input("더할 값", 0, 10_000_000, step=1000,
+                                      key="sav_offstep")
+    if offset_col == "(사용 안 함)":
+        offset_col = None
+    df, merge_notes = merge_stack(frames, add_sheet_col, src_label,
+                                  offset_col, int(offset_step))
 
 if df.empty or not len(df.columns):
     st.error("읽어들인 표가 비어 있습니다. 머리글 행 번호를 확인해 주세요.")
@@ -915,7 +1041,7 @@ if df.empty or not len(df.columns):
 
 st.success(f"{len(df):,}행 × {len(df.columns)}열을 읽었습니다.")
 if merge_notes:
-    with st.expander("시트를 합친 과정", expanded=False):
+    with st.expander(f"{src_label}를 합친 과정", expanded=False):
         for n in merge_notes:
             st.write("· " + n)
 with st.expander("원본 미리보기 (앞 20행)", expanded=False):
@@ -923,14 +1049,28 @@ with st.expander("원본 미리보기 (앞 20행)", expanded=False):
 
 # ── 열 설정 표 ────────────────────────────────────────────────────────────
 sig = hashlib.md5(
-    f"{up.name}|{len(raw)}|{'/'.join(sel)}|{header_row}|{merge_mode}|"
-    f"{join_key}|{keep_all}|{add_sheet_col}".encode()
+    f"{'|'.join(f'{n}:{len(d)}' for n, d in files)}|{'/'.join(keys)}|"
+    f"{header_row}|{merge_mode}|{join_key}|{keep_all}|{add_sheet_col}|"
+    f"{offset_col}|{offset_step}".encode()
 ).hexdigest()
 
 if st.session_state.get("sav_sig") != sig:
-    used, rows, empties = set(), [], []
+    rows, empties = [], []
     admin = set(admin_block(df.columns))
-    for i, c in enumerate(df.columns, start=1):
+    if add_sheet_col:
+        admin.discard(src_label)                     # 직접 켠 출처 열은 빼지 않는다
+    var_names = assign_names(df.columns)
+    if add_sheet_col and src_label in list(map(str, df.columns)):
+        # 우리가 만들어 넣은 출처 열은 V1 같은 임시 이름 대신 뜻이 보이게 둔다
+        i_src = list(map(str, df.columns)).index(src_label)
+        taken = {n.lower() for j, n in enumerate(var_names) if j != i_src}
+        cand = "SRC_FILE" if src_label == "파일" else "SRC_SHEET"
+        n, base = 2, cand
+        while cand.lower() in taken:
+            cand = f"{base}_{n}"
+            n += 1
+        var_names[i_src] = cand
+    for i, c in enumerate(df.columns):
         sr = df[c]
         kind = auto_kind(sr)
         blank = bool(sr.dropna().empty) or all(
@@ -940,7 +1080,7 @@ if st.session_state.get("sav_sig") != sig:
         rows.append({
             "포함": str(c) not in admin,
             "원본열": str(c),
-            "변수명": to_spss_name(c, i, used),
+            "변수명": var_names[i],
             "변수라벨": str(c),
             "유형": kind,
             "측정": auto_measure(sr, kind),
@@ -1007,7 +1147,8 @@ _empty = st.session_state.get("sav_empty") or []
 if _admin and not _pstat:
     st.caption(
         f"관리용 열 {len(_admin)}개(응답시각·검증 표시 등, areaM 직전까지)는 ‘포함’을 "
-        "꺼두었습니다. 필요한 것만 다시 켜세요 — "
+        "꺼두었습니다. No·id·intVal 과 areaM 뒤쪽은 그대로 둡니다. "
+        "필요한 것만 다시 켜세요 — "
         + ", ".join(_admin[:15]) + (" …" if len(_admin) > 15 else "")
     )
 if _empty:
@@ -1151,18 +1292,20 @@ if run:
         st.session_state["sav_mode_used"] = save_mode
 
         payload = make_preset(
-            up.name, spec,
+            base_name, spec,
             {"header_row": int(header_row),
              "merge_mode": merge_mode,
              "join_key": join_key,
              "keep_all_label": ("모두 남기기" if keep_all
                                 else "양쪽에 다 있는 사람만"),
              "add_sheet_col": bool(add_sheet_col),
+             "offset_col": offset_col,
+             "offset_step": int(offset_step),
              "save_mode": save_mode,
              "flag_value": int(flag_value),
              "always_cols": list(always_cols)})
         st.session_state["sav_preset_payload"] = payload
-        st.session_state["sav_preset_saved_to"] = write_preset(up.name, payload)
+        st.session_state["sav_preset_saved_to"] = write_preset(base_name, payload)
     except Exception as e:                           # noqa: BLE001
         st.session_state.pop("sav_bytes", None)
         st.error(f"변환에 실패했습니다 — {e}")
@@ -1186,7 +1329,8 @@ if st.session_state.get("sav_bytes"):
         st.download_button(
             "💾 .sav 내려받기",
             data=data,
-            file_name=os.path.splitext(up.name)[0] + suffix + ".sav",
+            file_name=(os.path.splitext(base_name)[0]
+                       + ("_병합" if multi_file else "") + suffix + ".sav"),
             mime="application/octet-stream",
             type="primary",
             **_wide(st.download_button),
@@ -1198,7 +1342,7 @@ if st.session_state.get("sav_bytes"):
                 "⚙ 설정 JSON 내려받기",
                 data=json.dumps(_payload, ensure_ascii=False,
                                 indent=1).encode("utf-8"),
-                file_name=preset_key(up.name) + "_설정.json",
+                file_name=preset_key(base_name) + "_설정.json",
                 mime="application/json",
                 **_wide(st.download_button),
             )
