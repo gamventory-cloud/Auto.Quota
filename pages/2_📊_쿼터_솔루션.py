@@ -85,7 +85,23 @@ v3 변경점 (추가 쿼터 100% 할당)
     - 제외된 응답자는 결과 엑셀 Chk 열에 "제외(intval 범위)" 로 사유가 남는다
     - 위젯에 분포(최소/중앙값/최대/하위 1%/상위 1%)와 제외 인원을 미리 보여준다
     - 최소값이 최대값보다 크면 전원 제외되므로 입력 단계에서 경고한다
-23. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+23. 추가 쿼터 그룹을 4개 -> 8개로 확장 (MAX_EXTRA)
+24. 추가 쿼터 달성 현황을 '합산' 에서 '그룹별' 로 교체
+    - 그룹끼리 목표를 더하면 안 된다. 단일응답이면 응답자 한 명이 그룹마다
+      1명씩 계상되므로, 3개 그룹이면 합계가 전체 목표의 3배가 된다.
+      (전체 목표 1,300명인데 "추가 쿼터 목표 합계 3,900명" 으로 표시되던 문제)
+    - 그룹별 목표/달성/부족/초과/어긋난 항목 수와 상태를 표로 보여준다.
+25. 쿼터 설정 프리셋 (파일명 기준 저장/복원)
+    - 같은 조사를 여러 번 처리할 때 목표를 매번 다시 입력하지 않게 한다.
+    - 저장 : .quota_presets/<파일명>.json  +  JSON 다운로드
+      (클라우드는 재시작 시 디스크가 비므로 JSON 병행이 필수다)
+    - 불러오기 : 같은 파일명이 올라오면 자동 감지 -> 확인 후 적용.
+      조용히 덮어쓰지 않는다.
+    - 데이터가 바뀐 경우 대조해서 알려준다.
+      "이번에 새로 생긴 값은 현재 분포로 채움 / 저장된 설정에만 있던 값은 없음"
+    - 복원 대상 : 메인 사용 여부·방식·행열 변수·셀별 목표,
+      추가 쿼터 그룹별 방식·변수·목표, 실행 옵션 일부
+26. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
@@ -142,6 +158,134 @@ st.set_page_config(page_title="쿼터 솔루션", layout="wide")
 if not utils.check_password():
     st.stop()
 
+
+# ==============================================================================
+# 쿼터 설정 프리셋
+#   같은 조사를 여러 번 처리할 때 목표를 매번 다시 입력하지 않도록 저장/복원한다.
+#
+#   저장 위치가 두 곳인 이유
+#     - 로컬 실행 : .quota_presets/ 폴더에 그대로 남는다
+#     - 클라우드   : 앱이 재시작되면 디스크가 초기화되므로 폴더 저장은 사라진다.
+#                   그래서 JSON 다운로드/업로드를 함께 제공한다.
+#   매칭은 업로드한 데이터 파일명 기준이다.
+# ==============================================================================
+import json
+import re as _re
+from datetime import datetime
+from pathlib import Path
+
+PRESET_DIR = Path(".quota_presets")
+PRESET_VER = 1
+KEY_SEP = "\u0001"          # 튜플 키를 JSON 문자열로 만들 때 쓰는 구분자
+
+
+def _preset_slug(filename: str) -> str:
+    """파일명을 저장용 이름으로 바꾼다 (확장자 제거, 특수문자 정리)."""
+    stem = Path(str(filename)).stem
+    return _re.sub(r'[^0-9A-Za-z가-힣._-]+', '_', stem)[:120] or "preset"
+
+
+def _enc_key(k):
+    return KEY_SEP.join(str(x) for x in k) if isinstance(k, tuple) else str(k)
+
+
+def _dec_key(s, as_tuple):
+    return tuple(s.split(KEY_SEP)) if as_tuple else s
+
+
+def preset_payload(source_name, main_state, extras_state, options):
+    return {
+        "version": PRESET_VER,
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_file": str(source_name),
+        "main": main_state,
+        "extras": extras_state,
+        "options": options,
+    }
+
+
+def preset_save_local(slug, payload):
+    """로컬 폴더에 저장. 쓰기 권한이 없으면 조용히 실패하고 사유를 돌려준다."""
+    try:
+        PRESET_DIR.mkdir(exist_ok=True)
+        (PRESET_DIR / f"{slug}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, str(PRESET_DIR / f"{slug}.json")
+    except Exception as e:                                    # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def preset_load_local(slug):
+    f = PRESET_DIR / f"{slug}.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def preset_list_local():
+    if not PRESET_DIR.exists():
+        return []
+    out = []
+    for f in sorted(PRESET_DIR.glob("*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            out.append((f.stem, d.get("saved_at", ""), d.get("source_file", "")))
+        except Exception:                                     # noqa: BLE001
+            continue
+    return out
+
+
+def preset_get(key, default=None):
+    """현재 적용된 프리셋에서 값을 꺼낸다. 없으면 default."""
+    p = st.session_state.get("QS_preset")
+    if not p:
+        return default
+    cur, path = p, key.split(".")
+    for step in path:
+        if not isinstance(cur, dict) or step not in cur:
+            return default
+        cur = cur[step]
+    return cur
+
+
+def preset_targets(section, idx=None):
+    """저장된 목표 dict 를 {키: 목표} 로 되돌린다. 없으면 빈 dict."""
+    if section == "main":
+        raw = preset_get("main.targets")
+        as_tuple = True
+    else:
+        exs = preset_get("extras") or []
+        if idx is None or idx >= len(exs):
+            return {}
+        raw = (exs[idx] or {}).get("targets")
+        as_tuple = (exs[idx] or {}).get("mode") == "grid"
+    if not isinstance(raw, dict):
+        return {}
+    return {_dec_key(k, as_tuple): v for k, v in raw.items()}
+
+
+def apply_preset_col(df_col_values, preset_map, fallback):
+    """
+    프리셋 목표를 현재 데이터의 값 목록에 맞춰 채운다.
+      - 프리셋에 있는 값 -> 저장된 목표
+      - 이번에 새로 생긴 값 -> fallback (현재 분포)
+    반환: (목표 리스트, 프리셋에만 있던 값, 이번에만 있는 값)
+    """
+    vals = list(df_col_values)
+    out, only_new = [], []
+    for v, fb in zip(vals, fallback):
+        if v in preset_map:
+            out.append(int(preset_map[v]))
+        else:
+            out.append(fb)
+            only_new.append(v)
+    only_old = [k for k in preset_map if k not in set(vals)]
+    return out, only_old, only_new
+
+
 st.title("📊 쿼터 자동 할당 솔루션")
 n_cores = cpu_count()
 st.sidebar.caption(f"🖥️ CPU 코어: {n_cores}개")
@@ -170,7 +314,7 @@ with st.sidebar:
             "정합니다. 예: 남 × 30대 × 서울 = 42명.\n\n"
             "- *엑셀 업로드* : 쓰던 쿼터표가 있으면 그대로 올립니다\n"
             "- *화면 설계* : 현재 분포가 채워진 표가 나오니 숫자만 고칩니다\n\n"
-            "**추가 쿼터** — 직업·학력처럼 따로 관리할 항목입니다. 최대 4개까지 "
+            "**추가 쿼터** — 직업·학력처럼 따로 관리할 항목입니다. 최대 8개까지 "
             "겹쳐 걸 수 있습니다.\n\n"
             "- *단순형* : 값 하나에 목표 하나 (복수응답 컬럼도 됩니다)\n"
             "- *조합형* : 행/열을 교차해서 목표를 줍니다\n\n"
@@ -304,19 +448,79 @@ if data_file:
         df_survey = df_survey.reset_index(drop=True)
 
     st.success(f"로드 완료: {len(df_survey)}명")
+
+    # ── 저장된 쿼터 설정 찾기 ────────────────────────────────────────────
+    _slug = _preset_slug(getattr(data_file, "name", "data"))
+    if st.session_state.get("QS_slug") != _slug:
+        # 다른 파일이 올라오면 이전 프리셋 적용 상태를 버린다
+        st.session_state["QS_slug"] = _slug
+        st.session_state.pop("QS_preset", None)
+
+    _found = preset_load_local(_slug)
+    _applied = st.session_state.get("QS_preset")
+
+    with st.expander("💾 쿼터 설정 저장 / 불러오기",
+                     expanded=bool(_found and not _applied)):
+        if _applied:
+            st.success(
+                f"✅ 저장된 설정을 적용했습니다 "
+                f"({_applied.get('saved_at','')} 저장, "
+                f"원본 `{_applied.get('source_file','')}`). "
+                "아래 표에 이전 목표가 채워져 있습니다.")
+            if st.button("↩️ 적용 취소하고 새로 설정", key="QS_clear"):
+                st.session_state.pop("QS_preset", None)
+                st.rerun()
+        elif _found:
+            st.info(
+                f"📋 `{_slug}` 이름으로 저장된 설정이 있습니다 "
+                f"({_found.get('saved_at','')} 저장 · 메인 "
+                f"{len(_found.get('main',{}).get('targets',{})):,}셀 · 추가 "
+                f"{len(_found.get('extras',[])):,}개).")
+            if st.button("📥 이 설정 불러오기", key="QS_load", type="primary"):
+                st.session_state["QS_preset"] = _found
+                st.rerun()
+        else:
+            st.caption(
+                f"`{_slug}` 이름으로 저장된 설정이 없습니다. "
+                "쿼터를 입력한 뒤 아래에서 저장하면, 다음에 같은 파일명을 "
+                "올렸을 때 자동으로 찾아 줍니다.")
+
+        # 클라우드는 앱이 재시작되면 폴더가 비므로 JSON 으로도 주고받는다
+        up = st.file_uploader("설정 파일(JSON) 불러오기", type=["json"],
+                              key="QS_upload")
+        if up is not None and st.button("📤 올린 설정 적용", key="QS_apply_up"):
+            try:
+                st.session_state["QS_preset"] = json.loads(
+                    up.getvalue().decode("utf-8"))
+                st.rerun()
+            except Exception as _je:                          # noqa: BLE001
+                st.error(f"설정 파일을 읽지 못했습니다 — {type(_je).__name__}: {_je}")
+
+        _saved = preset_list_local()
+        if _saved:
+            with st.popover(f"저장된 설정 {len(_saved)}개 보기"):
+                st.dataframe(
+                    pd.DataFrame(_saved, columns=["이름", "저장 시각", "원본 파일"]),
+                    use_container_width=True, hide_index=True)
+
     st.divider()
 
     # ==========================================================================
     # 2. 쿼터 설정
     # ==========================================================================
     st.subheader("2. 쿼터 설정")
-    use_main = st.checkbox("✅ 메인 쿼터 사용", value=True)
+    use_main = st.checkbox("✅ 메인 쿼터 사용",
+                           value=bool(preset_get("main.use_main", True)))
     main_map = {}
     algo_main_cols = []
     main_mode = 'grid'
 
     if use_main:
-        q_mode = st.radio("메인 쿼터 방식", ["엑셀 업로드", "화면 설계"], horizontal=True)
+        _qm = ["엑셀 업로드", "화면 설계"]
+        q_mode = st.radio(
+            "메인 쿼터 방식", _qm, horizontal=True,
+            index=_qm.index(preset_get("main.q_mode", "화면 설계"))
+            if preset_get("main.q_mode") in _qm else 1)
 
         if q_mode == "엑셀 업로드":
             qf = st.file_uploader("쿼터 파일", type=['xlsx'])
@@ -342,8 +546,13 @@ if data_file:
                         st.code(traceback.format_exc())
 
         else:
-            rv = st.multiselect("행(Row) 변수", df_survey.columns)
-            cv = st.selectbox("열(Col) 변수", ["(선택)"] + list(df_survey.columns))
+            _cols = list(df_survey.columns)
+            _p_rv = [c for c in (preset_get("main.rv") or []) if c in _cols]
+            _p_cv = preset_get("main.cv")
+            rv = st.multiselect("행(Row) 변수", _cols, default=_p_rv)
+            cv = st.selectbox(
+                "열(Col) 변수", ["(선택)"] + _cols,
+                index=(_cols.index(_p_cv) + 1) if _p_cv in _cols else 0)
             if rv and cv != "(선택)":
                 if cv in rv:
                     st.error("열 변수는 행 변수와 달라야 합니다.")
@@ -353,7 +562,23 @@ if data_file:
                     if pi.size > MAX_GRID_CELLS:
                         st.error(f"교차표 셀이 {pi.size:,}개로 너무 많습니다. 변수를 줄이세요.")
                     else:
-                        ed = st.data_editor(pi.reset_index(), use_container_width=True, disabled=rv)
+                        pi_init = pi.reset_index()
+                        _pm = preset_targets("main")
+                        if _pm:
+                            # 저장된 목표를 교차표 칸에 되돌려 놓는다.
+                            # 이번 데이터에 없던 조합은 현재 분포를 그대로 둔다.
+                            _hit = 0
+                            for _r in range(len(pi_init)):
+                                for _c in pi.columns:
+                                    _k = tuple(
+                                        [utils.norm_val(pi_init.iloc[_r][x]) for x in rv]
+                                        + [utils.norm_val(_c)])
+                                    if _k in _pm:
+                                        pi_init.at[_r, _c] = int(_pm[_k])
+                                        _hit += 1
+                            st.caption(f"저장된 설정에서 {_hit:,}개 셀의 목표를 "
+                                       f"불러왔습니다 (전체 {pi.size:,}칸).")
+                        ed = st.data_editor(pi_init, use_container_width=True, disabled=rv)
                         mlt = ed.melt(id_vars=rv, var_name=cv, value_name='target')
                         bad = []
                         for _, r in mlt.iterrows():
@@ -374,20 +599,27 @@ if data_file:
     # 추가 쿼터
     # --------------------------------------------------------------------------
     ex_configs = []
-    tabs = st.tabs(["추가 1", "추가 2", "추가 3", "추가 4"])
+    MAX_EXTRA = 8          # 추가 쿼터 그룹 최대 개수
+    tabs = st.tabs([f"추가 {i+1}" for i in range(MAX_EXTRA)])
 
     for i, tab in enumerate(tabs):
         with tab:
+            _em = ["단순형 (변수 값별 할당)", "조합형 (행/열 교차 할당)"]
+            _p_ex = (preset_get("extras") or [])
+            _p_this = _p_ex[i] if i < len(_p_ex) else {}
+            _p_mode = (_p_this or {}).get("mode")
             ex_mode = st.radio(
-                f"설정 방식 (그룹 {i+1})",
-                ["단순형 (변수 값별 할당)", "조합형 (행/열 교차 할당)"],
-                key=f"ex_mode_{i}", horizontal=True
+                f"설정 방식 (그룹 {i+1})", _em, key=f"ex_mode_{i}", horizontal=True,
+                index=1 if _p_mode == "grid" else 0
             )
             config = {'cols': [], 'map': {}, 'name': f"Extra_{i+1}", 'mode': 'simple'}
 
             if ex_mode.startswith("단순형"):
                 config['mode'] = 'simple'
-                cols = st.multiselect(f"변수 선택 (그룹 {i+1})", df_survey.columns, key=f"ms{i}")
+                _pc = [c for c in ((_p_this or {}).get("cols") or [])
+                       if c in df_survey.columns] if _p_mode == "simple" else []
+                cols = st.multiselect(f"변수 선택 (그룹 {i+1})", df_survey.columns,
+                                      default=_pc, key=f"ms{i}")
                 if cols:
                     config['cols'] = cols
                     config['name'] = "_".join(str(c) for c in cols)
@@ -406,6 +638,20 @@ if data_file:
                             columns=['값', '현재']
                         )
                         cnt['목표'] = cnt['현재']
+                        _pm = preset_targets("extra", i) if _p_mode == "simple" else {}
+                        if _pm:
+                            tg, only_old, only_new = apply_preset_col(
+                                cnt['값'].tolist(), _pm, cnt['현재'].tolist())
+                            cnt['목표'] = tg
+                            msg = (f"저장된 설정에서 목표 "
+                                   f"{len(cnt) - len(only_new):,}개를 불러왔습니다.")
+                            if only_new:
+                                msg += f" 이번에 새로 생긴 값 {len(only_new)}개는 현재 분포로 채웠습니다: " \
+                                       + ", ".join(map(str, only_new[:6]))
+                            if only_old:
+                                msg += f" / 저장된 설정에만 있던 값 {len(only_old)}개는 이번 데이터에 없습니다: " \
+                                       + ", ".join(map(str, only_old[:6]))
+                            (st.warning if (only_new or only_old) else st.caption)(msg)
                         ed = st.data_editor(cnt, use_container_width=True,
                                             disabled=['값', '현재'], key=f"ed{i}", hide_index=True)
                         bad = []
@@ -424,9 +670,16 @@ if data_file:
             else:
                 config['mode'] = 'grid'
                 st.caption("행과 열을 교차하여 상세 목표를 설정합니다.")
-                ex_rv = st.multiselect(f"행(Row) 변수 (그룹 {i+1})", df_survey.columns, key=f"ex_rv_{i}")
-                ex_cv = st.selectbox(f"열(Col) 변수 (그룹 {i+1})",
-                                     ["(선택)"] + list(df_survey.columns), key=f"ex_cv_{i}")
+                _gc = list((_p_this or {}).get("cols") or []) if _p_mode == "grid" else []
+                _g_rv = [c for c in _gc[:-1] if c in df_survey.columns] if len(_gc) > 1 else []
+                _g_cv = _gc[-1] if _gc else None
+                _all = list(df_survey.columns)
+                ex_rv = st.multiselect(f"행(Row) 변수 (그룹 {i+1})", _all,
+                                       default=_g_rv, key=f"ex_rv_{i}")
+                ex_cv = st.selectbox(
+                    f"열(Col) 변수 (그룹 {i+1})", ["(선택)"] + _all,
+                    index=(_all.index(_g_cv) + 1) if _g_cv in _all else 0,
+                    key=f"ex_cv_{i}")
 
                 if ex_rv and ex_cv != "(선택)":
                     if ex_cv in ex_rv:
@@ -440,7 +693,21 @@ if data_file:
                         if pi.size > MAX_GRID_CELLS:
                             st.error(f"교차표 셀이 {pi.size:,}개로 너무 많습니다.")
                         else:
-                            ed = st.data_editor(pi.reset_index(), use_container_width=True,
+                            pi_init = pi.reset_index()
+                            _pmg = preset_targets("extra", i) if _p_mode == "grid" else {}
+                            if _pmg:
+                                _hit = 0
+                                for _r in range(len(pi_init)):
+                                    for _c in pi.columns:
+                                        _k = tuple(
+                                            [utils.norm_val(pi_init.iloc[_r][x]) for x in ex_rv]
+                                            + [utils.norm_val(_c)])
+                                        if _k in _pmg:
+                                            pi_init.at[_r, _c] = int(_pmg[_k])
+                                            _hit += 1
+                                st.caption(f"저장된 설정에서 {_hit:,}개 셀의 목표를 "
+                                           f"불러왔습니다.")
+                            ed = st.data_editor(pi_init, use_container_width=True,
                                                 disabled=ex_rv, key=f"ex_ed_grid_{i}")
                             mlt = ed.melt(id_vars=ex_rv, var_name=ex_cv, value_name='target')
                             bad = []
@@ -645,6 +912,60 @@ if data_file:
             )
             time_limit, balance, ilp_priority, min_fill = 0, False, False, 0.0
             balance_rel, want_plan = False, False
+
+    # ── 현재 설정 저장 ───────────────────────────────────────────────────
+    with st.expander("💾 지금 설정을 저장해 두기"):
+        st.caption(
+            f"파일명 `{_slug}` 로 저장됩니다. 다음에 같은 이름의 데이터를 올리면 "
+            "자동으로 찾아서 목표를 채워 줍니다. 클라우드에서는 앱이 재시작되면 "
+            "저장한 것이 사라지므로, JSON 파일도 함께 내려받아 두세요.")
+
+        _main_state = {
+            "use_main": bool(use_main),
+            "q_mode": q_mode if use_main else None,
+            "rv": rv if (use_main and q_mode == "화면 설계") else [],
+            "cv": cv if (use_main and q_mode == "화면 설계" and cv != "(선택)") else None,
+            "cols": list(algo_main_cols),
+            "targets": {_enc_key(k): int(v) for k, v in main_map.items()},
+        }
+        _extras_state = []
+        for _c in ex_configs:
+            _extras_state.append({
+                "name": _c['name'],
+                "mode": _c['mode'],
+                "cols": list(_c['cols']),
+                "targets": {_enc_key(k): int(v) for k, v in _c['map'].items()},
+            })
+        _options = {
+            "tol": int(tol), "use_intval": bool(use_intval),
+            "c_int": str(c_int) if c_int else None,
+            "c_no": str(c_no),
+            "iv_cap_on": bool(iv_cap_on),
+            "iv_min": int(iv_min) if iv_min is not None else None,
+            "iv_max": int(iv_max) if iv_max is not None else None,
+            "ex_as_target": bool(ex_as_target),
+        }
+        _payload = preset_payload(getattr(data_file, "name", "data"),
+                                  _main_state, _extras_state, _options)
+
+        _n_ex = sum(1 for c in ex_configs if c['cols'])
+        st.write(f"저장될 내용 — 메인 {len(main_map):,}셀 / 추가 쿼터 {_n_ex}개")
+
+        sc1, sc2 = st.columns(2)
+        if sc1.button("💾 이 컴퓨터에 저장", use_container_width=True,
+                      disabled=not main_map):
+            ok, info = preset_save_local(_slug, _payload)
+            if ok:
+                st.success(f"저장했습니다 → `{info}`")
+            else:
+                st.warning(
+                    f"폴더에 저장하지 못했습니다 ({info}). "
+                    "클라우드에서는 정상이며, 옆의 JSON 다운로드를 쓰세요.")
+        sc2.download_button(
+            "⬇️ 설정 JSON 내려받기",
+            json.dumps(_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name=f"쿼터설정_{_slug}.json", mime="application/json",
+            use_container_width=True, disabled=not main_map)
 
     if st.button("🚀 매칭 시작", type="primary"):
         if not main_map:
@@ -1066,18 +1387,58 @@ if data_file:
                         "(구하기 어려운 셀에서는 값이 낮아도 뽑아야 합니다)."
                     )
 
-            # 추가 쿼터 달성 현황 (목표 모드에서만 의미가 있다)
+            # 추가 쿼터 달성 현황 — 그룹별로 따로 본다.
+            #   그룹끼리 목표를 합산하면 안 된다. 단일응답이면 응답자 한 명이
+            #   그룹마다 1명씩 계상되므로, 3개 그룹이면 합계가 전체 목표의 3배가
+            #   되어 "목표 3,900명"처럼 실제와 동떨어진 숫자가 나온다.
             if ex_as_target and ex_configs:
-                ex_target_sum = sum(sum(c['map'].values())
-                                    for c in ex_configs if c['cols'])
-                if ex_target_sum:
-                    e1, e2, e3 = st.columns(3)
-                    e1.metric("🎯 추가 쿼터 목표 합계", f"{ex_target_sum:,}명")
-                    e2.metric("✅ 추가 쿼터 달성",
-                              f"{ex_target_sum - ex_short_sum:,}명")
-                    e3.metric("📉 추가 쿼터 부족", f"{ex_short_sum:,}명",
-                              delta="충족" if ex_short_sum == 0 else f"-{ex_short_sum:,}명",
-                              delta_color="normal" if ex_short_sum == 0 else "inverse")
+                g_rows = []
+                for j, cfg in enumerate(ex_configs):
+                    if not cfg['cols'] or not cfg['map']:
+                        continue
+                    tgt = sum(cfg['map'].values())
+                    sh = sum(max(0, v - final_exs[j].get(k, 0))
+                             for k, v in cfg['map'].items())
+                    ov = sum(max(0, final_exs[j].get(k, 0) - v)
+                             for k, v in cfg['map'].items())
+                    n_bad_items = sum(1 for k, v in cfg['map'].items()
+                                      if final_exs[j].get(k, 0) != v)
+                    if sh == 0 and ov == 0:
+                        state = "✅ 충족"
+                    elif sh == 0:
+                        state = f"↗ {ov:,}명 초과"
+                    else:
+                        state = f"⚠️ {sh:,}명 부족"
+                    g_rows.append({
+                        "추가 쿼터": cfg['name'],
+                        "항목 수": len(cfg['map']),
+                        "목표": tgt,
+                        "달성": tgt - sh,
+                        "부족": sh,
+                        "초과": ov,
+                        "어긋난 항목": n_bad_items,
+                        "상태": state,
+                    })
+                if g_rows:
+                    n_ok = sum(1 for r in g_rows if r["상태"] == "✅ 충족")
+                    st.markdown(
+                        f"**추가 쿼터 달성 현황 — {len(g_rows)}개 중 {n_ok}개 충족**")
+                    st.dataframe(
+                        pd.DataFrame(g_rows), use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "목표": st.column_config.NumberColumn(format="%d"),
+                            "달성": st.column_config.NumberColumn(format="%d"),
+                            "부족": st.column_config.NumberColumn(format="%d"),
+                            "초과": st.column_config.NumberColumn(format="%d"),
+                            "어긋난 항목": st.column_config.NumberColumn(
+                                format="%d",
+                                help="목표와 정확히 일치하지 않는 항목(코드) 수"),
+                        })
+                    st.caption(
+                        "추가 쿼터는 그룹마다 따로 판단합니다. 단일응답 변수라면 "
+                        "각 그룹의 목표 합계가 전체 목표 인원과 같아야 정상입니다 "
+                        "(응답자 한 명이 그룹마다 한 번씩 계상되기 때문입니다).")
 
             # 추가 쿼터 편차 현황 (총 인원은 유지되고 항목만 흔들린다)
             ex_dev_recs = []
