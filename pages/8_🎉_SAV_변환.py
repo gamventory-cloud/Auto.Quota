@@ -434,7 +434,8 @@ def build_sav(df: pd.DataFrame,
               file_label: str = "",
               save_mode: str = SAVE_ALL,
               always: tuple = (),
-              flag_value: float = FLAG_DEFAULT) -> tuple:
+              flag_value: float = FLAG_DEFAULT,
+              extra_labels: dict = None) -> tuple:
     """
     df    : 원본 표
     spec  : 열마다 한 행. 필요한 칸 —
@@ -442,12 +443,14 @@ def build_sav(df: pd.DataFrame,
     save_mode  : 숫자＋문자 / 숫자만 / 문자만
     always     : 저장 범위와 상관없이 남길 열(ID 등)
     flag_value : ‘문자→응답표시’ 로 지정한 열에서 기입된 칸에 찍을 숫자
+    extra_labels : 앱이 만든 열(GU 등)에 붙일 {원본열: {코드: 라벨}}
     반환  : (sav bytes, 값라벨, 경고, 제외된 열)
     """
     df = df.reset_index(drop=True)
     out, labels, value_labels, measures = {}, {}, {}, {}
     formats, missing_ranges = {}, {}
     warns, skipped = [], []
+    extra_labels = extra_labels or {}
 
     for _, row in spec.iterrows():
         if not row["포함"]:
@@ -505,6 +508,10 @@ def build_sav(df: pd.DataFrame,
 
         labels[name] = str(row["변수라벨"]).strip() or str(src)
         measures[name] = MEASURE_MAP.get(row["측정"], "nominal")
+
+        lab = extra_labels.get(str(src))
+        if lab and pd.api.types.is_numeric_dtype(out[name]):
+            value_labels[name] = {float(k): str(v) for k, v in lab.items()}
 
         codes = parse_codes(row.get("결측코드", ""))
         if codes:
@@ -630,13 +637,19 @@ def merge_side(frames: dict, key: str, keep_all: bool,
     return base.drop(columns="__key__"), notes
 
 
+GU_COL = "GU"                   # 몇 번째 파일(시트)에서 왔는지 담는 열
+
+
 def merge_stack(frames: dict, add_src_col: bool, unit: str = "시트",
                 offset_col=None, offset_step: int = 0) -> tuple:
     """
     시트나 파일을 위아래로 잇는다(같은 문항, 다른 응답자).
 
-    offset_col / offset_step 을 주면 파일 순서대로 그 열에 10000, 20000 … 을
-    더한다. 차수별로 No 가 1부터 다시 시작해 겹치는 것을 막기 위한 것이다.
+    add_src_col 을 켜면 GU 열에 1, 2, 3 … 이 들어가고 값 라벨로 파일명이 붙는다.
+    offset_col / offset_step 을 주면 원래 열은 그대로 두고, 옆에 10000·20000 …
+    을 더한 열을 새로 만든다. 차수마다 1부터 다시 매긴 번호가 겹치는 걸 막는다.
+
+    반환 : (합친 표, 과정 기록, 새로 만든 열의 값라벨, 새로 만든 열의 설명)
     """
     notes, parts = [], []
     all_cols = []
@@ -644,6 +657,19 @@ def merge_stack(frames: dict, add_src_col: bool, unit: str = "시트",
         for c in d.columns:
             if c not in all_cols:
                 all_cols.append(c)
+
+    gu_col = GU_COL
+    n = 2
+    while add_src_col and gu_col in all_cols:         # 이미 GU 가 있으면 비켜 간다
+        gu_col, n = f"{GU_COL}_{n}", n + 1
+    off_new = None
+    if offset_col and offset_step:
+        off_new, n = f"{offset_col}_{GU_COL}", 2
+        while off_new in all_cols:
+            off_new, n = f"{offset_col}_{GU_COL}_{n}", n + 1
+
+    gen_labels, gen_desc = {}, {}
+
     for idx, (name, d) in enumerate(frames.items(), start=1):
         missing = [c for c in all_cols if c not in d.columns]
         if missing:
@@ -652,41 +678,60 @@ def merge_stack(frames: dict, add_src_col: bool, unit: str = "시트",
                 + ", ".join(map(str, missing[:8]))
             )
         d = d.reindex(columns=all_cols)               # 새 표라 원본을 건드리지 않는다
-        if offset_col and offset_step and offset_col in d.columns:
+
+        add_cols = {}
+        if off_new:
             num = pd.to_numeric(d[offset_col], errors="coerce")
             lost = int(d[offset_col].notna().sum() - num.notna().sum())
             add = idx * int(offset_step)
-            d[offset_col] = num + add
+            add_cols[off_new] = num + add
             rng = ""
             if num.notna().any():
-                rng = f" ({int(num.min()):,}~{int(num.max()):,} → " \
-                      f"{int(num.min()) + add:,}~{int(num.max()) + add:,})"
-            notes.append(f"‘{name}’ 의 {offset_col} 에 {add:,} 을 더했습니다{rng}")
+                rng = (f" ({int(num.min()):,}~{int(num.max()):,} → "
+                       f"{int(num.min()) + add:,}~{int(num.max()) + add:,})")
+            notes.append(
+                f"‘{name}’ 의 {offset_col} 에 {add:,} 을 더해 {off_new} 을 "
+                f"만들었습니다{rng}")
             if lost:
                 notes.append(
                     f"  다만 ‘{name}’ 의 {offset_col} 중 숫자가 아닌 값 {lost}개는 "
                     "빈칸이 됐습니다."
                 )
         if add_src_col:
-            d = pd.concat(
-                [pd.DataFrame({unit: [name] * len(d)}, index=d.index), d],
-                axis=1)
+            add_cols[gu_col] = float(idx)
+
+        if add_cols:
+            extra = pd.DataFrame(
+                {k: (v if hasattr(v, "__len__") else [v] * len(d))
+                 for k, v in add_cols.items()}, index=d.index)
+            order = ([gu_col] if add_src_col else [])
+            body = list(d.columns)
+            if off_new and offset_col in body:        # 원래 열 바로 뒤에 놓는다
+                body.insert(body.index(offset_col) + 1, off_new)
+            d = pd.concat([d, extra], axis=1)[order + [c for c in body]]
+
+        if add_src_col:
+            gen_labels.setdefault(gu_col, {})[float(idx)] = str(name)
         parts.append(d)
         notes.append(f"‘{name}’ {len(d):,}행")
+
     out = pd.concat(parts, ignore_index=True)
 
-    if offset_col and offset_col in out.columns:
-        dup = int(out[offset_col].duplicated(keep=False).sum())
+    if add_src_col:
+        gen_desc[gu_col] = f"{unit} 구분"
+    if off_new:
+        gen_desc[off_new] = f"{offset_col} ({unit} 구분)"
+        dup = int(out[off_new].duplicated(keep=False).sum())
         if dup:
             notes.append(
-                f"⚠ 그래도 {offset_col} 값이 겹치는 행이 {dup}개 있습니다. "
+                f"⚠ 그래도 {off_new} 값이 겹치는 행이 {dup}개 있습니다. "
                 "더하는 값을 키우거나 원본을 확인하세요."
             )
         else:
-            notes.append(f"{offset_col} 값이 모두 달라졌습니다.")
+            notes.append(f"{off_new} 값은 모두 다릅니다. {offset_col} 은 그대로 뒀습니다.")
 
     notes.append(f"합계 {len(out):,}행 × {len(out.columns)}열")
-    return out, notes
+    return out, notes, gen_labels, gen_desc
 
 
 # ==============================================================================
@@ -1037,6 +1082,7 @@ else:
 
 keys = list(frames)
 merge_notes = []
+gen_labels, gen_desc = {}, {}
 if len(keys) == 1:
     df = frames[keys[0]]
 elif merge_mode == MODE_SIDE:
@@ -1071,8 +1117,10 @@ else:
     s1, s2, s3 = st.columns([1.6, 1.6, 1])
     with s1:
         seed("sav_srccol", True)
-        add_sheet_col = st.checkbox(f"어느 {src_label}에서 왔는지 열로 남기기",
-                                    key="sav_srccol")
+        add_sheet_col = st.checkbox(f"어느 {src_label}에서 왔는지 GU 열로 남기기",
+                                    key="sav_srccol",
+                                    help="GU 에 1, 2, 3 … 이 들어가고 값 라벨로 "
+                                         f"{src_label} 이름이 붙습니다.")
     # 차수마다 No 가 1부터 다시 시작하는 경우가 많아 겹친다 → 번호를 띄워준다
     num_cands = [str(c) for c in frames[keys[0]].columns
                  if all(c in d.columns for d in frames.values())
@@ -1084,16 +1132,16 @@ else:
         seed("sav_offcol", "No" if "No" in num_cands else "(사용 안 함)")
         offset_col = st.selectbox(
             f"{src_label}마다 번호 띄울 열", opts, key="sav_offcol",
-            help="차수마다 1부터 다시 매긴 일련번호가 겹치지 않게, 순서대로 "
-                 "10000·20000 … 을 더합니다.")
+            help="원래 열은 그대로 두고, 순서대로 10000·20000 … 을 더한 열을 "
+                 "옆에 새로 만듭니다(No → No_GU).")
     with s3:
         seed("sav_offstep", 10000)
         offset_step = st.number_input("더할 값", 0, 10_000_000, step=1000,
                                       key="sav_offstep")
     if offset_col == "(사용 안 함)":
         offset_col = None
-    df, merge_notes = merge_stack(frames, add_sheet_col, src_label,
-                                  offset_col, int(offset_step))
+    df, merge_notes, gen_labels, gen_desc = merge_stack(
+        frames, add_sheet_col, src_label, offset_col, int(offset_step))
 
 if df.empty or not len(df.columns):
     st.error("읽어들인 표가 비어 있습니다. 머리글 행 번호를 확인해 주세요.")
@@ -1170,19 +1218,8 @@ sig = hashlib.md5(
 if st.session_state.get("sav_sig") != sig:
     rows, empties = [], []
     admin = set(admin_block(df.columns))
-    if add_sheet_col:
-        admin.discard(src_label)                     # 직접 켠 출처 열은 빼지 않는다
+    admin -= set(gen_desc)                           # 우리가 만든 열은 빼지 않는다
     var_names = assign_names(df.columns)
-    if add_sheet_col and src_label in list(map(str, df.columns)):
-        # 우리가 만들어 넣은 출처 열은 V1 같은 임시 이름 대신 뜻이 보이게 둔다
-        i_src = list(map(str, df.columns)).index(src_label)
-        taken = {n.lower() for j, n in enumerate(var_names) if j != i_src}
-        cand = "SRC_FILE" if src_label == "파일" else "SRC_SHEET"
-        n, base = 2, cand
-        while cand.lower() in taken:
-            cand = f"{base}_{n}"
-            n += 1
-        var_names[i_src] = cand
     for i, c in enumerate(df.columns):
         sr = df[c]
         kind = auto_kind(sr)
@@ -1194,7 +1231,7 @@ if st.session_state.get("sav_sig") != sig:
             "포함": str(c) not in admin,
             "원본열": str(c),
             "변수명": var_names[i],
-            "변수라벨": str(c),
+            "변수라벨": gen_desc.get(str(c), str(c)),
             "유형": kind,
             "측정": auto_measure(sr, kind),
             "결측코드": "",
@@ -1397,7 +1434,7 @@ if run:
         with st.spinner("SPSS 파일을 만드는 중…"):
             data, vlabels, warns, skipped = build_sav(
                 df, spec, file_label, save_mode, tuple(always_cols),
-                float(flag_value))
+                float(flag_value), gen_labels)
         st.session_state["sav_bytes"] = data
         st.session_state["sav_vlabels"] = vlabels
         st.session_state["sav_warns"] = warns
