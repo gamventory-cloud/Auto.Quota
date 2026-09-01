@@ -33,6 +33,11 @@ utils.py — 쿼터 솔루션 공용 모듈
      앱 전체가 죽었다. 양쪽을 utf-8 bytes 로 인코딩해 비교하도록 변경.
    - 이 파일에서 바뀐 것은 위 한 곳뿐이며, 다른 함수는 손대지 않았다.
 6. unique_sheet_name : 시트명 충돌 방지
+10. [2.0.4] write_sav_bytes 의 '문자로 저장' 오판 수정
+   - 값이 전부 결측인 열을 문자열로 잘못 판정해 헛경고가 떴다.
+     실제로는 원본이 숫자형이면 그대로 숫자로 저장된다.
+   - 이미 숫자형이거나 전부 결측이면 손대지 않고 값 라벨도 유지한다.
+   - 일부만 숫자인 열은 나머지가 결측이 되므로 그 건수를 알려준다.
 9. [2.0.3] SPSS .sav 읽기 추가 (read_sav_combined)
    - load_df 가 .sav 를 받으면 값 라벨을 "1) 서울" 형태로 합쳐서 돌려준다.
      라벨만 쓰면 화면 정렬이 가나다순이 되어 코드 순서와 어긋나기 때문이다.
@@ -57,7 +62,7 @@ import collections
 # 이 파일이 진짜 utils.py 인지 호출부에서 확인하는 표식.
 # 파일 내용이 뒤섞이는 사고를 즉시 잡아낸다.
 MODULE_ROLE = "utils"
-__version__ = "2.0.3-sav"
+__version__ = "2.0.4-savfix"
 
 # 결측/공백을 나타내는 단일 토큰. 화면·엑셀·매칭 전부 이 값을 공유한다.
 NA_TOKEN = "(무응답)"
@@ -624,14 +629,35 @@ def write_sav_bytes(df, value_labels=None, column_labels=None):
     cl = {renamed.get(k, k): v for k, v in (column_labels or {}).items()
           if renamed.get(k, k) in out.columns}
 
-    # 값 라벨이 붙은 열은 숫자여야 SPSS 가 제대로 읽는다
+    # 값 라벨이 붙은 열은 숫자여야 SPSS 가 제대로 읽는다.
+    #
+    # [수정] 예전 판정은 "숫자로 바뀐 값이 하나도 없으면 문자열"이었는데,
+    # 값이 전부 결측인 열도 여기에 걸려서 "문자로 저장합니다" 라는 잘못된 경고가
+    # 떴다. 실제로는 원본이 숫자형이면 그대로 숫자로 저장된다.
+    # 이제 세 경우를 나눠서 본다.
+    #   ① 이미 숫자형        -> 손대지 않고 라벨 유지 (경고 없음)
+    #   ② 전부 결측          -> 숫자로 두고 라벨 유지 (경고 없음)
+    #   ③ 값이 있는데 하나도 숫자로 안 바뀜 -> 진짜 문자열. 라벨 포기 + 경고
+    # 일부만 숫자인 경우는 나머지가 결측이 되므로 그 사실을 알려준다.
     for c in list(vl):
-        conv = pd.to_numeric(out[c], errors='coerce')
-        if conv.notna().sum() == 0:
-            warns.append(f"`{c}` 는 값 라벨을 붙일 수 없어 문자로 저장합니다.")
-            vl.pop(c)
-        else:
+        col = out[c]
+        if pd.api.types.is_numeric_dtype(col):
+            continue
+        n_filled = int(col.notna().sum())
+        conv = pd.to_numeric(col, errors='coerce')
+        n_num = int(conv.notna().sum())
+        if n_filled == 0:
             out[c] = conv
+            continue
+        if n_num == 0:
+            warns.append(f"`{c}` 는 숫자가 아니라서 값 라벨 없이 문자로 저장합니다.")
+            vl.pop(c)
+            continue
+        if n_num < n_filled:
+            warns.append(
+                f"`{c}` 에서 숫자로 바꿀 수 없는 값 {n_filled - n_num:,}건은 "
+                "결측으로 저장됩니다.")
+        out[c] = conv
 
     with tempfile.TemporaryDirectory() as td:
         path = _os.path.join(td, "out.sav")

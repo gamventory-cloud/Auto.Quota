@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-SAV → 엑셀 변환 (v1.4)
+SAV → 엑셀 변환 (v1.5)
 
-SPSS .sav 파일을 업로드하면 4개 시트로 구성된 엑셀 파일을 내려받습니다.
+SPSS .sav 파일을 업로드하면 여러 시트로 구성된 엑셀 파일을 내려받습니다.
   · Raw        : 숫자 코드 그대로
   · Label      : 값 레이블로 치환 (레이블 없는 변수는 원래 값 유지)
   · Open       : 키 변수(NO, id) + 문자형(주관식) 변수
                  문자형 변수가 없어도 키 변수만으로 만든다
+  · Code       : DP 코드북 형식 (변수마다 문항 + 코드값/보기 블록)
   · 변수 가이드 : 변수명 + 변수 설명
 
 이 페이지는 utils.py 없이도 단독으로 동작합니다.
@@ -14,13 +15,14 @@ SPSS .sav 파일을 업로드하면 4개 시트로 구성된 엑셀 파일을 �
 
 import io
 import os
+import re
 import tempfile
 
 import numpy as np
 import pandas as pd
 import pyreadstat
 import streamlit as st
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 
 # ──────────────────────────────────────────────────────────────
 # 비밀번호 (utils.py 있으면 사용, 없으면 통과)
@@ -38,7 +40,7 @@ if not check_password():
     st.stop()
 
 st.title("📗 SAV → 엑셀 변환")
-st.caption("SPSS .sav 파일을 Raw / Label / 변수 가이드 3개 시트의 엑셀로 바꿔 드립니다.")
+st.caption("SPSS .sav 파일을 Raw / Label / Open / Code / 변수 가이드 시트의 엑셀로 바꿔 드립니다.")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -122,6 +124,60 @@ def build_open(df: pd.DataFrame, text_cols: list, key_cols: list) -> pd.DataFram
     return out
 
 
+# 코드북에서 변수명·문항 줄에 칠할 색
+CODE_HEAD_FILL = PatternFill("solid", fgColor="FCE4D6")
+
+
+def _code_str(v) -> str:
+    """값 라벨의 코드를 표시용 문자열로. 1.0 -> '1'"""
+    if isinstance(v, float) and float(v).is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _option_text(code_str: str, label) -> str:
+    """보기 문구에서 앞에 붙은 코드값을 뗀다.
+
+    SPSS 값 라벨은 '  1) 남성' 처럼 코드가 앞에 붙어 저장되는 경우가 많다.
+    코드값은 A열에 따로 들어가므로 중복이라 뗀다.
+    떼고 나면 아무것도 안 남는 경우(척도 중간값처럼 '  5)' 만 있는 경우)는
+    원문을 그대로 둔다. 빈 칸으로 보이면 누락처럼 읽히기 때문이다.
+    """
+    s = str(label).strip()
+    m = re.match(r"^" + re.escape(code_str) + r"\s*[)\.]\s*", s)
+    if m and s[m.end():].strip():
+        return s[m.end():].strip()
+    return s
+
+
+def build_codebook(df: pd.DataFrame, col_labels: dict,
+                   value_labels: dict, key_cols: list) -> pd.DataFrame:
+    """DP 코드북 형식. 변수마다 블록 하나.
+
+        q1        SQ1. 귀하의 성별은 무엇입니까?
+        코드값     보기
+        1         남성
+        2         여성
+        (빈 줄)
+        (빈 줄)
+
+    값 라벨이 없는 변수도 머리글까지는 넣고 코드 부분만 비운다.
+    키 변수(no, id)는 문항이 아니므로 제외한다.
+    """
+    rows = []
+    for c in df.columns:
+        if c in key_cols:
+            continue
+        rows.append([str(c), str(col_labels.get(c) or "").strip()])
+        rows.append(["코드값", "보기"])
+        for code, lab in sorted((value_labels.get(c) or {}).items()):
+            cs = _code_str(code)
+            rows.append([cs, _option_text(cs, lab)])
+        rows.append([None, None])
+        rows.append([None, None])
+    return pd.DataFrame(rows, columns=["변수", "내용"])
+
+
 def build_guide(df: pd.DataFrame, col_labels: dict) -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -132,12 +188,32 @@ def build_guide(df: pd.DataFrame, col_labels: dict) -> pd.DataFrame:
 
 
 def to_excel(sheets: dict) -> bytes:
-    """{시트명: DataFrame} → 엑셀 바이트. 헤더 굵게 + 첫 행 고정."""
+    """{시트명: DataFrame} → 엑셀 바이트."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for name, frame in sheets.items():
-            frame.to_excel(writer, sheet_name=name, index=False)
+            # Code 는 변수 블록이 이어지는 형태라 표 머리글이 없다.
+            is_code = name == "Code"
+            frame.to_excel(writer, sheet_name=name, index=False,
+                           header=not is_code)
             ws = writer.sheets[name]
+
+            if is_code:
+                ws.column_dimensions["A"].width = 14
+                ws.column_dimensions["B"].width = 90
+                # 변수명·문항 줄은 색을 채우고, '코드값' 줄은 굵게만.
+                # 블록이 이어지는 시트라 눈으로 경계를 찾을 수 있어야 한다.
+                for r in range(1, ws.max_row + 1):
+                    if ws.cell(row=r, column=1).value != "코드값":
+                        continue
+                    for c in (1, 2):
+                        ws.cell(row=r, column=c).font = Font(bold=True)
+                        if r > 1:
+                            head = ws.cell(row=r - 1, column=c)
+                            head.font = Font(bold=True)
+                            head.fill = CODE_HEAD_FILL
+                continue
+
             for cell in ws[1]:
                 cell.font = Font(bold=True)
             ws.freeze_panes = "A2"
@@ -184,7 +260,7 @@ if n_rows > 10_000:
 st.divider()
 
 st.subheader("담을 시트 고르기")
-s1, s2, s3, s4 = st.columns(4)
+s1, s2, s3, s4, s5 = st.columns(5)
 want_raw = s1.checkbox("Raw (숫자 코드)", value=True)
 want_label = s2.checkbox("Label (값 레이블)", value=True)
 want_open = s3.checkbox(
@@ -192,7 +268,13 @@ want_open = s3.checkbox(
     value=True,
     help="키 변수(" + ", ".join(key_cols) + ")와 문자형 변수를 담습니다.",
 )
-want_guide = s4.checkbox("변수 가이드", value=True)
+want_code = s4.checkbox(
+    "Code (코드북)",
+    value=True,
+    help="변수마다 문항과 코드값/보기를 블록으로 정리합니다. "
+         "키 변수(" + ", ".join(key_cols) + ")는 제외합니다.",
+)
+want_guide = s5.checkbox("변수 가이드", value=True)
 
 if want_open and not text_cols:
     st.info(
@@ -201,11 +283,11 @@ if want_open and not text_cols:
         + ")만 담깁니다. 주관식 응답을 옆에 붙여 코딩하실 때 쓰시면 됩니다."
     )
 
-if not (want_raw or want_label or want_open or want_guide):
+if not (want_raw or want_label or want_open or want_code or want_guide):
     st.warning("시트를 하나 이상 선택해주세요.")
     st.stop()
 
-# ── 시트 구성 (Raw → Label → Open → 변수 가이드) ──
+# ── 시트 구성 (Raw → Label → Open → Code → 변수 가이드) ──
 sheets = {}
 if want_raw:
     sheets["Raw"] = build_raw(df)
@@ -213,6 +295,8 @@ if want_label:
     sheets["Label"] = build_label(df, value_labels)
 if want_open:
     sheets["Open"] = build_open(df, text_cols, key_cols)
+if want_code:
+    sheets["Code"] = build_codebook(df, col_labels, value_labels, key_cols)
 if want_guide:
     sheets["변수 가이드"] = build_guide(df, col_labels)
 

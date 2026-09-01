@@ -101,7 +101,22 @@ v3 변경점 (추가 쿼터 100% 할당)
       "이번에 새로 생긴 값은 현재 분포로 채움 / 저장된 설정에만 있던 값은 없음"
     - 복원 대상 : 메인 사용 여부·방식·행열 변수·셀별 목표,
       추가 쿼터 그룹별 방식·변수·목표, 실행 옵션 일부
-26. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+26. SPSS .sav 업로드 지원
+    - 값 라벨을 "1) 서울" 형태로 합쳐서 읽는다 (utils.read_sav_combined).
+      라벨만 쓰면 화면 정렬이 가나다순이 되어 코드 순서와 어긋난다.
+      예: 1서울 2부산 3대구 -> 광주, 대구, 부산, 서울 ... 로 뒤섞임.
+      코드를 앞에 붙이면 natural_key 가 숫자를 먼저 보므로 순서가 유지된다.
+    - 값 라벨이 없는 변수는 원래 값 그대로 둔다.
+    - pyreadstat 필요 (requirements.txt 에 추가).
+27. 결과를 SPSS(.sav) 로도 받을 수 있게 함
+    - "1) 서울" 로 읽어들인 값을 코드(1)로 되돌리고 값 라벨을 다시 입혀 저장한다.
+      그대로 저장하면 SPSS 에서 문자열 변수가 되어 납품에 쓸 수 없다.
+    - 값 라벨·변수 라벨이 원본과 동일하게 복원되는 것을 왕복 테스트로 확인했다.
+    - .sav 에는 시트가 없으므로 선정자 데이터만 담는다. 부족 분석·지시서 등은
+      엑셀 파일에만 들어간다.
+    - 엑셀/CSV 를 올린 경우엔 값 라벨 정보가 없어 값 그대로 저장되며,
+      한글 컬럼명은 SPSS 변수명 규칙에 맞게 바꾸고 무엇이 바뀌었는지 알려준다.
+28. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
@@ -432,10 +447,15 @@ def warn_bad(bad_labels, where):
 # 1. 데이터 업로드
 # ==============================================================================
 st.subheader("1. 데이터 업로드")
-data_file = st.file_uploader("설문 데이터", type=['csv', 'xlsx'], key="quota_up")
+data_file = st.file_uploader("설문 데이터", type=['csv', 'xlsx', 'sav'],
+                             key="quota_up",
+                             help="SPSS(.sav) 는 값 라벨을 \"1) 서울\" 형태로 읽습니다. "
+                                  "코드 번호가 앞에 붙어야 화면과 쿼터표의 값 순서가 "
+                                  "코드 순서대로 유지됩니다.")
 
 if data_file:
-    df_survey = utils.load_df(data_file)
+    df_survey, _sav_meta = utils.load_df(data_file, with_meta=True)
+    SAV_META = utils.sav_meta_dict(_sav_meta)     # 결과를 .sav 로 되돌릴 때 쓴다
 
     # [수정] load_df 는 실패 시 None 을 반환한다. 곧바로 len() 하면 TypeError.
     if df_survey is None:
@@ -448,6 +468,11 @@ if data_file:
         df_survey = df_survey.reset_index(drop=True)
 
     st.success(f"로드 완료: {len(df_survey)}명")
+    if str(getattr(data_file, "name", "")).lower().endswith(".sav"):
+        st.caption(
+            "SPSS 파일이라 값 라벨을 `1) 서울` 형태로 읽었습니다. "
+            "코드 번호가 앞에 붙어 있어야 값이 코드 순서대로 정렬됩니다. "
+            "결과 엑셀에도 이 형태로 저장됩니다.")
 
     # ── 저장된 쿼터 설정 찾기 ────────────────────────────────────────────
     _slug = _preset_slug(getattr(data_file, "name", "data"))
@@ -1353,10 +1378,52 @@ if data_file:
             st.info(f"💾 총 **{total_rows:,}명** "
                     f"(통과 {pass_rows:,}명 + 제외 {total_rows - pass_rows:,}명) 저장 완료")
 
-            st.download_button(
-                "📥 결과 파일 다운로드" if not is_fail else "⚠️ 실패한 결과라도 다운로드",
-                out.getvalue(), "result.xlsx", type="primary", use_container_width=True
+            dl1, dl2 = st.columns(2)
+            dl1.download_button(
+                "📥 엑셀로 받기" if not is_fail else "⚠️ 실패한 결과라도 받기 (엑셀)",
+                out.getvalue(), "result.xlsx", type="primary",
+                use_container_width=True
             )
+
+            # ── SPSS 저장 ────────────────────────────────────────────────
+            #  원본이 .sav 였다면 "1) 서울" 로 읽어들인 값을 코드(1)로 되돌리고
+            #  값 라벨을 다시 입혀서 저장한다. 그래야 SPSS 에서 열었을 때
+            #  문자열이 아니라 원래대로 코드+라벨이 된다.
+            try:
+                _sav_src = df_pass.drop(columns=["Chk"], errors="ignore")
+                _sav_df, _miss = utils.sav_restore_codes(
+                    _sav_src, SAV_META.get("value_labels"))
+                _sav_bytes, _renamed, _warns = utils.write_sav_bytes(
+                    _sav_df, SAV_META.get("value_labels"),
+                    SAV_META.get("column_labels"))
+                dl2.download_button(
+                    "📥 SPSS(.sav) 로 받기 — 선정자만",
+                    _sav_bytes, "result.sav", use_container_width=True,
+                    help="통과한 응답자만 담깁니다. 분석 시트는 .sav 에 넣을 수 "
+                         "없으므로 엑셀 파일을 함께 받아 두세요.")
+                _notes = []
+                if not SAV_META.get("value_labels"):
+                    _notes.append(
+                        "원본이 SPSS 파일이 아니라 값 라벨 정보가 없습니다. "
+                        "값이 있는 그대로 저장됩니다.")
+                if _miss:
+                    _notes.append(
+                        "코드로 되돌리지 못한 값이 있습니다 — "
+                        + ", ".join(f"{k} {v:,}건" for k, v in list(_miss.items())[:5]))
+                if _renamed:
+                    _notes.append(
+                        f"SPSS 변수명 규칙에 맞춰 {len(_renamed)}개 컬럼 이름을 "
+                        "바꿨습니다: "
+                        + ", ".join(f"{a}→{b}" for a, b in list(_renamed.items())[:5]))
+                _notes += _warns
+                if _notes:
+                    with dl2.popover("SPSS 저장 참고사항"):
+                        for _n in _notes:
+                            st.caption("• " + _n)
+            except ImportError:
+                dl2.caption("SPSS 저장에는 `pyreadstat` 이 필요합니다.")
+            except Exception as _se:                          # noqa: BLE001
+                dl2.warning(f"SPSS 저장 실패 — {type(_se).__name__}: {_se}")
 
             rate = (g_best_cnt / target_total * 100) if target_total else 0.0   # 0 나누기 가드
             c1, c2, c3 = st.columns(3)
