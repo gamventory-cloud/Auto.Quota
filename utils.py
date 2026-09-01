@@ -33,6 +33,11 @@ utils.py — 쿼터 솔루션 공용 모듈
      앱 전체가 죽었다. 양쪽을 utf-8 bytes 로 인코딩해 비교하도록 변경.
    - 이 파일에서 바뀐 것은 위 한 곳뿐이며, 다른 함수는 손대지 않았다.
 6. unique_sheet_name : 시트명 충돌 방지
+9. [2.0.3] SPSS .sav 읽기 추가 (read_sav_combined)
+   - load_df 가 .sav 를 받으면 값 라벨을 "1) 서울" 형태로 합쳐서 돌려준다.
+     라벨만 쓰면 화면 정렬이 가나다순이 되어 코드 순서와 어긋나기 때문이다.
+   - mode="label" / "code" 로 다른 방식도 쓸 수 있다.
+   - pyreadstat 은 파일 경로만 받으므로 임시 폴더를 거친다.
 8. [2.0.2] RESERVED_SHEETS 에 Run_Info / Recruit_Plan 추가
    - 화면 쪽에서 재현성 기록 시트(Run_Info)와 추가 수집 지시서 시트
      (Recruit_Plan)를 새로 쓴다. 추가 쿼터 그룹 이름이 우연히 이 둘과 같아지면
@@ -52,7 +57,7 @@ import collections
 # 이 파일이 진짜 utils.py 인지 호출부에서 확인하는 표식.
 # 파일 내용이 뒤섞이는 사고를 즉시 잡아낸다.
 MODULE_ROLE = "utils"
-__version__ = "2.0.2-sheets"
+__version__ = "2.0.3-sav"
 
 # 결측/공백을 나타내는 단일 토큰. 화면·엑셀·매칭 전부 이 값을 공유한다.
 NA_TOKEN = "(무응답)"
@@ -199,32 +204,94 @@ def natural_key(string_):
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', target)]
 
 
-def load_df(file):
+def read_sav_combined(file, mode="combined"):
+    """
+    SPSS .sav 를 읽는다.
+
+    mode
+      "combined" (기본) : 값 라벨이 있는 변수를 "1) 서울" 형태로 만든다.
+          라벨만 쓰면(=apply_value_formats) 화면 정렬이 가나다순이 되어
+          코드 순서와 어긋난다. 예: 1서울 2부산 3대구 -> 광주,대구,부산,서울...
+          앞에 코드를 붙이면 natural_key 가 숫자를 먼저 보므로 코드 순서가 유지되고
+          라벨도 그대로 읽힌다.
+      "label" : 라벨만 ("서울")
+      "code"  : 코드만 (1, 2, 3)
+
+    pyreadstat 은 파일 경로만 받으므로 업로드된 바이트를 임시 폴더에 풀어서 읽는다.
+    (Windows 에서는 NamedTemporaryFile 을 열어둔 채 다시 열 수 없어 폴더를 쓴다)
+    """
+    import tempfile
+    import os as _os
+    try:
+        import pyreadstat
+    except ImportError as e:
+        raise ImportError("SPSS(.sav) 를 읽으려면 pyreadstat 이 필요합니다. "
+                          "pip install pyreadstat") from e
+
+    raw = file.read() if hasattr(file, "read") else open(file, "rb").read()
+    with tempfile.TemporaryDirectory() as td:
+        path = _os.path.join(td, "upload.sav")
+        with open(path, "wb") as f:
+            f.write(raw)
+        if mode == "label":
+            df, meta = pyreadstat.read_sav(path, apply_value_formats=True)
+            return df, meta
+        df, meta = pyreadstat.read_sav(path, apply_value_formats=False)
+
+    if mode == "code":
+        return df, meta
+
+    vlabels = getattr(meta, "variable_value_labels", None) or {}
+    for col, vmap in vlabels.items():
+        if col not in df.columns:
+            continue
+        conv = {}
+        for code, lab in vmap.items():
+            c = int(code) if isinstance(code, float) and float(code).is_integer() else code
+            conv[code] = f"{c}) {lab}"
+        df[col] = df[col].map(lambda v: conv.get(v, v))
+    return df, meta
+
+
+def load_df(file, with_meta=False):
     """
     실패 시 None 을 반환한다. 호출부는 반드시 None 을 검사할 것.
       df = utils.load_df(f)
       if df is None: st.stop()
+
+    .sav 는 값 라벨을 "1) 서울" 형태로 합쳐서 읽는다 (read_sav_combined 참고).
+
+    with_meta=True 면 (df, meta) 를 돌려준다. .sav 가 아니면 meta 는 None.
+    결과를 다시 .sav 로 내보낼 때 값 라벨을 복원하려면 meta 가 필요하다.
     """
     if file is None:
-        return None
+        return (None, None) if with_meta else None
     try:
+        if str(getattr(file, "name", file)).lower().endswith('.sav'):
+            df, _meta = read_sav_combined(file, mode="combined")
+            return (df, _meta) if with_meta else df
         if file.name.lower().endswith('.csv'):
             raw = file.read()
             enc = chardet.detect(raw)['encoding'] or 'utf-8'
+            out = None
             try:
-                return pd.read_csv(io.BytesIO(raw), encoding=enc)
+                out = pd.read_csv(io.BytesIO(raw), encoding=enc)
             except UnicodeDecodeError:
                 # chardet 오탐 대비 국내 인코딩 폴백
                 for fb in ('utf-8-sig', 'cp949', 'euc-kr'):
                     try:
-                        return pd.read_csv(io.BytesIO(raw), encoding=fb)
+                        out = pd.read_csv(io.BytesIO(raw), encoding=fb)
+                        break
                     except UnicodeDecodeError:
                         continue
-                raise
-        return pd.read_excel(file)
+                if out is None:
+                    raise
+            return (out, None) if with_meta else out
+        out = pd.read_excel(file)
+        return (out, None) if with_meta else out
     except Exception as e:
         st.error(f"파일 로드 실패: {type(e).__name__}: {e}")
-        return None
+        return (None, None) if with_meta else None
 
 
 # Run_Info      : 실행 설정·시각을 남기는 재현성 기록 시트
@@ -458,3 +525,120 @@ def simulation_worker(seed, num_iters, indices, scarcity_scores, m_keys, ex_keys
                 break
 
     return best_cnt, best_idxs
+
+
+def sav_meta_dict(meta):
+    """write_sav 에 필요한 정보만 추려 담는다. meta 가 없으면 빈 dict."""
+    if meta is None:
+        return {}
+    return {
+        "value_labels": dict(getattr(meta, "variable_value_labels", None) or {}),
+        "column_labels": dict(getattr(meta, "column_names_to_labels", None) or {}),
+    }
+
+
+def sav_restore_codes(df, value_labels):
+    """
+    "1) 서울" 형태로 읽어들인 값을 원래 코드(1)로 되돌린다.
+
+    read_sav_combined 가 만든 문자열을 정확히 역으로 매핑한다.
+    되돌릴 수 없는 값(직접 입력했거나 라벨이 없던 값)은 그대로 둔다.
+    반환: (되돌린 DataFrame, 컬럼별 되돌리지 못한 값 수)
+    """
+    out = df.copy()
+    misses = {}
+    for col, vmap in (value_labels or {}).items():
+        if col not in out.columns:
+            continue
+        rev = {}
+        for code, lab in vmap.items():
+            c = int(code) if isinstance(code, float) and float(code).is_integer() else code
+            rev[f"{c}) {lab}"] = code
+        col_s = out[col]
+        n_miss = 0
+
+        def _back(v, _rev=rev):
+            nonlocal n_miss
+            if pd.isna(v):
+                return v
+            if v in _rev:
+                return _rev[v]
+            n_miss += 1
+            return v
+
+        out[col] = col_s.map(_back)
+        if n_miss:
+            misses[col] = n_miss
+    return out, misses
+
+
+def sav_safe_columns(df):
+    """
+    SPSS 변수명 규칙에 맞게 컬럼명을 손본다.
+      - 영문/숫자/밑줄만 남기고, 숫자로 시작하면 V 를 붙인다
+      - 64바이트 제한, 선행 밑줄 금지
+      - 한글 등으로 이름이 통째로 사라지면 VAR1, VAR2 로 대체
+    반환: (이름 바꾼 DataFrame, {원래이름: 새이름} 중 바뀐 것만)
+    """
+    used, mapping = set(), {}
+    for i, c in enumerate(df.columns, start=1):
+        name = str(c)
+        new = re.sub(r'[^0-9A-Za-z_]', '_', name).strip('_')
+        new = re.sub(r'__+', '_', new)
+        if not new or not re.match(r'^[A-Za-z]', new):
+            new = ("V" + new) if new else f"VAR{i}"
+        while len(new.encode('utf-8')) > 60:
+            new = new[:-1]
+        base, k = new, 2
+        while new.upper() in used:
+            new = f"{base[:57]}_{k}"
+            k += 1
+        used.add(new.upper())
+        if new != name:
+            mapping[name] = new
+    out = df.rename(columns=mapping) if mapping else df
+    return out, mapping
+
+
+def write_sav_bytes(df, value_labels=None, column_labels=None):
+    """
+    DataFrame 을 .sav 바이트로 만든다.
+
+    value_labels 를 주면 코드값과 값 라벨이 함께 저장되어, SPSS 에서 열었을 때
+    원본과 같은 형태가 된다. (문자열 "1) 서울" 로 저장되는 것을 막는다)
+    반환: (bytes, 이름이 바뀐 컬럼 dict, 경고 메시지 리스트)
+    """
+    import tempfile
+    import os as _os
+    try:
+        import pyreadstat
+    except ImportError as e:
+        raise ImportError("SPSS(.sav) 로 저장하려면 pyreadstat 이 필요합니다. "
+                          "pip install pyreadstat") from e
+
+    warns = []
+    out, renamed = sav_safe_columns(df)
+
+    vl = {renamed.get(k, k): v for k, v in (value_labels or {}).items()
+          if renamed.get(k, k) in out.columns}
+    cl = {renamed.get(k, k): v for k, v in (column_labels or {}).items()
+          if renamed.get(k, k) in out.columns}
+
+    # 값 라벨이 붙은 열은 숫자여야 SPSS 가 제대로 읽는다
+    for c in list(vl):
+        conv = pd.to_numeric(out[c], errors='coerce')
+        if conv.notna().sum() == 0:
+            warns.append(f"`{c}` 는 값 라벨을 붙일 수 없어 문자로 저장합니다.")
+            vl.pop(c)
+        else:
+            out[c] = conv
+
+    with tempfile.TemporaryDirectory() as td:
+        path = _os.path.join(td, "out.sav")
+        pyreadstat.write_sav(out, path,
+                             variable_value_labels=vl or None,
+                             column_labels=[cl.get(c, "") for c in out.columns]
+                             if cl else None)
+        with open(path, "rb") as f:
+            data = f.read()
+    return data, renamed, warns

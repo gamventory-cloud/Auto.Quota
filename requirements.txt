@@ -1,22 +1,23 @@
 streamlit
 altair
-beautifulsoup4>=4.12    # pyhwpê°€ ë‚´ë†“ëŠ” XHTML íŒŒì‹±
+beautifulsoup4>=4.12    # pyhwp°¡ ³»³õ´Â XHTML ÆÄ½Ì
 chardet
 joblib
-lxml>=5.0               # ìœ„ íŒŒì„œ ë°±ì—”ë“œ / .hwpx XML
+lxml>=5.0               # À§ ÆÄ¼­ ¹é¿£µå / .hwpx XML
 olefile>=0.47
 openpyxl
 openpyxl>=3.1
 ortools
 pandas
-pdfplumber>=0.11       # í‘œ ë§Žì€ PDF ëŒ€ë¹„ í´ë°±
-pyhwp>=0.1b15           # .hwp (HWP 5.x) ì½ê¸°
-pypdf>=5.0             # ì›ë³¸ PDF í…ìŠ¤íŠ¸ ì½ê¸° (ëˆ„ë½ ê²€ì¦)
+pdfplumber>=0.11       # Ç¥ ¸¹Àº PDF ´ëºñ Æú¹é
+pyhwp>=0.1b15           # .hwp (HWP 5.x) ÀÐ±â
+pypdf>=5.0             # ¿øº» PDF ÅØ½ºÆ® ÀÐ±â (´©¶ô °ËÁõ)
 pyreadstat
 pyreadstat>=1.2
 python-docx
 python-docx>=1.1
-python-docx>=1.1.0      # ì›Œë“œ ë¬¸ì„œ ìƒì„±
+python-docx>=1.1.0      # ¿öµå ¹®¼­ »ý¼º
 streamlit>=1.36
 xlrd
 XlsxWriter
+numpy
