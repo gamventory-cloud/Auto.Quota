@@ -203,12 +203,22 @@ def to_excel(sheets: dict) -> bytes:
                 ws.column_dimensions["B"].width = 90
                 # 변수명·문항 줄은 색을 채우고, '코드값' 줄은 굵게만.
                 # 블록이 이어지는 시트라 눈으로 경계를 찾을 수 있어야 한다.
+                #
+                # 행 전체를 칠하려면 RowDimension 에 서식을 건다.
+                # customFormat="1" 로 저장되는데, 엑셀에서 행 머리글을 눌러
+                # 색을 칠했을 때와 같은 방식이라 오른쪽 끝까지 칠해진다.
+                # 값이 든 칸(A·B)에도 따로 지정한다. 일부 뷰어가
+                # 행 서식을 무시하고 셀 서식만 보기 때문이다.
                 for r in range(1, ws.max_row + 1):
                     if ws.cell(row=r, column=1).value != "코드값":
                         continue
                     for c in (1, 2):
                         ws.cell(row=r, column=c).font = Font(bold=True)
-                        if r > 1:
+                    if r > 1:
+                        rd = ws.row_dimensions[r - 1]
+                        rd.fill = CODE_HEAD_FILL
+                        rd.font = Font(bold=True)
+                        for c in (1, 2):
                             head = ws.cell(row=r - 1, column=c)
                             head.font = Font(bold=True)
                             head.fill = CODE_HEAD_FILL
