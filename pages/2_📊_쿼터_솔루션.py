@@ -116,7 +116,16 @@ v3 변경점 (추가 쿼터 100% 할당)
       엑셀 파일에만 들어간다.
     - 엑셀/CSV 를 올린 경우엔 값 라벨 정보가 없어 값 그대로 저장되며,
       한글 컬럼명은 SPSS 변수명 규칙에 맞게 바꾸고 무엇이 바뀌었는지 알려준다.
-28. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+28. [프리셋 보완] 메인 쿼터 미사용 시의 '전체 목표' 도 저장/복원
+    - 저장 대상이 아니어서 불러온 뒤 매번 1000 에서 다시 입력해야 했다.
+    - 고정 key("QS_total_only") 를 붙여 리런 중에도 값이 유지되게 했다.
+29. [프리셋 버그] 불러오기가 일부 위젯에 안 먹던 문제
+    - key 가 붙은 위젯(ms{i}, ed{i}, ex_mode_{i} 등)은 session_state 값이
+      default/index 보다 우선한다. 그래서 한 번이라도 만진 뒤 프리셋을
+      불러오면 이전 값이 그대로 남아 "불러왔는데 안 바뀐다" 가 됐다.
+    - 프리셋 적용/해제/업로드 시 _reset_widget_state() 로 해당 키만 지운다.
+      ("이름 + 숫자" 형태만 정규식으로 정확히 집는다)
+30. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
@@ -251,6 +260,22 @@ def preset_list_local():
         except Exception:                                     # noqa: BLE001
             continue
     return out
+
+
+def _reset_widget_state():
+    """
+    프리셋을 적용/해제할 때 입력 위젯의 저장된 상태를 지운다.
+
+    key 가 붙은 위젯은 st.session_state 값이 default/index 보다 우선한다.
+    그래서 지우지 않으면 프리셋을 불러와도 이전에 만졌던 값이 그대로 남아
+    "불러왔는데 안 바뀐다" 가 된다.
+    """
+    # 접두사만 보면 msg_xxx, edit_xxx 처럼 무관한 키까지 걸리므로
+    # "이름 + 숫자" 형태만 정확히 집는다.
+    pat = _re.compile(r'^(ms|ed|ex_mode_|ex_rv_|ex_cv_|ex_ed_grid_)\d+$')
+    for k in [k for k in list(st.session_state)
+              if k == "QS_total_only" or pat.match(k)]:
+        st.session_state.pop(k, None)
 
 
 def preset_get(key, default=None):
@@ -494,6 +519,7 @@ if data_file:
                 "아래 표에 이전 목표가 채워져 있습니다.")
             if st.button("↩️ 적용 취소하고 새로 설정", key="QS_clear"):
                 st.session_state.pop("QS_preset", None)
+                _reset_widget_state()
                 st.rerun()
         elif _found:
             st.info(
@@ -503,6 +529,7 @@ if data_file:
                 f"{len(_found.get('extras',[])):,}개).")
             if st.button("📥 이 설정 불러오기", key="QS_load", type="primary"):
                 st.session_state["QS_preset"] = _found
+                _reset_widget_state()
                 st.rerun()
         else:
             st.caption(
@@ -517,6 +544,7 @@ if data_file:
             try:
                 st.session_state["QS_preset"] = json.loads(
                     up.getvalue().decode("utf-8"))
+                _reset_widget_state()
                 st.rerun()
             except Exception as _je:                          # noqa: BLE001
                 st.error(f"설정 파일을 읽지 못했습니다 — {type(_je).__name__}: {_je}")
@@ -617,7 +645,17 @@ if data_file:
                         warn_bad(bad, "메인 쿼터")
                         st.caption(f"쿼터 셀 {len(main_map)}개 / 목표 합계 {sum(main_map.values()):,}명")
     else:
-        main_map = {('All',): st.number_input("전체 목표", 1, 1000000, 1000)}
+        # 메인 쿼터를 쓰지 않을 때의 총 목표 인원.
+        # key 를 주지 않으면 값이 리런마다 흔들릴 수 있어 고정 key 를 붙인다.
+        _p_total = preset_get("main.total")
+        try:
+            _p_total = int(_p_total) if _p_total else 1000
+        except (TypeError, ValueError):
+            _p_total = 1000
+        main_map = {('All',): st.number_input(
+            "전체 목표", 1, 1000000, max(1, _p_total), key="QS_total_only",
+            help="메인 쿼터를 쓰지 않을 때 뽑을 총 인원입니다. "
+                 "설정을 저장하면 이 값도 함께 저장됩니다.")}
         algo_main_cols = []
 
     # --------------------------------------------------------------------------
@@ -951,6 +989,8 @@ if data_file:
             "rv": rv if (use_main and q_mode == "화면 설계") else [],
             "cv": cv if (use_main and q_mode == "화면 설계" and cv != "(선택)") else None,
             "cols": list(algo_main_cols),
+            "total": (int(list(main_map.values())[0])
+                      if (not use_main and main_map) else None),
             "targets": {_enc_key(k): int(v) for k, v in main_map.items()},
         }
         _extras_state = []
