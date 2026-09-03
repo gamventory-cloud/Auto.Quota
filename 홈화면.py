@@ -229,6 +229,21 @@ st.markdown(_html("""
         <span class="qm-chip out">Open · 변수 가이드</span>
       </div>
     </div>
+    <div class="qm-card">
+      <div class="qm-stage">집계</div>
+      <h2 class="qm-name">뱅크표 생성</h2>
+      <p class="qm-desc">
+        SAV 파일에서 배너와 행 변수를 골라 뱅크표를 만듭니다.<br>
+        사례수·세로%·다중응답·평균까지 계산하고, 기존 <code>Table</code>
+        신택스가 있으면 정의된 표를 한 번에 뽑습니다.
+      </p>
+      <div class="qm-io">
+        <span class="qm-chip">SPSS .sav</span>
+        <span class="qm-chip">신택스 .sps (선택)</span>
+        <span class="qm-io-arrow">&rarr;</span>
+        <span class="qm-chip out">뱅크표 .xlsx</span>
+      </div>
+    </div>
   </div>
   <div class="qm-foot">
     지인들만 사용하는 비공개 도구입니다.
@@ -246,10 +261,14 @@ st.markdown(_html("""
 # ==============================================================================
 UPDATES = [
     ("2026-09-02", [
+        ("뱅크표 생성", "새로 만들었습니다. SAV 파일에서 배너와 행 변수를 "
+                      "직접 골라 뱅크표를 만듭니다. 단일응답·다중응답·연속형"
+                      "(평균·중위값·최소·최대)을 지원하고, 여러 변수를 하나의 "
+                      "다중응답 배너로 묶을 수 있습니다. Table 매크로 신택스를 "
+                      "올리면 정의된 표를 한 번에 계산합니다."),
         ("쿼터 솔루션", "설정 저장 오류 수정 "),
         ("Sav → Excel", "주관식 엑셀 데이터 매칭 추가 "),
-    ]),
-    ("2026-09-01", [
+    ]),    ("2026-09-01", [
         ("Sav → Excel", "코드북(Code) 시트를 추가했습니다. 변수마다 문항과 "
                         "코드값·보기를 블록으로 정리하고, 변수명 줄은 색으로 "
                         "구분해 블록 경계가 보이게 했습니다."),
