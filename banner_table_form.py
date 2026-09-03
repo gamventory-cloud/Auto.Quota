@@ -28,6 +28,7 @@ from banner_table_engine import (
     build_battery_block,
     build_block,
     expand_var_range,
+    is_category_coded_set,
     parse_summary_spec,
     title_with_marker,
     value_breakdown_size,
@@ -954,17 +955,12 @@ def _numeric_suffix_family(columns: list[str]) -> dict[str, list[str]]:
 
 
 def _is_category_coded_set(df: pd.DataFrame, members: list[str]) -> bool:
-    """다중응답(카테고리 코딩)인지 — 변수마다 '자기 코드값' 하나만 갖는지.
+    """다중응답(카테고리 코딩) 판정. 엔진의 함수를 그대로 쓴다.
 
-    같은 값 라벨을 쓰는 묶음이라도, 각 변수가 보기 전체 범위를 값으로 가지면
-    다중응답이 아니라 **평가 배터리**(문항마다 5점 척도 등)다. 그때는 변수
-    하나하나가 별개의 단수 문항이므로 묶지 않는다.
+    빈도표에서도 같은 판정을 쓰므로 한 곳에 두었다 — 두 군데가 다르게
+    판정하면 같은 데이터인데 결과가 달라진다.
     """
-    for i, v in enumerate(members, start=1):
-        vals = df[v].dropna().unique().tolist()
-        if len(vals) != 1 or float(vals[0]) != float(i):
-            return False
-    return True
+    return is_category_coded_set(df, members)
 
 
 # 리커트 척도로 보이는 보기 라벨에 흔히 나오는 말

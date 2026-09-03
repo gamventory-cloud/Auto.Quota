@@ -1796,6 +1796,10 @@ def _styles():
         "center": Alignment(horizontal="center", vertical="center", wrap_text=True),
         "left": Alignment(horizontal="left", vertical="center", wrap_text=True),
         "right": Alignment(horizontal="right", vertical="center"),
+        # 줄바꿈 없는 것 — 빈도표와 목차에서 씁니다. 자동 줄바꿈이 걸리면
+        # 보기 글이 길 때 행 높이가 들쭉날쭉해져서 훑어보기 어렵습니다.
+        "center_nw": Alignment(horizontal="center", vertical="center"),
+        "left_nw": Alignment(horizontal="left", vertical="center"),
         "Border": Border,
     }
 
@@ -2095,6 +2099,117 @@ def write_tables_xlsx(results: list[TableResult], *,
 FREQ_TEXT_LIMIT = 30        # 문자/무라벨 변수의 고유값이 이보다 많으면 줄여서 본다
 
 
+# ── 다중응답(카테고리 코딩) 판정 ───────────────────────────────────────
+# 엑셀 양식의 자동 채우기와 빈도표가 **같은 기준**으로 판정해야 합니다.
+# 한쪽은 묶고 한쪽은 안 묶으면 같은 데이터인데 결과가 달라집니다.
+
+def is_category_coded_set(df: pd.DataFrame, members: list[str]) -> bool:
+    """다중응답(카테고리 코딩)인지 — 변수마다 '자기 코드값' 하나만 갖는지.
+
+    같은 값 라벨을 쓰는 묶음이라도, 각 변수가 보기 전체 범위를 값으로 가지면
+    다중응답이 아니라 **평가 배터리**(문항마다 5점 척도 등)다. 그때는 변수
+    하나하나가 별개의 단수 문항이므로 묶지 않는다.
+
+    코드가 1부터 차례로 붙지 않은 묶음도 있어서, '변수마다 값이 하나뿐이고
+    서로 다르다' 까지만 확인한다.
+    """
+    if len(members) < 2:
+        return False
+    seen: set[float] = set()
+    for v in members:
+        vals = df[v].dropna().unique().tolist()
+        if len(vals) != 1:
+            return False
+        try:
+            code = float(vals[0])
+        except (TypeError, ValueError):
+            return False
+        if code in seen:
+            return False
+        seen.add(code)
+    return True
+
+
+def is_mention_coded_set(df: pd.DataFrame, members: list[str],
+                         n_options: int) -> bool:
+    """다중응답 '언급 순서' 코딩인지 — 변수마다 어떤 코드든 올 수 있는 형태.
+
+    'Q1_1' 에 1순위 코드, 'Q1_2' 에 2순위 코드가 들어가는 방식이다.
+    대각 코딩과 달리 변수 하나가 보기 전체 범위를 값으로 갖는다.
+
+    평가 배터리와 구별하는 결정적인 신호는 **한 응답자가 같은 값을 두 번
+    갖지 않는다**는 것이다. 5점 척도 배터리는 4점을 두 문항에 주는 사람이
+    반드시 나오지만, 복수응답에서 같은 보기를 두 번 고르는 일은 없다.
+    """
+    if len(members) < 2 or n_options < len(members):
+        return False
+    sub = df[members]
+    # 변수마다 값이 하나뿐이면 대각 코딩이므로 여기서 볼 것이 아니다
+    if all(int(sub[v].dropna().nunique()) <= 1 for v in members):
+        return False
+    # 한 줄 안에서 값이 겹치는 응답자가 하나라도 있으면 복수응답이 아니다
+    filled = sub.notna().sum(axis=1)
+    distinct = sub.apply(lambda r: r.dropna().nunique(), axis=1)
+    live = filled > 0
+    if not live.any():
+        return False
+    return bool((filled[live] == distinct[live]).all())
+
+
+_MA_NAME = re.compile(r"^(.+)[_\-](\d+)$")
+
+
+def group_ma_sets(df: pd.DataFrame, meta, variables: list[str]):
+    """고른 변수들 중 다중응답 묶음을 찾는다.
+
+    돌려주는 것: [(묶음이름, [변수들], 코딩방식) 또는 (None, [변수하나], ''), …]
+    — 고른 순서를 지키되 묶인 것은 첫 변수 자리에 한 번만 나온다.
+
+    묶는 조건은 세 가지다.
+      1. 이름이 'X_1','X_2' 처럼 **맨 뒤 번호**로 짝지어진다.
+         'Q1_1_1'~'Q1_1_3' 은 'Q1_1' 로, 'Q1_2_1'~'Q1_2_3' 은 'Q1_2' 로
+         갈라지므로 문항 안에 문항이 있는 구조도 제대로 나뉜다.
+      2. 값 라벨이 서로 같다.
+      3. 코딩이 **대각**이거나 **언급 순서**다 (아래 두 판정 함수).
+
+    이름 규칙만으로 묶으면 'Q1','Q2' 같은 별개 문항이 엮이고, 5점 척도
+    배터리도 복수응답으로 오해하므로 데이터 모양까지 본다.
+    """
+    value_labels = meta.variable_value_labels
+    picked = [v for v in variables if v in df.columns]
+
+    by_stem: dict[str, list[str]] = {}
+    for v in picked:
+        m = _MA_NAME.match(v)
+        if m:
+            by_stem.setdefault(m.group(1), []).append(v)
+
+    sets: dict[str, tuple[list[str], str]] = {}
+    for stem, members in by_stem.items():
+        if len(members) < 2:
+            continue
+        labels = [tuple(sorted(value_labels.get(v, {}).items())) for v in members]
+        if len(set(labels)) != 1 or not labels[0]:
+            continue                   # 값 라벨이 서로 다르거나 없으면 안 묶는다
+        if is_category_coded_set(df, members):
+            sets[stem] = (members, "대각")
+        elif is_mention_coded_set(df, members, len(labels[0])):
+            sets[stem] = (members, "언급순서")
+        # 둘 다 아니면 평가 배터리 → 각각 단수로 둔다
+
+    in_set = {v: stem for stem, (members, _) in sets.items() for v in members}
+    out, done = [], set()
+    for v in picked:
+        stem = in_set.get(v)
+        if stem is None:
+            out.append((None, [v], ""))
+        elif stem not in done:
+            done.add(stem)
+            members, style = sets[stem]
+            out.append((stem, members, style))
+    return out
+
+
 @dataclass
 class FreqRow:
     """빈도표 한 줄."""
@@ -2103,12 +2218,12 @@ class FreqRow:
     pct: float                      # 전체(결측 포함) 대비
     valid_pct: float | None         # 유효 응답 대비 (결측 줄은 None)
     cum_pct: float | None           # 유효퍼센트의 누적
-    kind: str = "value"             # 'value' | 'undefined' | 'missing' | 'total'
+    kind: str = "value"             # 'value' | 'undefined' | 'missing' | 'total' | 'cases'
 
 
 @dataclass
 class FreqTable:
-    """변수 하나의 빈도표."""
+    """변수 하나(또는 다중응답 묶음 하나)의 빈도표."""
     var: str
     label: str                      # 변수 라벨 (문항 문구). 없으면 변수명
     rows: list[FreqRow]
@@ -2117,10 +2232,31 @@ class FreqTable:
     missing_n: int
     stats: dict | None = None       # 값 라벨 없는 숫자 변수의 요약
     notes: list[str] = field(default_factory=list)
+    table_kind: str = "single"      # 'single' | 'multi'
+    members: list[str] = field(default_factory=list)   # 다중응답 묶음의 변수들
+    response_n: int = 0             # 다중응답의 총 응답 수
+    ma_style: str = ""              # '대각' | '언급순서'
 
     @property
     def title(self) -> str:
-        return f"{self.var} — {self.label}" if self.label != self.var else self.var
+        base = f"{self.var} — {self.label}" if self.label != self.var else self.var
+        return f"{base} (복수응답)" if self.table_kind == "multi" else base
+
+    @property
+    def column_names(self) -> list[str]:
+        """다중응답은 분모가 둘이라 열 이름이 다르다.
+
+        응답률 = 응답자 대비 (합이 100 을 넘는 것이 정상)
+        응답 중 = 총 응답 수 대비 (합이 100)
+        """
+        if self.table_kind == "multi":
+            return ["빈도", "응답률(%)", "응답 중(%)"]
+        return ["빈도", "퍼센트", "유효퍼센트", "누적퍼센트"]
+
+    def row_values(self, r: "FreqRow") -> list:
+        if self.table_kind == "multi":
+            return [r.count, r.pct, r.valid_pct]
+        return [r.count, r.pct, r.valid_pct, r.cum_pct]
 
 
 def _freq_stats(series: pd.Series, decimals: int = 2) -> dict:
@@ -2138,6 +2274,82 @@ def _freq_stats(series: pd.Series, decimals: int = 2) -> dict:
     }
 
 
+def _multi_freq_table(df: pd.DataFrame, meta, stem: str, members: list[str],
+                      *, sort_by_count: bool, decimals: int,
+                      style: str = "대각") -> FreqTable:
+    """다중응답 묶음 하나의 빈도표.
+
+    분모가 둘입니다. 응답자 수(합이 100 을 넘음)와 총 응답 수(합이 100).
+    둘 다 필요해서 SPSS 도 두 열을 같이 냅니다.
+
+    세는 방식은 **보기 코드 기준**입니다 — "이 보기를 고른 사람" 을 묶음 안
+    어느 변수에서든 찾습니다. 대각 코딩이든 언급 순서 코딩이든 같은 코드로
+    처리되고, 같은 보기를 두 번 센 일도 생기지 않습니다.
+    """
+    value_labels = meta.variable_value_labels
+    col_labels = meta.column_names_to_labels
+
+    total_n = int(len(df))
+    sub = df[members]
+    valid_n = int(sub.notna().any(axis=1).sum())      # 하나라도 답한 사람
+    missing_n = total_n - valid_n
+
+    vl = value_labels.get(members[0], {})
+    pairs = []
+    for code in sorted(vl.keys()):
+        hit = int((sub == code).any(axis=1).sum())
+        pairs.append((vl[code], hit))
+
+    # 값 라벨에 없는 코드가 데이터에 있으면 알린다 (단수 표와 같은 규칙)
+    used = {c for v in members for c in df[v].dropna().unique().tolist()}
+    unknown = sorted(c for c in used if c not in vl)
+    extra_notes = []
+    for code in unknown:
+        shown = int(code) if float(code).is_integer() else code
+        pairs.append((f"[라벨 없음] {shown}",
+                      int((sub == code).any(axis=1).sum())))
+    if unknown:
+        extra_notes.append(
+            f"값 라벨에 없는 코드가 {len(unknown)}개 있습니다 — "
+            "코딩 오류이거나 라벨을 안 붙인 것입니다."
+        )
+
+    if sort_by_count:
+        body = [p for p in pairs if not _is_tail_label(p[0])]
+        tail = [p for p in pairs if _is_tail_label(p[0])]
+        body.sort(key=lambda p: -p[1])
+        pairs = body + tail
+
+    response_n = sum(c for _, c in pairs)
+    rows = [
+        FreqRow(label, cnt,
+                round(cnt / valid_n * 100, decimals) if valid_n else 0.0,
+                round(cnt / response_n * 100, decimals) if response_n else None,
+                None, "value")
+        for label, cnt in pairs
+    ]
+    rows.append(FreqRow("합계(응답 수)", response_n,
+                        round(response_n / valid_n * 100, decimals) if valid_n else 0.0,
+                        100.0 if response_n else None, None, "total"))
+    rows.append(FreqRow("사례수(응답자)", valid_n,
+                        round(valid_n / total_n * 100, decimals) if total_n else 0.0,
+                        None, None, "cases"))
+
+    # 묶음 이름: 변수 라벨이 다 같으면 그것을, 다르면 변수명 앞부분을 쓴다
+    labels = {col_labels.get(v) or v for v in members}
+    label = labels.pop() if len(labels) == 1 else stem
+
+    # 코딩 방식(보기별/언급순서)은 묶을지 말지를 정하는 데만 쓰고 겉으로는
+    # 내지 않는다. 읽는 사람에게는 '복수응답' 이면 충분하다.
+    notes = [f"묶은 변수 {len(members)}개 — {', '.join(members)}"]
+    notes.extend(extra_notes)
+    if missing_n:
+        notes.append(f"아무것도 안 고른 사람 {missing_n:,}명은 응답자에서 뺐습니다.")
+
+    return FreqTable(stem, label, rows, total_n, valid_n, missing_n,
+                     None, notes, "multi", list(members), response_n, style)
+
+
 def compute_frequencies(
     df: pd.DataFrame,
     meta,
@@ -2148,20 +2360,36 @@ def compute_frequencies(
     decimals: int = 1,
     stat_decimals: int = 2,
     text_limit: int = FREQ_TEXT_LIMIT,
+    group_multi: bool = True,
 ) -> list[FreqTable]:
     """고른 변수들의 빈도표를 한 번에 만든다.
 
     sort_by_count 를 켜면 응답 많은 보기부터 나오되, '기타'·'모름' 계열은
     뱅크표와 같은 규칙으로 맨 뒤에 둡니다.
+
+    text_limit 은 값이 많은 변수를 줄이는 기준입니다. **0 이면 안 줄이고
+    응답된 값을 전부 나열합니다** (통계 요약으로 갈음하지도 않습니다).
+
+    group_multi 를 켜면 'X_1','X_2' 처럼 짝지어진 다중응답 묶음을 표 하나로
+    합칩니다.
     """
     value_labels = meta.variable_value_labels
     col_labels = meta.column_names_to_labels
     out: list[FreqTable] = []
 
-    for var in variables:
-        if var not in df.columns:
+    if group_multi:
+        plan = group_ma_sets(df, meta, variables)
+    else:
+        plan = [(None, [v], "") for v in variables if v in df.columns]
+
+    for stem, members, style in plan:
+        if stem is not None:
+            out.append(_multi_freq_table(df, meta, stem, members,
+                                         sort_by_count=sort_by_count,
+                                         decimals=decimals, style=style))
             continue
 
+        var = members[0]
         series = df[var]
         total_n = int(len(series))
         missing_n = int(series.isna().sum())
@@ -2189,7 +2417,7 @@ def compute_frequencies(
             numeric = pd.api.types.is_numeric_dtype(series)
             if numeric:
                 stats = _freq_stats(series, stat_decimals)
-            if int(series.nunique()) > text_limit:
+            if text_limit and int(series.nunique()) > text_limit:
                 # 값이 너무 많으면 표로 만들 수 없다. 숫자면 통계로 갈음하고,
                 # 문자면 많이 나온 것만 보여준다 (주관식은 따로 봐야 한다).
                 if numeric:
@@ -2264,25 +2492,27 @@ def freq_to_frame(table: FreqTable) -> pd.DataFrame:
             )
         return pd.DataFrame()
 
-    def txt(v, dec=1):
-        return "" if v is None else f"{v:,.{dec}f}"
+    def txt(v):
+        if v is None:
+            return ""
+        return f"{v:,}" if isinstance(v, int) else f"{v:,.1f}"
 
-    data = [[f"{r.count:,}", txt(r.pct), txt(r.valid_pct), txt(r.cum_pct)]
-            for r in table.rows]
+    data = [[txt(v) for v in table.row_values(r)] for r in table.rows]
     return pd.DataFrame(
         data,
         index=pd.Index([r.label for r in table.rows], name="보기"),
-        columns=["빈도", "퍼센트", "유효퍼센트", "누적퍼센트"],
+        columns=table.column_names,
     )
 
 
 def _write_freq_table(sheet, row: int, table: FreqTable, S) -> int:
     """빈도표 하나를 시트에 쓴다. 다음에 쓸 행 번호를 돌려준다."""
     Border = S["Border"]
-    ncols = 5                       # 보기 + 빈도 + 퍼센트 + 유효퍼센트 + 누적퍼센트
+    names = table.column_names
+    ncols = 1 + len(names)          # 보기 + 값 열들 (다중응답은 하나 적다)
 
     cell = sheet.cell(row=row, column=1, value=table.title)
-    cell.font, cell.alignment = S["bold"], S["left"]
+    cell.font, cell.alignment = S["bold"], S["left_nw"]
     sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
     row += 1
 
@@ -2290,21 +2520,20 @@ def _write_freq_table(sheet, row: int, table: FreqTable, S) -> int:
         if table.stats:
             for j, (k, v) in enumerate(table.stats.items(), start=1):
                 head = sheet.cell(row=row, column=j, value=k)
-                head.font, head.alignment = S["font"], S["center"]
+                head.font, head.alignment = S["font"], S["center_nw"]
                 body = sheet.cell(row=row + 1, column=j, value=v)
                 body.font, body.alignment = S["font"], S["right"]
             row += 2
         for note in table.notes:
             note_cell = sheet.cell(row=row, column=1, value=f"· {note}")
-            note_cell.font, note_cell.alignment = S["font"], S["left"]
+            note_cell.font, note_cell.alignment = S["font"], S["left_nw"]
             row += 1
         return row
 
     head = row
-    for j, name in enumerate(["보기", "빈도", "퍼센트", "유효퍼센트", "누적퍼센트"],
-                             start=1):
+    for j, name in enumerate(["보기"] + names, start=1):
         cell = sheet.cell(row=head, column=j, value=name)
-        cell.font, cell.alignment = S["font"], S["center"]
+        cell.font, cell.alignment = S["font"], S["center_nw"]
         cell.border = Border(top=S["thick"], bottom=S["thick"],
                              left=S["thick"] if j == 1 else S["thin"],
                              right=S["thick"] if j == ncols else S["thin"])
@@ -2315,15 +2544,14 @@ def _write_freq_table(sheet, row: int, table: FreqTable, S) -> int:
     for i, r in enumerate(table.rows):
         last = i == len(table.rows) - 1
         sheet.cell(row=row, column=1, value=r.label)
-        c = sheet.cell(row=row, column=2, value=r.count)
-        c.number_format = "#,##0"
-        for j, v in enumerate([r.pct, r.valid_pct, r.cum_pct], start=3):
+        for j, v in enumerate(table.row_values(r), start=2):
             cell = sheet.cell(row=row, column=j, value=v)
-            cell.number_format = "###0.0"
+            cell.number_format = "#,##0" if j == 2 else "###0.0"
         for j in range(1, ncols + 1):
             cell = sheet.cell(row=row, column=j)
-            cell.font = S["bold"] if r.kind == "total" else S["font"]
-            cell.alignment = S["left"] if j == 1 else S["right"]
+            cell.font = (S["bold"] if r.kind in ("total", "cases")
+                         else S["font"])
+            cell.alignment = S["left_nw"] if j == 1 else S["right"]
             cell.border = Border(
                 top=S["thick"] if row == first else None,
                 bottom=S["thick"] if last else None,
@@ -2337,30 +2565,37 @@ def _write_freq_table(sheet, row: int, table: FreqTable, S) -> int:
         txt = " · ".join(f"{k} {v:,}" for k, v in table.stats.items()
                          if v is not None and k != "고유값")
         cell = sheet.cell(row=row, column=1, value=txt)
-        cell.font, cell.alignment = S["font"], S["left"]
+        cell.font, cell.alignment = S["font"], S["left_nw"]
         row += 1
     for note in table.notes:
         cell = sheet.cell(row=row, column=1, value=f"· {note}")
-        cell.font, cell.alignment = S["font"], S["left"]
+        cell.font, cell.alignment = S["font"], S["left_nw"]
         row += 1
     return row
 
 
 def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> bytes:
-    """빈도표들을 엑셀로. 뱅크표 출력과 같은 서식·구조를 씁니다."""
+    """빈도표들을 엑셀로. 뱅크표 출력과 같은 서식을 쓰되 자동 줄바꿈은 뺍니다.
+
+    목차는 번호 · 변수명 · 변수 라벨 · 유효 N · 비고로 칸을 나눕니다.
+    """
     from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
 
     S = _styles()
     wb = Workbook()
     toc = wb.active
     toc.title = "목 차"
-    toc.column_dimensions["A"].width = 8
-    toc.column_dimensions["B"].width = 60
-    toc.column_dimensions["C"].width = 10
-    cell = toc.cell(row=1, column=2, value="목  차")
-    cell.font, cell.alignment = S["bold"], S["center"]
-    n_head = toc.cell(row=1, column=3, value="유효 N")
-    n_head.font, n_head.alignment = S["bold"], S["center"]
+
+    # 목차는 칸을 나눠 둡니다 — 변수명과 변수 라벨을 한 칸에 붙여 놓으면
+    # 엑셀에서 변수명으로 찾거나 정렬할 수가 없습니다.
+    toc_cols = [("번호", 6), ("변수명", 22), ("변수 라벨", 52),
+                ("유효 N", 10), ("비고", 14)]
+    for j, (name, width) in enumerate(toc_cols, start=1):
+        head = toc.cell(row=1, column=j, value=name)
+        head.font, head.alignment = S["bold"], S["center_nw"]
+        toc.column_dimensions[get_column_letter(j)].width = width
+    toc.freeze_panes = "A2"
 
     def widths(sheet):
         for col, w in zip("ABCDE", (34, 10, 10, 12, 12)):
@@ -2384,14 +2619,28 @@ def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> b
         widths(sheet)
 
     for i, (table, target) in enumerate(zip(tables, links), start=1):
-        num = toc.cell(row=1 + i, column=1, value=i)
-        num.font, num.alignment = S["font"], S["center"]
-        link = toc.cell(row=1 + i, column=2, value=table.title)
-        link.font, link.alignment = S["link"], S["left"]
-        link.hyperlink = target
-        n = toc.cell(row=1 + i, column=3, value=table.valid_n)
+        r = 1 + i
+        num = toc.cell(row=r, column=1, value=i)
+        num.font, num.alignment = S["font"], S["center_nw"]
+
+        # 변수명과 라벨 둘 다 눌러서 표로 갈 수 있게 링크를 건다
+        for col, text in ((2, table.var), (3, table.label)):
+            cell = toc.cell(row=r, column=col, value=text)
+            cell.font, cell.alignment = S["link"], S["left_nw"]
+            cell.hyperlink = target
+
+        n = toc.cell(row=r, column=4, value=table.valid_n)
         n.font, n.alignment = S["font"], S["right"]
         n.number_format = "#,##0"
+
+        if table.table_kind == "multi":
+            note = "복수응답"
+        elif not table.rows and table.stats:
+            note = "통계 요약"
+        else:
+            note = ""
+        cell = toc.cell(row=r, column=5, value=note)
+        cell.font, cell.alignment = S["font"], S["left_nw"]
 
     buf = io.BytesIO()
     wb.save(buf)

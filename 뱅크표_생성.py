@@ -871,13 +871,44 @@ with tab_quick:
                                 help="'기타'·'모름'·'무응답' 계열은 맨 뒤로 보냅니다.")
         freq_split = q3.checkbox("변수마다 시트 나누기", key="bt_freq_split")
 
+        r1, r2 = st.columns(2)
+        freq_group = r1.checkbox(
+            "복수응답 문항은 묶어서 한 표로", value=True, key="bt_freq_group",
+            help="'X_1','X_2' 처럼 짝지어진 다중응답 묶음을 표 하나로 합칩니다. "
+                 "이름만 보고 묶지 않고, 변수마다 자기 코드값 하나만 갖는지까지 "
+                 "확인합니다 (5점 척도 배터리는 안 묶입니다).",
+        )
+        freq_all_values = r2.checkbox(
+            "값이 많아도 전부 나열", value=True, key="bt_freq_all_values",
+            help="응답된 값을 하나도 빼지 않고 냅니다. 끄면 고유값이 30개를 "
+                 "넘는 변수는 줄이고, 숫자 변수는 통계 요약으로 갈음합니다.",
+        )
+
         if not freq_vars:
             st.info("위에서 변수를 고르거나 '전체' 같은 버튼을 눌러 주세요.")
         else:
+            if freq_all_values:
+                # 값이 몇 백 종인 변수를 여러 개 고르면 표가 아주 길어진다.
+                # 막지는 않고 몇 줄이 될지 미리 알려만 준다.
+                est = sum(int(df[v].nunique()) for v in freq_vars)
+                if est > 2000:
+                    st.warning(
+                        f"고른 변수들의 고유값을 합치면 약 {est:,}줄이 됩니다. "
+                        "화면이 아주 길어지니 엑셀로 받아 보시는 편이 낫습니다."
+                    )
+
             freq_tables = compute_frequencies(
                 df, meta, freq_vars,
                 show_missing=freq_missing, sort_by_count=freq_sort,
+                text_limit=0 if freq_all_values else 30,
+                group_multi=freq_group,
             )
+            grouped = [t for t in freq_tables if t.table_kind == "multi"]
+            if grouped:
+                st.caption(
+                    "복수응답으로 묶은 문항 — "
+                    + " · ".join(f"{t.label}({len(t.members)}개)" for t in grouped)
+                )
             flagged = [t for t in freq_tables
                        if any("값 라벨에 없는 코드" in n for n in t.notes)]
             if flagged:
