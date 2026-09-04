@@ -242,7 +242,7 @@ def write_form_template(df: pd.DataFrame, meta, *, example: bool = True) -> byte
     wsh.column_dimensions["A"].width = 18
     wsh.column_dimensions["B"].width = 96
     guide = [
-        ("", "엑셀 폼으로 뱅크표 만들기"),
+        ("", "엑셀 폼으로 테이블 만들기"),
         ("", ""),
         ("순서", "① '배너' 시트에 배너로 쓸 변수를 적는다 (한 번만)"),
         ("", "② '표목록' 시트에 표를 한 줄씩 적는다"),

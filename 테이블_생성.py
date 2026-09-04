@@ -1,6 +1,6 @@
-# 뱅크표_생성.py
+# 테이블_생성.py
 #
-# SPSS .sav 파일로 뱅크표(배너표)를 만드는 페이지입니다.
+# SPSS .sav 파일로 테이블을 만드는 페이지입니다.
 # 계산 로직은 banner_table_engine.py 에 있습니다.
 #
 # set_page_config 와 비밀번호 확인은 Home.py 가 처리하므로 여기에 두지 않습니다.
@@ -79,9 +79,9 @@ def load_sps(file_bytes: bytes) -> str:
     return read_sps_text(file_bytes)
 
 
-st.header("뱅크표 생성")
+st.header("테이블 생성")
 st.caption(
-    "SPSS .sav 를 올리고 배너와 행 변수를 골라 뱅크표를 만듭니다. "
+    "SPSS .sav 를 올리고 배너와 행 변수를 골라 테이블을 만듭니다. "
     "Embrain 'Table' 매크로 신텍스(.sps)가 있으면 그 표들을 한 번에 뽑을 수도 있습니다."
 )
 
@@ -605,7 +605,7 @@ with tab_manual:
                 f"설정 저장 ({len(st.session_state['bt_blocks'])}개 표)",
                 data=blocks_to_json(st.session_state["bt_blocks"],
                                     source_file=sav_file.name),
-                file_name=f"{SAV_STEM}_뱅크표설정.json",
+                file_name=f"{SAV_STEM}_테이블설정.json",
                 mime="application/json",
                 key="bt_save_cfg",
             )
@@ -650,7 +650,7 @@ with tab_manual:
             help="끄면 'Table' 시트 하나에 표들을 위아래로 이어 붙입니다 "
                  "(SPSS 산출물과 같은 모양). 켜면 표마다 시트가 하나씩 생깁니다.",
         )
-        # 뱅크표는 SPSS 산출물과 같은 모양이 기본이라 색 없이(흰색) 시작한다
+        # 테이블은 SPSS 산출물과 같은 모양이 기본이라 색 없이(흰색) 시작한다
         bank_fill = s2.color_picker(
             "표 제목 줄 색", value="#FFFFFF", key="bt_bank_fill",
             help="흰색이면 색을 넣지 않습니다 (SPSS 산출물과 같은 모양).",
@@ -661,7 +661,7 @@ with tab_manual:
             data=write_tables_xlsx(st.session_state["bt_results"],
                                    split_sheets=split_sheets,
                                    title_fill=bank_fill),
-            file_name=f"{SAV_STEM}_뱅크표.xlsx",
+            file_name=f"{SAV_STEM}_테이블.xlsx",
             mime=XLSX_MIME,
             key="bt_dl_all",
         )
@@ -670,7 +670,7 @@ with tab_manual:
             e2.download_button(
                 "엑셀 양식으로 내보내기",
                 data=blocks_to_form(st.session_state["bt_blocks"], df, meta),
-                file_name=f"{SAV_STEM}_뱅크표양식.xlsx",
+                file_name=f"{SAV_STEM}_테이블양식.xlsx",
                 mime=XLSX_MIME,
                 key="bt_dl_form",
                 help="이 표들이 채워진 양식이 나옵니다. 엑셀에서 고쳐 '엑셀 폼으로 만들기' 탭에 다시 올리세요.",
@@ -746,7 +746,7 @@ with tab_form:
         st.download_button(
             "① 자동 채운 양식 내려받기",
             data=filled,
-            file_name=f"{SAV_STEM}_뱅크표양식.xlsx",
+            file_name=f"{SAV_STEM}_테이블양식.xlsx",
             mime=XLSX_MIME,
             key="bt_form_filled",
             type="primary",
@@ -757,7 +757,7 @@ with tab_form:
         st.download_button(
             "빈 양식 내려받기",
             data=write_form_template(df, meta),
-            file_name=f"{SAV_STEM}_뱅크표양식_빈것.xlsx",
+            file_name=f"{SAV_STEM}_테이블양식_빈것.xlsx",
             mime=XLSX_MIME,
             key="bt_form_tpl",
         )
@@ -813,7 +813,7 @@ with tab_form:
                     data=write_tables_xlsx(computed_form,
                                            split_sheets=form_split,
                                            title_fill=form_fill),
-                    file_name=f"{SAV_STEM}_뱅크표.xlsx",
+                    file_name=f"{SAV_STEM}_테이블.xlsx",
                     mime=XLSX_MIME,
                     key="bt_form_dl",
                 )
@@ -825,7 +825,7 @@ with tab_form:
                         source_file=form_file.name,
                         note=f"{sav_file.name} 로 계산",
                     ),
-                    file_name=f"{safe_stem(form_file.name)}_뱅크표설정.json",
+                    file_name=f"{safe_stem(form_file.name)}_테이블설정.json",
                     mime="application/json",
                     key="bt_form_cfg",
                 )
@@ -1064,7 +1064,7 @@ with tab_syntax:
                     "전체 엑셀로 (목차 + Table 시트)",
                     data=write_tables_xlsx(computed, split_sheets=syn_split,
                                            title_fill=syn_fill),
-                    file_name=f"{safe_stem(sps_file.name)}_뱅크표.xlsx",
+                    file_name=f"{safe_stem(sps_file.name)}_테이블.xlsx",
                     mime=XLSX_MIME,
                     key="bt_syn_dl",
                 )
@@ -1077,7 +1077,7 @@ with tab_syntax:
                         source_file=sps_file.name,
                         note=f"{sav_file.name} 로 계산한 신텍스 표",
                     ),
-                    file_name=f"{safe_stem(sps_file.name)}_뱅크표설정.json",
+                    file_name=f"{safe_stem(sps_file.name)}_테이블설정.json",
                     mime="application/json",
                     key="bt_syn_cfg",
                 )

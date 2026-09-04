@@ -231,9 +231,9 @@ st.markdown(_html("""
     </div>
     <div class="qm-card">
       <div class="qm-stage">집계</div>
-      <h2 class="qm-name">뱅크표 생성</h2>
+      <h2 class="qm-name">테이블 생성</h2>
       <p class="qm-desc">
-        SAV 파일에서 배너와 행 변수를 골라 뱅크표를 만듭니다.<br>
+        SAV 파일에서 배너와 행 변수를 골라 테이블을 만듭니다.<br>
         사례수·세로%·다중응답·평균까지 계산하고, 기존 <code>Table</code>
         신택스가 있으면 정의된 표를 한 번에 뽑습니다.
       </p>
@@ -241,7 +241,7 @@ st.markdown(_html("""
         <span class="qm-chip">SPSS .sav</span>
         <span class="qm-chip">신택스 .sps (선택)</span>
         <span class="qm-io-arrow">&rarr;</span>
-        <span class="qm-chip out">뱅크표 .xlsx</span>
+        <span class="qm-chip out">테이블 .xlsx</span>
       </div>
     </div>
   </div>
@@ -261,11 +261,11 @@ st.markdown(_html("""
 # ==============================================================================
 UPDATES = [
     ("2026-09-03", [
-        ("뱅크표 생성", "빈도표 기능 추가"),
+        ("테이블 생성", "빈도표 기능 추가"),
     ]),
     ("2026-09-02", [
-        ("뱅크표 생성", "새로 만들었습니다. SAV 파일에서 배너와 행 변수를 "
-                      "직접 골라 뱅크표를 만듭니다. 단일응답·다중응답·연속형"
+        ("테이블 생성", "새로 만들었습니다. SAV 파일에서 배너와 행 변수를 "
+                      "직접 골라 테이블을 만듭니다. 단일응답·다중응답·연속형"
                       "(평균·중위값·최소·최대)을 지원하고, 여러 변수를 하나의 "
                       "다중응답 배너로 묶을 수 있습니다. Table 매크로 신택스를 "
                       "올리면 정의된 표를 한 번에 계산합니다."),

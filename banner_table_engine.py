@@ -1,6 +1,6 @@
 # banner_table_engine.py
 #
-# 뱅크표(배너표) 계산 엔진입니다. 화면 코드는 뱅크표_생성.py 에 있습니다.
+# 테이블 계산 엔진입니다. 화면 코드는 테이블_생성.py 에 있습니다.
 # 페이지 파일이 아니므로 Home.py 의 SKIP 목록에 넣어 주세요.
 #
 # 구성
@@ -1541,7 +1541,7 @@ SETTINGS_VERSION = 1
 _BAD_FILENAME = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 
 
-def safe_stem(filename: str, fallback: str = "뱅크표") -> str:
+def safe_stem(filename: str, fallback: str = "테이블") -> str:
     """업로드한 파일 이름에서 확장자와 경로를 떼고 파일명으로 쓸 수 있게 다듬는다.
 
     설정·엑셀 파일 이름을 원본 데이터 이름으로 짓기 위한 것이다.
@@ -1784,6 +1784,26 @@ def result_to_frame(result: TableResult) -> pd.DataFrame:
 # =============================================================================
 # 7) 엑셀 출력
 # =============================================================================
+# 표 제목 줄 바탕색 기본값 — 엑셀 기본 팔레트의 '파랑, 강조 1, 60% 밝게'.
+# 흰색(FFFFFF)을 주면 '색 없음' 으로 봅니다 (색을 안 쓰던 때와 파일이 같아짐).
+TITLE_FILL = "BDD7EE"
+NO_FILL = "FFFFFF"
+
+
+def _fill_from(color: str | None):
+    """'#BDD7EE' · 'BDD7EE' → PatternFill. 비었거나 흰색이면 None(색 없음)."""
+    if not color:
+        return None
+    code = str(color).lstrip("#").upper()
+    if len(code) == 8:                  # ARGB 로 들어오면 앞 두 자리를 뗀다
+        code = code[2:]
+    if len(code) != 6 or code == NO_FILL:
+        return None
+    from openpyxl.styles import PatternFill
+
+    return PatternFill("solid", fgColor=code)
+
+
 def _styles():
     from openpyxl.styles import Alignment, Border, Font, Side
 
@@ -1824,13 +1844,15 @@ def _excel_cell(result: TableResult, i: int, j: int):
     return _num(result.matrix[i][j]), col.excel_format
 
 
-def _write_banner_rows(tab, row: int, result: TableResult, S) -> int:
+def _write_banner_rows(tab, row: int, result: TableResult, S, *, fill=None) -> int:
     """배너 = 행. A=그룹, B=보기, C=사례수, D부터 값."""
     Border = S["Border"]
     ncols = 3 + len(result.columns)
 
     cell = tab.cell(row=row, column=1, value=result.title)
     cell.font, cell.alignment = S["bold"], S["left"]
+    if fill is not None:
+        cell.fill = fill
     tab.merge_cells(start_row=row, start_column=1, end_row=row,
                     end_column=max(ncols - 3, 2))
     row += 1
@@ -1900,13 +1922,15 @@ def _write_banner_rows(tab, row: int, result: TableResult, S) -> int:
     return row
 
 
-def _write_banner_cols(tab, row: int, result: TableResult, S) -> int:
+def _write_banner_cols(tab, row: int, result: TableResult, S, *, fill=None) -> int:
     """배너 = 열. A=보기(사례수/보기/계), B부터 배너가 2단 머리글로."""
     Border = S["Border"]
     ncols = 1 + len(result.rows)
 
     cell = tab.cell(row=row, column=1, value=result.title)
     cell.font, cell.alignment = S["bold"], S["left"]
+    if fill is not None:
+        cell.fill = fill
     tab.merge_cells(start_row=row, start_column=1, end_row=row,
                     end_column=max(ncols, 2))
     row += 1
@@ -2022,7 +2046,8 @@ def _sheet_name(title: str, used: set[str], index: int) -> str:
 
 
 def write_tables_xlsx(results: list[TableResult], *,
-                      split_sheets: bool = False) -> bytes:
+                      split_sheets: bool = False,
+                      title_fill: str | None = None) -> bytes:
     """SPSS 산출물과 같은 형태로 엑셀을 만든다.
 
     기본은 시트 두 개
@@ -2038,6 +2063,7 @@ def write_tables_xlsx(results: list[TableResult], *,
     from openpyxl import Workbook
 
     S = _styles()
+    fill = _fill_from(title_fill)
     wb = Workbook()
     toc = wb.active
     toc.title = "목 차"
@@ -2055,9 +2081,9 @@ def write_tables_xlsx(results: list[TableResult], *,
             name = _sheet_name(result.title, used, i)
             sheet = wb.create_sheet(name)
             if result.banner_on_rows:
-                _write_banner_rows(sheet, 1, result, S)
+                _write_banner_rows(sheet, 1, result, S, fill=fill)
             else:
-                _write_banner_cols(sheet, 1, result, S)
+                _write_banner_cols(sheet, 1, result, S, fill=fill)
             _set_table_widths(sheet, [result])
             links.append(f"#'{name}'!A1")
     else:
@@ -2066,9 +2092,9 @@ def write_tables_xlsx(results: list[TableResult], *,
         for result in results:
             links.append(f"#'Table'!A{row}")
             if result.banner_on_rows:
-                row = _write_banner_rows(tab, row, result, S)
+                row = _write_banner_rows(tab, row, result, S, fill=fill)
             else:
-                row = _write_banner_cols(tab, row, result, S)
+                row = _write_banner_cols(tab, row, result, S, fill=fill)
             row += 1        # 표 사이 빈 행
         _set_table_widths(tab, results)
 
@@ -2087,7 +2113,7 @@ def write_tables_xlsx(results: list[TableResult], *,
 # =============================================================================
 # 8) 빈도표 — 변수 여러 개를 한 번에
 # =============================================================================
-# 뱅크표와 달리 배너가 없습니다. 변수 하나에 표 하나이고, 열은 SPSS 빈도표와
+# 테이블과 달리 배너가 없습니다. 변수 하나에 표 하나이고, 열은 SPSS 빈도표와
 # 같은 모양입니다 — 빈도 · 퍼센트 · 유효퍼센트 · 누적퍼센트.
 #
 # 값 라벨 처리에 두 가지 규칙을 뒀습니다. 둘 다 데이터를 점검하는 데 씁니다.
@@ -2365,7 +2391,7 @@ def compute_frequencies(
     """고른 변수들의 빈도표를 한 번에 만든다.
 
     sort_by_count 를 켜면 응답 많은 보기부터 나오되, '기타'·'모름' 계열은
-    뱅크표와 같은 규칙으로 맨 뒤에 둡니다.
+    테이블과 같은 규칙으로 맨 뒤에 둡니다.
 
     text_limit 은 값이 많은 변수를 줄이는 기준입니다. **0 이면 안 줄이고
     응답된 값을 전부 나열합니다** (통계 요약으로 갈음하지도 않습니다).
@@ -2505,14 +2531,23 @@ def freq_to_frame(table: FreqTable) -> pd.DataFrame:
     )
 
 
-def _write_freq_table(sheet, row: int, table: FreqTable, S) -> int:
+def _write_freq_table(sheet, row: int, table: FreqTable, S, *, fill=None) -> int:
     """빈도표 하나를 시트에 쓴다. 다음에 쓸 행 번호를 돌려준다."""
     Border = S["Border"]
     names = table.column_names
     ncols = 1 + len(names)          # 보기 + 값 열들 (다중응답은 하나 적다)
 
+    # 제목 줄에 바탕색을 깔아 표를 가른다. 표가 수십 개 이어 붙으므로 이 색
+    # 띠가 사실상 구분선 역할을 한다.
+    #
+    # 색은 **합친 칸의 왼쪽 위 칸에만** 넣는다. openpyxl 은 합쳐진 나머지 칸의
+    # 서식을 받아주지 않지만(넣어도 저장 때 사라짐), 엑셀은 합친 영역 전체를
+    # 왼쪽 위 칸의 서식으로 칠하므로 띠가 끝까지 채워진다.
+    # (LibreOffice 로 실제 렌더링해서 확인함)
     cell = sheet.cell(row=row, column=1, value=table.title)
     cell.font, cell.alignment = S["bold"], S["left_nw"]
+    if fill is not None:
+        cell.fill = fill
     sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
     row += 1
 
@@ -2574,8 +2609,10 @@ def _write_freq_table(sheet, row: int, table: FreqTable, S) -> int:
     return row
 
 
-def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> bytes:
-    """빈도표들을 엑셀로. 뱅크표 출력과 같은 서식을 쓰되 자동 줄바꿈은 뺍니다.
+def write_freq_xlsx(tables: list[FreqTable], *,
+                    split_sheets: bool = False,
+                    title_fill: str | None = TITLE_FILL) -> bytes:
+    """빈도표들을 엑셀로. 테이블 출력과 같은 서식을 쓰되 자동 줄바꿈은 뺍니다.
 
     목차는 번호 · 변수명 · 변수 라벨 · 유효 N · 비고로 칸을 나눕니다.
     """
@@ -2583,6 +2620,7 @@ def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> b
     from openpyxl.utils import get_column_letter
 
     S = _styles()
+    fill = _fill_from(title_fill)
     wb = Workbook()
     toc = wb.active
     toc.title = "목 차"
@@ -2594,6 +2632,8 @@ def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> b
     for j, (name, width) in enumerate(toc_cols, start=1):
         head = toc.cell(row=1, column=j, value=name)
         head.font, head.alignment = S["bold"], S["center_nw"]
+        if fill is not None:
+            head.fill = fill
         toc.column_dimensions[get_column_letter(j)].width = width
     toc.freeze_panes = "A2"
 
@@ -2607,7 +2647,7 @@ def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> b
         for i, table in enumerate(tables, start=1):
             name = _sheet_name(table.var, used, i)
             sheet = wb.create_sheet(name)
-            _write_freq_table(sheet, 1, table, S)
+            _write_freq_table(sheet, 1, table, S, fill=fill)
             widths(sheet)
             links.append(f"#'{name}'!A1")
     else:
@@ -2615,7 +2655,8 @@ def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> b
         row = 1
         for table in tables:
             links.append(f"#'빈도표'!A{row}")
-            row = _write_freq_table(sheet, row, table, S) + 1
+            row = _write_freq_table(sheet, row, table, S,
+                                    fill=fill) + 1
         widths(sheet)
 
     for i, (table, target) in enumerate(zip(tables, links), start=1):
@@ -2623,10 +2664,12 @@ def write_freq_xlsx(tables: list[FreqTable], *, split_sheets: bool = False) -> b
         num = toc.cell(row=r, column=1, value=i)
         num.font, num.alignment = S["font"], S["center_nw"]
 
-        # 변수명과 라벨 둘 다 눌러서 표로 갈 수 있게 링크를 건다
-        for col, text in ((2, table.var), (3, table.label)):
+        # 변수명과 라벨 둘 다 눌러서 표로 갈 수 있게 링크를 건다.
+        # 변수명(문항번호)은 가운데, 문항 문구는 왼쪽에 맞춘다.
+        for col, text, align in ((2, table.var, S["center_nw"]),
+                                 (3, table.label, S["left_nw"])):
             cell = toc.cell(row=r, column=col, value=text)
-            cell.font, cell.alignment = S["link"], S["left_nw"]
+            cell.font, cell.alignment = S["link"], align
             cell.hyperlink = target
 
         n = toc.cell(row=r, column=4, value=table.valid_n)
