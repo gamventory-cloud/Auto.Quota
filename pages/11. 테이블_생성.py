@@ -20,6 +20,7 @@ from banner_table_engine import (
     BANNER_COL,
     BANNER_ROW,
     TITLE_FILL,
+    UNDEF_FILL,
     BannerSpec,
     SigSpec,
     blocks_to_json,
@@ -933,17 +934,24 @@ with tab_quick:
                     "코딩 오류이거나 라벨을 안 붙인 것이니 확인해 보세요."
                 )
 
-            c1, c2 = st.columns([1, 3])
+            c1, c1b, c2 = st.columns([1, 1, 3])
             freq_fill = c1.color_picker(
                 "표 제목 줄 색", value=f"#{TITLE_FILL}", key="bt_freq_fill",
                 help="표 제목 줄의 바탕색입니다. 표가 여러 개 이어 붙을 때 "
                      "구분선 역할을 합니다. 흰색으로 두면 색을 넣지 않습니다.",
             )
+            freq_undef_fill = c1b.color_picker(
+                "라벨 누락 줄 색", value=f"#{UNDEF_FILL}", key="bt_freq_undef_fill",
+                help="값 라벨이 없는 코드 줄의 바탕색입니다. 표가 많으면 "
+                     "'라벨없음' 이라는 글자만으로는 지나치기 쉬워서 줄 전체를 "
+                     "칠합니다. 흰색으로 두면 칠하지 않습니다.",
+            )
             with c2:
                 st.download_button(
                     f"빈도표 {len(freq_tables)}개 엑셀로",
                     data=write_freq_xlsx(freq_tables, split_sheets=freq_split,
-                                         title_fill=freq_fill),
+                                         title_fill=freq_fill,
+                                         undef_fill=freq_undef_fill),
                     file_name=f"{SAV_STEM}_빈도표.xlsx",
                     mime=XLSX_MIME,
                     key="bt_freq_dl",

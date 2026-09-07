@@ -1789,6 +1789,10 @@ def result_to_frame(result: TableResult) -> pd.DataFrame:
 TITLE_FILL = "BDD7EE"
 NO_FILL = "FFFFFF"
 
+# 값 라벨이 없는 코드 줄의 바탕색. 엑셀에 원래 있는 '잘못된 셀' 서식과 같은
+# 색이라 "여기 확인" 이라는 뜻이 한눈에 읽힌다.
+UNDEF_FILL = "FFC7CE"
+
 
 def _fill_from(color: str | None):
     """'#BDD7EE' · 'BDD7EE' → PatternFill. 비었거나 흰색이면 None(색 없음)."""
@@ -2138,14 +2142,22 @@ def is_category_coded_set(df: pd.DataFrame, members: list[str]) -> bool:
 
     코드가 1부터 차례로 붙지 않은 묶음도 있어서, '변수마다 값이 하나뿐이고
     서로 다르다' 까지만 확인한다.
+
+    **아무도 안 고른 보기(응답 0)는 정상이다.** '이 중 없음' 같은 보기는
+    비어 있기 쉽고, 예전에는 그런 변수 하나 때문에 묶음 전체가 깨져서
+    보기 8개가 표 8개로 흩어졌다. 그래서 빈 변수는 건너뛰고, 값이 있는
+    변수가 둘 이상이면서 서로 코드가 겹치지 않을 때 묶는다.
     """
     if len(members) < 2:
         return False
     seen: set[float] = set()
+    filled = 0
     for v in members:
         vals = df[v].dropna().unique().tolist()
-        if len(vals) != 1:
-            return False
+        if len(vals) > 1:
+            return False           # 값이 둘 이상이면 대각 코딩이 아니다
+        if not vals:
+            continue               # 아무도 안 고른 보기 — 판정에서 건너뛴다
         try:
             code = float(vals[0])
         except (TypeError, ValueError):
@@ -2153,7 +2165,8 @@ def is_category_coded_set(df: pd.DataFrame, members: list[str]) -> bool:
         if code in seen:
             return False
         seen.add(code)
-    return True
+        filled += 1
+    return filled >= 2
 
 
 def is_mention_coded_set(df: pd.DataFrame, members: list[str],
@@ -2166,6 +2179,13 @@ def is_mention_coded_set(df: pd.DataFrame, members: list[str],
     평가 배터리와 구별하는 결정적인 신호는 **한 응답자가 같은 값을 두 번
     갖지 않는다**는 것이다. 5점 척도 배터리는 4점을 두 문항에 주는 사람이
     반드시 나오지만, 복수응답에서 같은 보기를 두 번 고르는 일은 없다.
+
+    다만 '겹친 사람이 없다' 는 **두 개 이상 답한 사람이 충분히 있을 때만**
+    근거가 된다. 서로 다른 단수 문항 여러 개가 각각 다른 조건으로 물어져서
+    겹쳐 답한 사람이 몇 명 안 되면, 우연히 안 겹칠 수 있다. 실제로 어떤
+    자료에서 그런 묶음이 42명 중 30명이 겹쳐 겨우 걸러진 적이 있다 — 운이
+    조금만 달랐으면 별개 문항 5개가 복수응답 표 하나로 합쳐졌을 것이다.
+    그래서 근거가 얇으면 묶지 않는다(틀린 답을 내느니 안 낸다).
     """
     if len(members) < 2 or n_options < len(members):
         return False
@@ -2179,10 +2199,39 @@ def is_mention_coded_set(df: pd.DataFrame, members: list[str],
     live = filled > 0
     if not live.any():
         return False
-    return bool((filled[live] == distinct[live]).all())
+    if not bool((filled[live] == distinct[live]).all()):
+        return False
+    # 근거의 두께 — 두 개 이상 답한 사람이 이만큼은 있어야 한다
+    return int((filled >= 2).sum()) >= MENTION_MIN_MULTI
 
 
 _MA_NAME = re.compile(r"^(.+)[_\-](\d+)$")
+
+# 언급순서 판정에 필요한 '두 개 이상 답한 사람' 최소 인원.
+# 소표본 기준과 같은 30명을 쓴다.
+MENTION_MIN_MULTI = 30
+
+# 변수 라벨 끝의 '-1순위' / '1st mention' 표기. 순위 문항은 이것만으로 확실히
+# 알아볼 수 있어서 데이터 모양을 보기 전에 먼저 본다.
+_RANK_LABEL = re.compile(r"(\d+)\s*(?:순위|지망|st|nd|rd|th)\s*(?:mention)?\s*$",
+                         re.IGNORECASE)
+
+
+def rank_numbers(meta, members: list[str]) -> list[int] | None:
+    """순위 문항 묶음이면 변수별 순위 번호를, 아니면 None 을 돌려준다.
+
+    변수 라벨이 '… -1순위', '… -2순위' 처럼 끝나고 번호가 서로 다르면
+    순위 문항이다. 이름 규칙(X_1, X_2)만으로는 보기별 복수응답과 구별할 수
+    없어서 라벨을 본다.
+    """
+    labels = meta.column_names_to_labels
+    nums: list[int] = []
+    for v in members:
+        m = _RANK_LABEL.search(str(labels.get(v) or ""))
+        if not m:
+            return None
+        nums.append(int(m.group(1)))
+    return nums if len(set(nums)) == len(nums) else None
 
 
 def group_ma_sets(df: pd.DataFrame, meta, variables: list[str]):
@@ -2196,10 +2245,15 @@ def group_ma_sets(df: pd.DataFrame, meta, variables: list[str]):
          'Q1_1_1'~'Q1_1_3' 은 'Q1_1' 로, 'Q1_2_1'~'Q1_2_3' 은 'Q1_2' 로
          갈라지므로 문항 안에 문항이 있는 구조도 제대로 나뉜다.
       2. 값 라벨이 서로 같다.
-      3. 코딩이 **대각**이거나 **언급 순서**다 (아래 두 판정 함수).
+      3. 라벨이 **순위**를 가리키거나(`rank_numbers`), 코딩이 **대각**이거나
+         **언급 순서**다 (아래 판정 함수들).
 
     이름 규칙만으로 묶으면 'Q1','Q2' 같은 별개 문항이 엮이고, 5점 척도
     배터리도 복수응답으로 오해하므로 데이터 모양까지 본다.
+
+    순위를 먼저 보는 이유: 순위 문항은 데이터 모양이 언급순서 복수응답과
+    똑같아서 데이터만으로는 갈라낼 수 없다. 라벨의 '-1순위' 표기가 유일하게
+    확실한 신호다. 순위로 잡으면 순위별 표와 합산 표를 같이 낸다.
     """
     value_labels = meta.variable_value_labels
     picked = [v for v in variables if v in df.columns]
@@ -2217,11 +2271,13 @@ def group_ma_sets(df: pd.DataFrame, meta, variables: list[str]):
         labels = [tuple(sorted(value_labels.get(v, {}).items())) for v in members]
         if len(set(labels)) != 1 or not labels[0]:
             continue                   # 값 라벨이 서로 다르거나 없으면 안 묶는다
-        if is_category_coded_set(df, members):
+        if rank_numbers(meta, members) is not None:
+            sets[stem] = (members, "순위")
+        elif is_category_coded_set(df, members):
             sets[stem] = (members, "대각")
         elif is_mention_coded_set(df, members, len(labels[0])):
             sets[stem] = (members, "언급순서")
-        # 둘 다 아니면 평가 배터리 → 각각 단수로 둔다
+        # 어느 것도 아니면 평가 배터리 → 각각 단수로 둔다
 
     in_set = {v: stem for stem, (members, _) in sets.items() for v in members}
     out, done = [], set()
@@ -2261,12 +2317,17 @@ class FreqTable:
     table_kind: str = "single"      # 'single' | 'multi'
     members: list[str] = field(default_factory=list)   # 다중응답 묶음의 변수들
     response_n: int = 0             # 다중응답의 총 응답 수
-    ma_style: str = ""              # '대각' | '언급순서'
+    ma_style: str = ""              # '대각' | '언급순서' | '순위'
 
     @property
     def title(self) -> str:
         base = f"{self.var} — {self.label}" if self.label != self.var else self.var
-        return f"{base} (복수응답)" if self.table_kind == "multi" else base
+        if self.table_kind != "multi":
+            return base
+        # 순위 문항의 합산 표는 무엇을 합쳤는지 이름에 밝힌다. 순위별 표가
+        # 바로 위에 있어서, 둘 다 '(복수응답)' 이면 어느 것이 합산인지 모른다.
+        tag = "복수응답 · 순위 합산" if self.ma_style == "순위" else "복수응답"
+        return f"{base} ({tag})"
 
     @property
     def column_names(self) -> list[str]:
@@ -2300,6 +2361,63 @@ def _freq_stats(series: pd.Series, decimals: int = 2) -> dict:
     }
 
 
+_CODE_HEAD = re.compile(r"^(\s*)(\d+)(\s*[).\]]\s*)")
+
+
+def _label_style(vl: dict):
+    """값 라벨에 없는 코드를 **옆 보기와 같은 모양**으로 적는 함수를 돌려준다.
+
+    값 라벨이 ' 3) 금융·투자' 처럼 '번호 + 닫는 기호' 로 시작하면 없는 코드도
+    ' 3) 라벨없음' 으로 맞춘다. 앞뒤 공백까지 그대로 흉내내야 표에서 줄이
+    어긋나 보이지 않는다. 그런 모양이 아니면 `[라벨 없음] 3` 으로 물러난다.
+
+    자료마다 라벨 앞 공백이 하나이기도 두 개이기도 해서(같은 조사 안에서도
+    다르다) 형식을 박아 두지 않고 그 변수의 라벨에서 읽어 온다.
+    """
+    head = None
+    for code in sorted(vl):
+        m = _CODE_HEAD.match(str(vl[code]))
+        # 라벨에 적힌 번호가 실제 코드와 같을 때만 그 모양을 믿는다
+        if m and float(m.group(2)) == float(code):
+            head = (m.group(1), m.group(3))
+            break
+
+    def fmt(code) -> str:
+        shown = int(code) if float(code).is_integer() else code
+        if head is None:
+            return f"[라벨 없음] {shown}"
+        pre, post = head
+        return f"{pre}{shown}{post}라벨없음"
+
+    return fmt
+
+
+def _shared_label(labels) -> str:
+    """여러 변수 라벨의 공통 앞부분 — 다중응답 묶음의 표 이름으로 쓴다.
+
+    'A1. [직접 사용해 본 AI 서비스 유형] -1)대화 및 검색형 AI' 처럼 뒤에
+    보기 문구가 붙는 라벨들에서 'A1. [직접 사용해 본 AI 서비스 유형]' 만
+    남긴다. 라벨이 다 같으면 그것을 그대로 쓴다.
+
+    공통 부분이 너무 짧으면(문항 번호만 겹치는 등) 빈 문자열을 돌려주고
+    부르는 쪽이 변수명으로 물러난다 — 어중간하게 자른 문구는 목차에서
+    무엇을 가리키는지 알 수 없어서 변수명보다 나쁘다.
+    """
+    items = [str(x) for x in labels if str(x).strip()]
+    if not items:
+        return ""
+    if len(set(items)) == 1:
+        return items[0]
+    first, last = min(items), max(items)
+    i = 0
+    while i < len(first) and i < len(last) and first[i] == last[i]:
+        i += 1
+    head = items[0][:i].rstrip()
+    # 보기 번호로 들어가는 꼬리('-1)', '-', '(' 등)를 떼어 낸다
+    head = re.sub(r"[\s\-–—_/(\[]*\d*[).\]]?\s*$", "", head).rstrip(" -–—_·,:;([")
+    return head if len(head) >= 6 else ""
+
+
 def _multi_freq_table(df: pd.DataFrame, meta, stem: str, members: list[str],
                       *, sort_by_count: bool, decimals: int,
                       style: str = "대각") -> FreqTable:
@@ -2321,19 +2439,20 @@ def _multi_freq_table(df: pd.DataFrame, meta, stem: str, members: list[str],
     missing_n = total_n - valid_n
 
     vl = value_labels.get(members[0], {})
-    pairs = []
-    for code in sorted(vl.keys()):
-        hit = int((sub == code).any(axis=1).sum())
-        pairs.append((vl[code], hit))
 
-    # 값 라벨에 없는 코드가 데이터에 있으면 알린다 (단수 표와 같은 규칙)
+    # 값 라벨에 없는 코드가 데이터에 있으면 알린다 (단수 표와 같은 규칙).
+    # 뒤로 몰지 않고 **코드 순서대로 끼워** 넣는다.
     used = {c for v in members for c in df[v].dropna().unique().tolist()}
     unknown = sorted(c for c in used if c not in vl)
+    fmt = _label_style(vl)
     extra_notes = []
-    for code in unknown:
-        shown = int(code) if float(code).is_integer() else code
-        pairs.append((f"[라벨 없음] {shown}",
-                      int((sub == code).any(axis=1).sum())))
+    pairs = []
+    for code in sorted(set(vl) | set(unknown)):
+        hit = int((sub == code).any(axis=1).sum())
+        known = code in vl
+        # kind 를 'undefined' 로 남긴다 — 엑셀에서 그 줄만 색칠하는 근거가 된다
+        pairs.append((vl[code] if known else fmt(code), hit,
+                      "value" if known else "undefined"))
     if unknown:
         extra_notes.append(
             f"값 라벨에 없는 코드가 {len(unknown)}개 있습니다 — "
@@ -2341,18 +2460,21 @@ def _multi_freq_table(df: pd.DataFrame, meta, stem: str, members: list[str],
         )
 
     if sort_by_count:
-        body = [p for p in pairs if not _is_tail_label(p[0])]
-        tail = [p for p in pairs if _is_tail_label(p[0])]
+        # 라벨 없는 코드는 뒤로 밀지 않는다 (단수 표와 같은 규칙)
+        def _tail(p):
+            return p[2] != "undefined" and _is_tail_label(p[0])
+        body = [p for p in pairs if not _tail(p)]
+        tail = [p for p in pairs if _tail(p)]
         body.sort(key=lambda p: -p[1])
         pairs = body + tail
 
-    response_n = sum(c for _, c in pairs)
+    response_n = sum(c for _, c, _k in pairs)
     rows = [
         FreqRow(label, cnt,
                 round(cnt / valid_n * 100, decimals) if valid_n else 0.0,
                 round(cnt / response_n * 100, decimals) if response_n else None,
-                None, "value")
-        for label, cnt in pairs
+                None, kind)
+        for label, cnt, kind in pairs
     ]
     rows.append(FreqRow("합계(응답 수)", response_n,
                         round(response_n / valid_n * 100, decimals) if valid_n else 0.0,
@@ -2361,9 +2483,10 @@ def _multi_freq_table(df: pd.DataFrame, meta, stem: str, members: list[str],
                         round(valid_n / total_n * 100, decimals) if total_n else 0.0,
                         None, None, "cases"))
 
-    # 묶음 이름: 변수 라벨이 다 같으면 그것을, 다르면 변수명 앞부분을 쓴다
-    labels = {col_labels.get(v) or v for v in members}
-    label = labels.pop() if len(labels) == 1 else stem
+    # 묶음 이름 — 보기별 변수는 라벨이 '문항 문구 + 보기 문구' 라서 서로
+    # 다르다. 예전에는 그때 변수명(stem)을 그대로 써서 목차에 'A1' 만 찍혔다.
+    # 공통 앞부분을 잘라 쓰고, 공통이 너무 짧으면 변수명으로 물러난다.
+    label = _shared_label(col_labels.get(v) or v for v in members) or stem
 
     # 코딩 방식(보기별/언급순서)은 묶을지 말지를 정하는 데만 쓰고 겉으로는
     # 내지 않는다. 읽는 사람에게는 '복수응답' 이면 충분하다.
@@ -2404,7 +2527,14 @@ def compute_frequencies(
     out: list[FreqTable] = []
 
     if group_multi:
-        plan = group_ma_sets(df, meta, variables)
+        plan = []
+        for stem, members, style in group_ma_sets(df, meta, variables):
+            # 순위 문항은 순위별 표를 먼저 내고 합산 표를 뒤에 붙인다.
+            # 합산만 내면 '1순위 1위가 무엇인지' 를 볼 수 없고, 순위별만 내면
+            # '총 언급' 을 못 본다. 실무에서는 둘 다 쓴다.
+            if style == "순위":
+                plan.extend((None, [m], "") for m in members)
+            plan.append((stem, members, style))
     else:
         plan = [(None, [v], "") for v in variables if v in df.columns]
 
@@ -2427,13 +2557,17 @@ def compute_frequencies(
         counts = series.value_counts(dropna=True)
 
         if vl:
-            # 값 라벨이 있는 변수 — 정의된 보기를 전부 쓰고, 정의에 없는 값은 뒤에
-            pairs = [(vl[code], int(counts.get(code, 0)), "value")
-                     for code in sorted(vl.keys())]
+            # 값 라벨이 있는 변수 — 정의된 보기와 정의에 없는 코드를 **코드
+            # 순서대로 섞어서** 놓는다. 라벨 없는 코드를 맨 뒤로 몰면 3번 코드가
+            # 8번 밑에 앉아, 원자료에서 어디가 빈 자리인지 보이지 않는다.
             unknown = [c for c in counts.index if c not in vl]
-            for code in sorted(unknown):
-                shown = int(code) if float(code).is_integer() else code
-                pairs.append((f"[라벨 없음] {shown}", int(counts[code]), "undefined"))
+            fmt = _label_style(vl)
+            pairs = []
+            for code in sorted(set(vl) | set(unknown)):
+                if code in vl:
+                    pairs.append((vl[code], int(counts.get(code, 0)), "value"))
+                else:
+                    pairs.append((fmt(code), int(counts[code]), "undefined"))
             if unknown:
                 notes.append(
                     f"값 라벨에 없는 코드가 {len(unknown)}개 있습니다 — "
@@ -2475,8 +2609,13 @@ def compute_frequencies(
                     pairs.append((str(shown), int(counts[k]), "value"))
 
         if sort_by_count:
-            body = [p for p in pairs if not _is_tail_label(p[0])]
-            tail = [p for p in pairs if _is_tail_label(p[0])]
+            # 라벨 없는 코드는 '기타·모름' 뒤쪽 규칙에서 빼고 응답 수대로
+            # 줄 세운다. 눈에 띄라고 넣은 줄이라 맨 밑으로 밀면 뜻이 없다
+            # ('라벨없음' 이 '없음' 을 품고 있어 그냥 두면 뒤로 밀린다).
+            def _tail(p):
+                return p[2] != "undefined" and _is_tail_label(p[0])
+            body = [p for p in pairs if not _tail(p)]
+            tail = [p for p in pairs if _tail(p)]
             body.sort(key=lambda p: -p[1])
             pairs = body + tail
 
@@ -2531,7 +2670,8 @@ def freq_to_frame(table: FreqTable) -> pd.DataFrame:
     )
 
 
-def _write_freq_table(sheet, row: int, table: FreqTable, S, *, fill=None) -> int:
+def _write_freq_table(sheet, row: int, table: FreqTable, S, *, fill=None,
+                      undef_fill=None) -> int:
     """빈도표 하나를 시트에 쓴다. 다음에 쓸 행 번호를 돌려준다."""
     Border = S["Border"]
     names = table.column_names
@@ -2593,6 +2733,11 @@ def _write_freq_table(sheet, row: int, table: FreqTable, S, *, fill=None) -> int
                 left=S["thick"] if j == 1 else S["thin"],
                 right=S["thick"] if j == ncols else S["thin"],
             )
+            # 값 라벨이 없는 코드는 **줄 전체**를 칠한다. 보기 칸만 칠하면
+            # 표를 훑을 때 왼쪽 끝만 봐야 하고, 그 줄이 몇 명인지 눈이 같이
+            # 따라가지 않는다.
+            if undef_fill is not None and r.kind == "undefined":
+                cell.fill = undef_fill
         sheet.row_dimensions[row].height = 16
         row += 1
 
@@ -2611,16 +2756,22 @@ def _write_freq_table(sheet, row: int, table: FreqTable, S, *, fill=None) -> int
 
 def write_freq_xlsx(tables: list[FreqTable], *,
                     split_sheets: bool = False,
-                    title_fill: str | None = TITLE_FILL) -> bytes:
+                    title_fill: str | None = TITLE_FILL,
+                    undef_fill: str | None = UNDEF_FILL) -> bytes:
     """빈도표들을 엑셀로. 테이블 출력과 같은 서식을 쓰되 자동 줄바꿈은 뺍니다.
 
     목차는 번호 · 변수명 · 변수 라벨 · 유효 N · 비고로 칸을 나눕니다.
+
+    undef_fill 은 **값 라벨이 없는 코드 줄**의 바탕색입니다. 표가 수십 개
+    이어 붙으면 ' 3) 라벨없음' 이라는 글자만으로는 지나치기 쉬워서 색으로
+    표시합니다. 흰색이나 빈 값을 주면 칠하지 않습니다.
     """
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
 
     S = _styles()
     fill = _fill_from(title_fill)
+    ufill = _fill_from(undef_fill)
     wb = Workbook()
     toc = wb.active
     toc.title = "목 차"
@@ -2647,7 +2798,8 @@ def write_freq_xlsx(tables: list[FreqTable], *,
         for i, table in enumerate(tables, start=1):
             name = _sheet_name(table.var, used, i)
             sheet = wb.create_sheet(name)
-            _write_freq_table(sheet, 1, table, S, fill=fill)
+            _write_freq_table(sheet, 1, table, S, fill=fill,
+                              undef_fill=ufill)
             widths(sheet)
             links.append(f"#'{name}'!A1")
     else:
@@ -2655,8 +2807,8 @@ def write_freq_xlsx(tables: list[FreqTable], *,
         row = 1
         for table in tables:
             links.append(f"#'빈도표'!A{row}")
-            row = _write_freq_table(sheet, row, table, S,
-                                    fill=fill) + 1
+            row = _write_freq_table(sheet, row, table, S, fill=fill,
+                                    undef_fill=ufill) + 1
         widths(sheet)
 
     for i, (table, target) in enumerate(zip(tables, links), start=1):
@@ -2676,14 +2828,22 @@ def write_freq_xlsx(tables: list[FreqTable], *,
         n.font, n.alignment = S["font"], S["right"]
         n.number_format = "#,##0"
 
+        # 비고는 여러 개가 겹칠 수 있다 (복수응답이면서 라벨이 빠진 표).
+        marks = []
         if table.table_kind == "multi":
-            note = "복수응답"
+            marks.append("복수응답 · 순위 합산" if table.ma_style == "순위"
+                         else "복수응답")
         elif not table.rows and table.stats:
-            note = "통계 요약"
-        else:
-            note = ""
-        cell = toc.cell(row=r, column=5, value=note)
+            marks.append("통계 요약")
+        n_undef = sum(1 for x in table.rows if x.kind == "undefined")
+        if n_undef:
+            marks.append(f"라벨 누락 {n_undef}개")
+        cell = toc.cell(row=r, column=5, value=" · ".join(marks))
         cell.font, cell.alignment = S["font"], S["left_nw"]
+        # 목차가 100줄을 넘어가면 글자만으로는 훑기 어렵다. 표 안의 줄과 같은
+        # 색을 비고 칸에 깔아 두면 목차를 굴리면서 바로 찾을 수 있다.
+        if n_undef and ufill is not None:
+            cell.fill = ufill
 
     buf = io.BytesIO()
     wb.save(buf)
