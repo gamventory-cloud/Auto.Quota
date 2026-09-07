@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SAV → 엑셀 변환 (v2.4)
+SAV → 엑셀 변환 (v2.5)
 
 SPSS .sav 파일을 업로드하면 여러 시트로 구성된 엑셀 파일을 내려받습니다.
   · Raw        : 숫자 코드 그대로
@@ -21,6 +21,7 @@ import io
 import os
 import re
 import tempfile
+import zipfile
 
 import numpy as np
 import pandas as pd
@@ -451,215 +452,248 @@ def to_excel(sheets: dict, head_color: str = DEFAULT_HEAD_COLOR) -> bytes:
             # 엑셀 기본 너비로 두면 사용자가 전체 선택 후 한 번에 조절할 수 있다.
     return buf.getvalue()
 
-
 # ──────────────────────────────────────────────────────────────
 # UI
 #   흐름은 위에서 아래로 한 줄이다.
 #     SAV 올리기 → (선택) 엑셀 값 반영 → 시트 고르기 → 내려받기
-#   반영을 켜면 그 아래 단계가 모두 '반영된 데이터' 기준으로 돌아간다.
+#
+#   파일을 여러 개 올리면 '엑셀 값 반영' 은 쓸 수 없다.
+#   반영은 파일마다 ID 열과 변수 짝을 따로 정해야 하는 작업이라
+#   여러 파일에 한꺼번에 적용할 수가 없다. 대신 같은 시트·색 설정으로
+#   전부 변환해서 zip 하나로 내려준다.
 # ──────────────────────────────────────────────────────────────
-up = st.file_uploader("SAV 파일을 올려주세요", type=["sav"])
+ups = st.file_uploader("SAV 파일을 올려주세요", type=["sav"],
+                       accept_multiple_files=True)
 
-if not up:
-    st.info("SPSS .sav 파일을 올리면 다음 단계가 나타납니다.")
+if not ups:
+    st.info("SPSS .sav 파일을 올리면 다음 단계가 나타납니다. 여러 개도 됩니다.")
     st.stop()
 
-try:
-    df, col_labels, value_labels, var_types = read_sav_bytes(up.getvalue(), up.name)
-except Exception as e:
-    st.error(f"파일을 읽지 못했습니다: {e}")
-    st.stop()
+multi = len(ups) > 1
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("응답자 수", f"{len(df):,}")
-c2.metric("변수 수", f"{len(df.columns):,}")
-c3.metric("값 레이블이 있는 변수", f"{sum(1 for c in df.columns if c in value_labels):,}")
-c4.metric("문자형 변수", f"{len(find_text_cols(df, var_types)):,}")
+# ── 올린 파일 읽기 ──
+loaded = []          # [(파일, df, col_labels, value_labels, var_types), ...]
+for f in ups:
+    try:
+        _d, _cl, _vl, _vt = read_sav_bytes(f.getvalue(), f.name)
+    except Exception as e:
+        st.error(f"‘{f.name}’ 을 읽지 못했습니다: {e}")
+        st.stop()
+    loaded.append((f, _d, _cl, _vl, _vt))
 
-if len(df) > 10_000:
-    st.warning(
-        f"행이 {len(df):,}개입니다. 1만 행이 넘으면 변환이 느리거나 "
-        "메모리 한도에 걸릴 수 있습니다."
+if multi:
+    st.dataframe(
+        pd.DataFrame([{
+            "파일": f.name,
+            "응답자": len(d),
+            "변수": len(d.columns),
+            "값 레이블 변수": sum(1 for c in d.columns if c in vl),
+            "문자형 변수": len(find_text_cols(d, vt)),
+        } for f, d, cl, vl, vt in loaded]),
+        hide_index=True, use_container_width=True,
     )
+    big = [f.name for f, d, *_ in loaded if len(d) > 10_000]
+    if big:
+        st.warning(
+            f"1만 행이 넘는 파일이 {len(big)}개 있습니다. 변환이 느리거나 "
+            "메모리 한도에 걸릴 수 있습니다 — " + ", ".join(big[:5])
+        )
+else:
+    up, df, col_labels, value_labels, var_types = loaded[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("응답자 수", f"{len(df):,}")
+    c2.metric("변수 수", f"{len(df.columns):,}")
+    c3.metric("값 레이블이 있는 변수",
+              f"{sum(1 for c in df.columns if c in value_labels):,}")
+    c4.metric("문자형 변수", f"{len(find_text_cols(df, var_types)):,}")
+    if len(df) > 10_000:
+        st.warning(
+            f"행이 {len(df):,}개입니다. 1만 행이 넘으면 변환이 느리거나 "
+            "메모리 한도에 걸릴 수 있습니다."
+        )
 
 st.divider()
 
 # ══════════════════════════════════════════════════════════════
-#  1. 엑셀 값 반영 (선택)
+#  1. 엑셀 값 반영 (파일 하나일 때만)
 # ══════════════════════════════════════════════════════════════
-st.subheader("1. 엑셀 값 반영 " + "(선택)")
-
-do_patch = st.checkbox(
-    "엑셀 파일의 값으로 덮어쓰기",
-    value=False,
-    help="코딩·수정을 마친 엑셀을 올리면 ID 로 짝을 맞춰 같은 이름의 변수를 "
-         "덮어씁니다. 엑셀의 빈칸은 건드리지 않습니다.",
-)
-
-# 아래 단계에서 쓸 '작업 데이터'. 반영을 안 하면 원본 그대로다.
-work_df, work_labels, work_types = df, value_labels, var_types
 patched, rep = False, None
 
-if do_patch:
-    pf = st.file_uploader("수정 값이 든 엑셀 또는 CSV",
-                          type=["xlsx", "xls", "csv"], key="SX_patch")
-    if not pf:
-        st.info("엑셀 파일을 올리면 짝을 맞춰 보여드립니다.")
-        st.stop()
+if multi:
+    st.subheader("1. 엑셀 값 반영")
+    st.info(
+        "파일이 여러 개일 때는 쓸 수 없습니다. 반영은 파일마다 ID 열과 "
+        "변수 짝을 따로 정해야 하기 때문입니다. "
+        "값을 반영하려면 SAV 를 하나만 올려 주세요."
+    )
+else:
+    st.subheader("1. 엑셀 값 반영 " + "(선택)")
 
-    # ── 시트 고르기 (엑셀이 여러 시트일 때) ──
-    try:
-        sheet_names = list_sheets(pf.getvalue(), pf.name)
-    except Exception as e:
-        st.error(
-            f"시트 목록을 읽지 못했습니다: {e}\n\n"
-            ".xls 파일이라면 requirements.txt 에 xlrd 가 있는지 확인해 주세요."
-        )
-        st.stop()
+    work_df, work_labels, work_types = df, value_labels, var_types
 
-    sheet = 0
-    if sheet_names:
-        if len(sheet_names) == 1:
-            sheet = sheet_names[0]
-            st.caption(f"시트: {sheet}")
-        else:
-            HINTS = ("코딩", "수정", "반영", "결과", "data", "raw")
-            guess = next((i for i, s in enumerate(sheet_names)
-                          if any(h in str(s).lower() for h in HINTS)), 0)
-            sheet = st.selectbox(
-                f"시트 고르기 (총 {len(sheet_names)}개)",
-                sheet_names, index=guess,
-                help="값이 든 시트를 고르세요. 첫 시트가 표지인 경우가 많습니다.",
+    do_patch = st.checkbox(
+        "엑셀 파일의 값으로 덮어쓰기",
+        value=False,
+        help="코딩·수정을 마친 엑셀을 올리면 ID 로 짝을 맞춰 지정한 변수를 "
+             "덮어씁니다. 엑셀의 빈칸은 건드리지 않습니다.",
+    )
+
+    if do_patch:
+        pf = st.file_uploader("수정 값이 든 엑셀 또는 CSV",
+                              type=["xlsx", "xls", "csv"], key="SX_patch")
+        if not pf:
+            st.info("엑셀 파일을 올리면 짝을 맞춰 보여드립니다.")
+            st.stop()
+
+        try:
+            sheet_names = list_sheets(pf.getvalue(), pf.name)
+        except Exception as e:
+            st.error(
+                f"시트 목록을 읽지 못했습니다: {e}\n\n"
+                ".xls 파일이라면 requirements.txt 에 xlrd 가 있는지 확인해 주세요."
+            )
+            st.stop()
+
+        sheet = 0
+        if sheet_names:
+            if len(sheet_names) == 1:
+                sheet = sheet_names[0]
+                st.caption(f"시트: {sheet}")
+            else:
+                HINTS = ("코딩", "수정", "반영", "결과", "data", "raw")
+                guess = next((i for i, s in enumerate(sheet_names)
+                              if any(h in str(s).lower() for h in HINTS)), 0)
+                sheet = st.selectbox(
+                    f"시트 고르기 (총 {len(sheet_names)}개)",
+                    sheet_names, index=guess,
+                    help="값이 든 시트를 고르세요. 첫 시트가 표지인 경우가 많습니다.",
+                )
+
+        try:
+            patch = read_table_bytes(pf.getvalue(), pf.name, sheet)
+        except Exception as e:
+            st.error(f"파일을 읽지 못했습니다: {e}")
+            st.stop()
+
+        if patch.empty or not len(patch.columns):
+            st.warning("고른 시트가 비어 있습니다. 다른 시트를 골라 주세요.")
+            st.stop()
+
+        st.write(f"올리신 파일: {len(patch):,}행 × {len(patch.columns)}열")
+        with st.expander("고른 시트 미리보기"):
+            st.dataframe(
+                patch.head(10).astype(str).replace("None", "").replace("nan", ""),
+                hide_index=True, use_container_width=True,
             )
 
-    try:
-        patch = read_table_bytes(pf.getvalue(), pf.name, sheet)
-    except Exception as e:
-        st.error(f"파일을 읽지 못했습니다: {e}")
-        st.stop()
-
-    if patch.empty or not len(patch.columns):
-        st.warning("고른 시트가 비어 있습니다. 다른 시트를 골라 주세요.")
-        st.stop()
-
-    st.write(f"올리신 파일: {len(patch):,}행 × {len(patch.columns)}열")
-    with st.expander("고른 시트 미리보기"):
-        st.dataframe(
-            patch.head(10).astype(str).replace("None", "").replace("nan", ""),
-            hide_index=True, use_container_width=True,
-        )
-
-    kc = find_key_cols(df)
-    k1, k2 = st.columns(2)
-    with k1:
-        sav_key = st.selectbox(
-            "SAV 의 ID 변수", list(df.columns),
-            index=list(df.columns).index(kc[0]) if kc else 0,
-        )
-    with k2:
-        pcols = [str(c) for c in patch.columns]
-        guess = next((i for i, c in enumerate(pcols)
+        kc = find_key_cols(df)
+        k1, k2 = st.columns(2)
+        with k1:
+            sav_key = st.selectbox(
+                "SAV 의 ID 변수", list(df.columns),
+                index=list(df.columns).index(kc[0]) if kc else 0,
+            )
+        with k2:
+            pcols = [str(c) for c in patch.columns]
+            g = next((i for i, c in enumerate(pcols)
                       if c.lower() == str(sav_key).lower()), 0)
-        patch_key = st.selectbox("엑셀의 ID 열", pcols, index=guess)
+            patch_key = st.selectbox("엑셀의 ID 열", pcols, index=g)
 
-    # ── 변수 짝 맞추기 (표에서 직접 고칠 수 있다) ──
-    st.markdown("**변수 짝 맞추기**")
-    st.caption(
-        "이름이 같은 변수는 미리 채워 뒀습니다. 'SAV 변수' 칸을 눌러 바꾸거나, "
-        "넣지 않을 열은 " + SKIP_LABEL + " 로 두세요."
-    )
-
-    guess_df = guess_mapping(df, patch, sav_key, patch_key)
-    if guess_df.empty:
-        st.warning("ID 열 말고는 열이 없습니다. 다른 시트를 골라 주세요.")
-        st.stop()
-
-    edited = st.data_editor(
-        guess_df,
-        hide_index=True,
-        use_container_width=True,
-        # 파일·시트·ID 가 바뀌면 표를 새로 그린다
-        key=f"SX_map_{pf.name}_{sheet}_{sav_key}_{patch_key}",
-        column_config={
-            "엑셀 열": st.column_config.TextColumn("엑셀 열", disabled=True),
-            "값 예시": st.column_config.TextColumn("값 예시", disabled=True,
-                                                width="medium"),
-            "채워진 칸": st.column_config.NumberColumn("채워진 칸", disabled=True,
-                                                   width="small"),
-            "SAV 변수": st.column_config.SelectboxColumn(
-                "SAV 변수", options=[SKIP_LABEL] + list(df.columns),
-                required=True,
-            ),
-        },
-    )
-
-    mapping = dict(zip(edited["엑셀 열"], edited["SAV 변수"]))
-
-    # 같은 SAV 변수에 두 열을 넣으면 뒤엣것이 앞엣것을 덮는다
-    used = [v for v in mapping.values() if v != SKIP_LABEL]
-    dups = sorted({v for v in used if used.count(v) > 1})
-    if dups:
-        st.warning(
-            "같은 SAV 변수에 엑셀 열이 둘 이상 연결됐습니다. "
-            "표 아래쪽 열이 위쪽을 덮어씁니다 — " + ", ".join(dups)
+        # ── 변수 짝 맞추기 (표에서 직접 고칠 수 있다) ──
+        st.markdown("**변수 짝 맞추기**")
+        st.caption(
+            "이름이 같은 변수는 미리 채워 뒀습니다. 'SAV 변수' 칸을 눌러 바꾸거나, "
+            "넣지 않을 열은 " + SKIP_LABEL + " 로 두세요."
         )
 
-    with st.spinner("맞춰 보는 중입니다…"):
-        new_df, new_labels, rep = apply_patch(
-            df, value_labels, var_types, patch, sav_key, patch_key, mapping)
+        guess_df = guess_mapping(df, patch, sav_key, patch_key)
+        if guess_df.empty:
+            st.warning("ID 열 말고는 열이 없습니다. 다른 시트를 골라 주세요.")
+            st.stop()
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("짝이 맞은 응답자", f"{rep['matched']:,}")
-    m2.metric("덮어쓸 변수", f"{len(rep['changed']):,}")
-    m3.metric("바뀌는 셀", f"{sum(rep['changed'].values()):,}")
-
-    if rep["unmatched_ids"]:
-        st.warning(
-            f"SAV 에 없는 ID {len(rep['unmatched_ids'])}개는 넘겼습니다 — "
-            + ", ".join(rep["unmatched_ids"][:10])
-            + (" …" if len(rep["unmatched_ids"]) > 10 else "")
+        edited = st.data_editor(
+            guess_df,
+            hide_index=True,
+            use_container_width=True,
+            key=f"SX_map_{pf.name}_{sheet}_{sav_key}_{patch_key}",
+            column_config={
+                "엑셀 열": st.column_config.TextColumn("엑셀 열", disabled=True),
+                "값 예시": st.column_config.TextColumn("값 예시", disabled=True,
+                                                    width="medium"),
+                "채워진 칸": st.column_config.NumberColumn("채워진 칸",
+                                                       disabled=True,
+                                                       width="small"),
+                "SAV 변수": st.column_config.SelectboxColumn(
+                    "SAV 변수", options=[SKIP_LABEL] + list(df.columns),
+                    required=True,
+                ),
+            },
         )
 
-    if rep["only_in_patch"]:
-        st.info(
-            f"연결하지 않아 넘긴 열 {len(rep['only_in_patch'])}개 — "
-            + ", ".join(rep["only_in_patch"][:10])
-            + (" …" if len(rep["only_in_patch"]) > 10 else "")
-        )
+        mapping = dict(zip(edited["엑셀 열"], edited["SAV 변수"]))
 
-    if rep["to_text"]:
-        st.warning(
-            "문자 값이 섞여 아래 변수는 **문자형으로 바뀝니다**. "
-            "SPSS 는 한 변수에 숫자와 문자를 섞을 수 없어서, "
-            "다른 응답자의 숫자도 글자가 되고 값 라벨은 버려집니다.\n\n"
-            + ", ".join(rep["to_text"])
-        )
+        used = [v for v in mapping.values() if v != SKIP_LABEL]
+        dups = sorted({v for v in used if used.count(v) > 1})
+        if dups:
+            st.warning(
+                "같은 SAV 변수에 엑셀 열이 둘 이상 연결됐습니다. "
+                "표 아래쪽 열이 위쪽을 덮어씁니다 — " + ", ".join(dups)
+            )
 
-    if not rep["changed"]:
-        st.warning(
-            "덮어쓸 값이 없습니다. ID 열이 맞는지, 위 표에서 SAV 변수를 "
-            "연결했는지 확인해 주세요."
-        )
-        st.stop()
+        with st.spinner("맞춰 보는 중입니다…"):
+            new_df, new_labels, rep = apply_patch(
+                df, value_labels, var_types, patch, sav_key, patch_key, mapping)
 
-    with st.expander(f"변수별 변경 셀 수 ({len(rep['changed'])}개 변수)"):
-        st.dataframe(
-            pd.DataFrame({
-                "변수": list(rep["changed"].keys()),
-                "바뀌는 셀": list(rep["changed"].values()),
-                "문자형으로 바뀜": ["예" if k in rep["to_text"] else ""
-                                for k in rep["changed"]],
-            }),
-            hide_index=True, use_container_width=True,
-        )
+        m1, m2, m3 = st.columns(3)
+        m1.metric("짝이 맞은 응답자", f"{rep['matched']:,}")
+        m2.metric("덮어쓸 변수", f"{len(rep['changed']):,}")
+        m3.metric("바뀌는 셀", f"{sum(rep['changed'].values()):,}")
 
-    # 이 아래는 모두 반영된 데이터로 돈다.
-    # 유형이 바뀐 변수를 반영하지 않으면 Open 시트가 옛 기준으로 만들어진다.
-    work_df, work_labels = new_df, new_labels
-    work_types = dict(var_types)
-    for c in rep["to_text"]:
-        work_types[c] = "string"
-    patched = True
+        if rep["unmatched_ids"]:
+            st.warning(
+                f"SAV 에 없는 ID {len(rep['unmatched_ids'])}개는 넘겼습니다 — "
+                + ", ".join(rep["unmatched_ids"][:10])
+                + (" …" if len(rep["unmatched_ids"]) > 10 else "")
+            )
+
+        if rep["only_in_patch"]:
+            st.info(
+                f"연결하지 않아 넘긴 열 {len(rep['only_in_patch'])}개 — "
+                + ", ".join(rep["only_in_patch"][:10])
+                + (" …" if len(rep["only_in_patch"]) > 10 else "")
+            )
+
+        if rep["to_text"]:
+            st.warning(
+                "문자 값이 섞여 아래 변수는 **문자형으로 바뀝니다**. "
+                "SPSS 는 한 변수에 숫자와 문자를 섞을 수 없어서, "
+                "다른 응답자의 숫자도 글자가 되고 값 라벨은 버려집니다.\n\n"
+                + ", ".join(rep["to_text"])
+            )
+
+        if not rep["changed"]:
+            st.warning(
+                "덮어쓸 값이 없습니다. ID 열이 맞는지, 위 표에서 SAV 변수를 "
+                "연결했는지 확인해 주세요."
+            )
+            st.stop()
+
+        with st.expander(f"변수별 변경 셀 수 ({len(rep['changed'])}개 변수)"):
+            st.dataframe(
+                pd.DataFrame({
+                    "변수": list(rep["changed"].keys()),
+                    "바뀌는 셀": list(rep["changed"].values()),
+                    "문자형으로 바뀜": ["예" if k in rep["to_text"] else ""
+                                    for k in rep["changed"]],
+                }),
+                hide_index=True, use_container_width=True,
+            )
+
+        work_df, work_labels = new_df, new_labels
+        work_types = dict(var_types)
+        for c in rep["to_text"]:
+            work_types[c] = "string"
+        patched = True
 
 st.divider()
 
@@ -668,22 +702,24 @@ st.divider()
 # ══════════════════════════════════════════════════════════════
 st.subheader("2. 담을 시트 고르기")
 
-key_cols = find_key_cols(work_df)
-text_cols = find_text_cols(work_df, work_types)
+if multi:
+    key_hint, text_cols = "NO, id", None
+else:
+    key_cols = find_key_cols(work_df)
+    text_cols = find_text_cols(work_df, work_types)
+    key_hint = ", ".join(key_cols)
 
 s1, s2, s3, s4, s5 = st.columns(5)
 want_raw = s1.checkbox("Raw (숫자 코드)", value=True)
 want_label = s2.checkbox("Label (값 레이블)", value=True)
 want_open = s3.checkbox(
-    "Open (주관식)",
-    value=True,
-    help="키 변수(" + ", ".join(key_cols) + ")와 문자형 변수를 담습니다.",
+    "Open (주관식)", value=True,
+    help=f"키 변수({key_hint})와 문자형 변수를 담습니다.",
 )
 want_code = s4.checkbox(
-    "Code (코드북)",
-    value=True,
-    help="변수마다 문항과 코드값/보기를 블록으로 정리합니다. "
-         "키 변수(" + ", ".join(key_cols) + ")는 제외합니다.",
+    "Code (코드북)", value=True,
+    help=f"변수마다 문항과 코드값/보기를 블록으로 정리합니다. "
+         f"키 변수({key_hint})는 제외합니다.",
 )
 want_guide = s5.checkbox("변수 가이드", value=True)
 
@@ -714,41 +750,47 @@ if head_color:
 else:
     st.caption("색 없이 굵게만 표시됩니다.")
 
-if want_open and not text_cols:
+if want_open and text_cols is not None and not text_cols:
     st.info(
-        "문자형 변수가 없어 Open 시트에 키 변수("
-        + ", ".join(key_cols)
-        + ")만 담깁니다. 주관식 응답을 옆에 붙여 코딩하실 때 쓰시면 됩니다."
+        f"문자형 변수가 없어 Open 시트에 키 변수({key_hint})만 담깁니다. "
+        "주관식 응답을 옆에 붙여 코딩하실 때 쓰시면 됩니다."
     )
 
 if not (want_raw or want_label or want_open or want_code or want_guide):
     st.warning("시트를 하나 이상 선택해주세요.")
     st.stop()
 
-# ── 시트 구성 (Raw → Label → Open → Code → 변수 가이드) ──
-sheets = {}
-if want_raw:
-    sheets["Raw"] = build_raw(work_df)
-if want_label:
-    sheets["Label"] = build_label(work_df, work_labels)
-if want_open:
-    sheets["Open"] = build_open(work_df, text_cols, key_cols)
-if want_code:
-    sheets["Code"] = build_codebook(work_df, col_labels, work_labels, key_cols)
-if want_guide:
-    sheets["변수 가이드"] = build_guide(work_df, col_labels)
 
-with st.expander("미리보기", expanded=not patched):
-    tabs = st.tabs(list(sheets.keys()))
-    for tab, (name, frame) in zip(tabs, sheets.items()):
-        with tab:
-            st.dataframe(
-                frame.head(20).astype(str).replace("None", ""),
-                use_container_width=True,
-                hide_index=True,
-            )
-            if len(frame) > 20:
-                st.caption(f"위 20행만 표시 · 전체 {len(frame):,}행")
+def build_sheets(d: pd.DataFrame, cl: dict, vlab: dict, vtyp: dict) -> dict:
+    """고른 설정대로 시트를 만든다. 파일마다 이 함수를 쓴다."""
+    kc = find_key_cols(d)
+    tc = find_text_cols(d, vtyp)
+    out = {}
+    if want_raw:
+        out["Raw"] = build_raw(d)
+    if want_label:
+        out["Label"] = build_label(d, vlab)
+    if want_open:
+        out["Open"] = build_open(d, tc, kc)
+    if want_code:
+        out["Code"] = build_codebook(d, cl, vlab, kc)
+    if want_guide:
+        out["변수 가이드"] = build_guide(d, cl)
+    return out
+
+
+if not multi:
+    sheets = build_sheets(work_df, col_labels, work_labels, work_types)
+    with st.expander("미리보기", expanded=not patched):
+        tabs = st.tabs(list(sheets.keys()))
+        for tab, (name, frame) in zip(tabs, sheets.items()):
+            with tab:
+                st.dataframe(
+                    frame.head(20).astype(str).replace("None", ""),
+                    use_container_width=True, hide_index=True,
+                )
+                if len(frame) > 20:
+                    st.caption(f"위 20행만 표시 · 전체 {len(frame):,}행")
 
 st.divider()
 
@@ -757,22 +799,63 @@ st.divider()
 # ══════════════════════════════════════════════════════════════
 st.subheader("3. 파일 만들기")
 
-stem = os.path.splitext(up.name)[0] + ("_반영" if patched else "")
+if multi:
+    st.caption(f"{len(loaded)}개 파일을 같은 설정으로 변환해 zip 하나로 묶습니다.")
 
 if st.button("만들기", type="primary", use_container_width=True):
-    with st.spinner("파일을 만드는 중입니다…"):
+    if multi:
+        buf, used_names = io.BytesIO(), set()
+        bar = st.progress(0.0, text="시작합니다…")
         try:
-            st.session_state["SX_xlsx"] = to_excel(sheets, head_color)
-            st.session_state["SX_sav"] = (
-                write_sav(work_df, col_labels, work_labels) if patched else None)
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for i, (f, d, cl, vlab, vtyp) in enumerate(loaded, start=1):
+                    bar.progress((i - 1) / len(loaded),
+                                 text=f"{i}/{len(loaded)} · {f.name}")
+                    stem = os.path.splitext(f.name)[0]
+                    name = stem + ".xlsx"
+                    n = 2
+                    while name in used_names:      # 이름이 겹치면 번호를 붙인다
+                        name = f"{stem}({n}).xlsx"
+                        n += 1
+                    used_names.add(name)
+                    zf.writestr(name,
+                                to_excel(build_sheets(d, cl, vlab, vtyp),
+                                         head_color))
+            bar.progress(1.0, text="다 됐습니다.")
         except Exception as e:
             st.error(f"파일 생성에 실패했습니다: {e}")
             st.stop()
-    st.session_state["SX_stem"] = stem
+        st.session_state["SX_zip"] = buf.getvalue()
+        st.session_state["SX_zip_name"] = f"SAV_엑셀변환_{len(loaded)}개.zip"
+        st.session_state.pop("SX_xlsx", None)
+        st.session_state.pop("SX_sav", None)
+    else:
+        with st.spinner("파일을 만드는 중입니다…"):
+            try:
+                st.session_state["SX_xlsx"] = to_excel(sheets, head_color)
+                st.session_state["SX_sav"] = (
+                    write_sav(work_df, col_labels, work_labels)
+                    if patched else None)
+            except Exception as e:
+                st.error(f"파일 생성에 실패했습니다: {e}")
+                st.stop()
+        st.session_state["SX_stem"] = (
+            os.path.splitext(up.name)[0] + ("_반영" if patched else ""))
+        st.session_state.pop("SX_zip", None)
+
+if st.session_state.get("SX_zip"):
+    st.success("다 됐습니다.")
+    st.download_button(
+        "zip 내려받기",
+        data=st.session_state["SX_zip"],
+        file_name=st.session_state["SX_zip_name"],
+        mime="application/zip",
+        use_container_width=True,
+    )
 
 if st.session_state.get("SX_xlsx"):
     st.success("다 됐습니다.")
-    stem = st.session_state.get("SX_stem", stem)
+    stem = st.session_state.get("SX_stem", "output")
     d1, d2 = st.columns(2)
     with d1:
         st.download_button(
