@@ -125,7 +125,31 @@ v3 변경점 (추가 쿼터 100% 할당)
       불러오면 이전 값이 그대로 남아 "불러왔는데 안 바뀐다" 가 됐다.
     - 프리셋 적용/해제/업로드 시 _reset_widget_state() 로 해당 키만 지운다.
       ("이름 + 숫자" 형태만 정규식으로 정확히 집는다)
-30. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+30. 쿼터표 엑셀 업로드 확장
+    - 메인 쿼터에 '목록(평면) 형식' 추가 : utils.parse_main_flat
+        SQ1 | SQ2 | SQ3 | SQ4 | 목표
+      머리글이 데이터 컬럼명이라 화면에서 qt1/qt2/qt3 를 지정할 필요가 없고,
+      변수 개수 제한도 없다 (피벗 형식은 3개 고정이었다).
+      '메인쿼터' 시트가 있으면 그것을, 없으면 목표 열이 있는 첫 시트를,
+      그것도 없으면 첫 시트를 예전 피벗 형식으로 읽는다 (하위호환 유지).
+    - 추가 쿼터도 같은 파일의 '추가쿼터' 시트에서 읽는다 : utils.parse_extra_flat
+        그룹명 | 방식 | 변수 | 값1 | 값2 | 값3 | 목표
+      단순/조합, 복수응답(변수 여러 개)까지 지원. 변수와 목표가 모두 시트에
+      있으므로 화면에서 입력할 것이 없다.
+      체크박스로 껐다 켤 수 있고, 끄면 예전처럼 탭에서 직접 설정한다.
+    - 잘못된 줄은 엑셀 줄번호와 함께 알리고 그 줄만 건너뛴다.
+31. 쿼터표 업로드 양식 내려받기 (utils.build_quota_form_xlsx)
+    - 화면에서 한 번 설정한 뒤 양식을 받아두면, 다음부터는 목표 숫자만 고쳐
+      업로드하면 된다. 양식을 손으로 만들 필요가 없다.
+    - 생성 형식은 parse_main_flat / parse_extra_flat 이 그대로 읽는 형식이라
+      "생성 -> 재업로드 -> 같은 쿼터" 왕복이 보장된다 (테스트로 확인).
+    - 메인 4변수, 조합형, 복수응답, 추가 쿼터 없음, 메인 미사용까지 확인.
+    - 데이터 시트에는 표 외의 칸을 넣지 않는다. 안내문 한 줄도 데이터로 읽혀
+      파싱이 깨진다(실제로 겪었다). 설명은 사용법 시트에 둔다.
+32. 추가 쿼터 전용 엑셀 업로더 추가
+    - 예전에는 메인 쿼터를 '엑셀 업로드' 로 할 때만 '추가쿼터' 시트가 읽혔다.
+      메인을 화면 설계로 하거나 안 쓰면 추가 쿼터 엑셀을 올릴 방법이 없었다.
+33. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
@@ -576,27 +600,80 @@ if data_file:
             if preset_get("main.q_mode") in _qm else 1)
 
         if q_mode == "엑셀 업로드":
-            qf = st.file_uploader("쿼터 파일", type=['xlsx'])
-            c1, c2, c3 = st.columns(3)
-            with c1: q1 = st.selectbox("qt1", df_survey.columns)
-            with c2: q2 = st.selectbox("qt2", df_survey.columns)
-            with c3: q3 = st.selectbox("qt3", df_survey.columns)
+            qf = st.file_uploader("쿼터 파일", type=['xlsx'], key="QS_quotafile")
             if qf:
-                algo_main_cols = [q1, q2, q3]
                 try:
-                    raw = pd.read_excel(qf, 0, header=None)
-                    flat = utils.transform_pivoted_quota(raw)
-                    # 키는 utils.norm_val 로 이미 정규화되어 있다
-                    main_map = {
-                        (r.qt1, r.qt2, r.qt3): int(r.target)
-                        for r in flat.itertuples()
-                    }
-                    st.caption(f"쿼터 셀 {len(main_map)}개 / 목표 합계 {sum(main_map.values()):,}명")
+                    _xl = pd.ExcelFile(qf)
+                    _sheets = list(_xl.sheet_names)
+
+                    # ── 메인 쿼터 : 목록 형식이 있으면 그쪽을 쓴다 ──────────
+                    #  목록 형식은 머리글이 데이터 컬럼명이라 변수 지정이 필요 없고
+                    #  변수 개수 제한도 없다. 없으면 예전 피벗 형식으로 읽는다.
+                    _flat_sheet = None
+                    for _sn in _sheets:
+                        if str(_sn).strip() in ("메인쿼터", "쿼터목록", "메인쿼터_목록"):
+                            _flat_sheet = _sn
+                            break
+                    if _flat_sheet is None:
+                        for _sn in _sheets:
+                            _hd = _xl.parse(_sn, nrows=0)
+                            if (utils._find_target_col(_hd.columns) is not None
+                                    and "그룹명" not in _hd.columns):
+                                _flat_sheet = _sn
+                                break
+
+                    if _flat_sheet is not None:
+                        _raw = _xl.parse(_flat_sheet)
+                        main_map, _mc, _me = utils.parse_main_flat(
+                            _raw, list(df_survey.columns))
+                        for _m in _me:
+                            (st.error if not main_map else st.warning)(_m)
+                        if main_map:
+                            algo_main_cols = list(_mc)
+                            st.success(
+                                f"`{_flat_sheet}` 시트에서 읽었습니다 — "
+                                f"쿼터 셀 {len(main_map):,}개 / 목표 합계 "
+                                f"{sum(main_map.values()):,}명")
+                            st.caption("쿼터 변수: " + " × ".join(map(str, _mc))
+                                       + "  (머리글이 컬럼명이라 지정 단계가 없습니다)")
+                    else:
+                        st.caption(
+                            "피벗 형식으로 읽습니다. 첫 시트를 사용하며 "
+                            "qt1·qt2·qt3 에 해당하는 컬럼을 지정해 주세요. "
+                            "변수가 4개 이상이면 '메인쿼터' 목록 시트를 쓰세요.")
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            q1 = st.selectbox("qt1", df_survey.columns)
+                        with c2:
+                            q2 = st.selectbox("qt2", df_survey.columns)
+                        with c3:
+                            q3 = st.selectbox("qt3", df_survey.columns)
+                        algo_main_cols = [q1, q2, q3]
+                        raw = pd.read_excel(qf, 0, header=None)
+                        flat = utils.transform_pivoted_quota(raw)
+                        main_map = {
+                            (r.qt1, r.qt2, r.qt3): int(r.target)
+                            for r in flat.itertuples()
+                        }
+                        st.caption(f"쿼터 셀 {len(main_map)}개 / 목표 합계 "
+                                   f"{sum(main_map.values()):,}명")
+
+                    # ── 추가 쿼터 시트도 같은 파일에서 읽는다 ───────────────
+                    if "추가쿼터" in _sheets:
+                        _ecfg, _eerr = utils.parse_extra_flat(
+                            _xl.parse("추가쿼터"), list(df_survey.columns))
+                        st.session_state["QS_excel_extras"] = _ecfg
+                        st.session_state["QS_excel_extra_errs"] = _eerr
+                    else:
+                        st.session_state.pop("QS_excel_extras", None)
+                        st.session_state.pop("QS_excel_extra_errs", None)
                 except Exception as e:
                     # [수정] bare except 제거. 원인을 그대로 보여준다.
                     st.error(f"쿼터 엑셀 파싱 실패 — {type(e).__name__}: {e}")
                     with st.expander("상세 오류"):
                         st.code(traceback.format_exc())
+            else:
+                st.session_state.pop("QS_excel_extras", None)
 
         else:
             _cols = list(df_survey.columns)
@@ -663,7 +740,75 @@ if data_file:
     # --------------------------------------------------------------------------
     ex_configs = []
     MAX_EXTRA = 8          # 추가 쿼터 그룹 최대 개수
-    tabs = st.tabs([f"추가 {i+1}" for i in range(MAX_EXTRA)])
+
+    # ── 엑셀의 '추가쿼터' 시트를 읽어왔으면 그걸 쓸 수 있게 한다 ────────────
+    #  메인 쿼터를 '엑셀 업로드' 로 하면 그 파일에서 이미 읽어온다.
+    #  메인을 화면 설계로 하거나 아예 안 쓰는 경우엔 여기서 따로 올릴 수 있게 한다.
+    if st.session_state.get("QS_excel_extras") is None:
+        _ef = st.file_uploader(
+            "추가 쿼터 엑셀 (선택) — '추가쿼터' 시트가 있는 파일",
+            type=['xlsx'], key="QS_extrafile",
+            help="쿼터표 양식의 '추가쿼터' 시트를 읽습니다. 올리지 않으면 "
+                 "아래 탭에서 직접 설정합니다.")
+        if _ef is not None:
+            try:
+                _exl = pd.ExcelFile(_ef)
+                if "추가쿼터" in _exl.sheet_names:
+                    _c, _e = utils.parse_extra_flat(
+                        _exl.parse("추가쿼터"), list(df_survey.columns))
+                    st.session_state["QS_excel_extras"] = _c
+                    st.session_state["QS_excel_extra_errs"] = _e
+                else:
+                    st.warning("이 파일에 '추가쿼터' 시트가 없습니다.")
+            except Exception as _xe:                      # noqa: BLE001
+                st.error(f"추가쿼터 시트를 읽지 못했습니다 — "
+                         f"{type(_xe).__name__}: {_xe}")
+
+    _xl_ex = st.session_state.get("QS_excel_extras")
+    _xl_ex_err = st.session_state.get("QS_excel_extra_errs") or []
+    use_excel_ex = False
+    if _xl_ex is not None:
+        use_excel_ex = st.checkbox(
+            f"📄 엑셀의 '추가쿼터' 시트 사용 ({len(_xl_ex)}개 그룹)",
+            value=bool(_xl_ex),
+            help="끄면 아래 탭에서 직접 설정합니다. 엑셀에는 변수와 목표가 모두 "
+                 "적혀 있으므로 켜두면 따로 입력할 것이 없습니다.")
+        for _e in _xl_ex_err:
+            st.warning(f"⚠️ 추가쿼터 시트 {_e}")
+
+    if use_excel_ex:
+        if len(_xl_ex) > MAX_EXTRA:
+            st.error(f"추가 쿼터는 최대 {MAX_EXTRA}개입니다. "
+                     f"엑셀에 {len(_xl_ex)}개 그룹이 있어 앞의 {MAX_EXTRA}개만 씁니다.")
+            _xl_ex = _xl_ex[:MAX_EXTRA]
+        _rows = []
+        for _c in _xl_ex:
+            ex_configs.append({"name": _c["name"], "mode": _c["mode"],
+                               "cols": list(_c["cols"]), "map": dict(_c["map"])})
+            _rows.append({
+                "추가 쿼터": _c["name"],
+                "방식": "조합" if _c["mode"] == "grid" else (
+                    "단순(복수응답)" if len(_c["cols"]) > 1 else "단순"),
+                "변수": ", ".join(map(str, _c["cols"])),
+                "항목 수": len(_c["map"]),
+                "목표 합계": sum(_c["map"].values()),
+            })
+        if _rows:
+            st.dataframe(pd.DataFrame(_rows), use_container_width=True,
+                         hide_index=True)
+            with st.expander("항목별 목표 보기"):
+                _det = []
+                for _c in _xl_ex:
+                    for _k, _v in _c["map"].items():
+                        _det.append({
+                            "추가 쿼터": _c["name"],
+                            "값": " / ".join(_k) if isinstance(_k, tuple) else str(_k),
+                            "목표": _v})
+                st.dataframe(pd.DataFrame(_det), use_container_width=True,
+                             hide_index=True)
+        tabs = []
+    else:
+        tabs = st.tabs([f"추가 {i+1}" for i in range(MAX_EXTRA)])
 
     for i, tab in enumerate(tabs):
         with tab:
@@ -1015,6 +1160,23 @@ if data_file:
 
         _n_ex = sum(1 for c in ex_configs if c['cols'])
         st.write(f"저장될 내용 — 메인 {len(main_map):,}셀 / 추가 쿼터 {_n_ex}개")
+
+        st.download_button(
+            "📄 쿼터표 업로드 양식 내려받기",
+            (utils.build_quota_form_xlsx(
+                main_map, algo_main_cols, ex_configs,
+                getattr(data_file, "name", "")) if main_map else b""),
+            file_name=f"쿼터표_{_slug}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument."
+                 "spreadsheetml.sheet",
+            use_container_width=True, disabled=not main_map,
+            help="지금 설정한 쿼터를 엑셀 양식으로 내려받습니다. 다음부터는 이 "
+                 "파일의 목표 숫자만 고쳐서 '엑셀 업로드' 로 쓰면 됩니다. "
+                 "머리글이 데이터 컬럼명이라 변수 지정도 필요 없습니다.")
+        st.caption(
+            "양식을 한 번 받아두면 화면에서 다시 설정할 필요가 없습니다. "
+            "설정 JSON 은 이 앱 전용이고, 이 엑셀은 사람이 보고 고치거나 "
+            "클라이언트와 주고받기 좋습니다.")
 
         sc1, sc2 = st.columns(2)
         if sc1.button("💾 이 컴퓨터에 저장", use_container_width=True,

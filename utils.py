@@ -668,3 +668,345 @@ def write_sav_bytes(df, value_labels=None, column_labels=None):
         with open(path, "rb") as f:
             data = f.read()
     return data, renamed, warns
+
+
+# ==============================================================================
+# 6. 쿼터표 엑셀 — 목록(평면) 형식 파서
+#    피벗 형식(transform_pivoted_quota)은 변수 3개로 고정이다.
+#    목록 형식은 변수 개수 제한이 없고, 머리글이 데이터 컬럼명이라
+#    qt1/qt2/qt3 를 화면에서 지정할 필요도 없다.
+# ==============================================================================
+TARGET_ALIASES = {"목표", "목표수", "목표인원", "target", "n", "쿼터", "할당"}
+
+
+def _find_target_col(cols):
+    for c in cols:
+        if str(c).strip().lower().replace(" ", "") in TARGET_ALIASES:
+            return c
+    return None
+
+
+def parse_main_flat(df_raw, data_columns):
+    """
+    목록 형식 메인 쿼터표를 읽는다.
+
+        SQ1   | SQ2  | SQ3  | SQ4  | 목표
+        남성   | 서울  | 20대 | 사무  | 12
+
+    - 머리글은 **데이터의 컬럼명**이어야 한다 (변수 지정 단계가 없어진다)
+    - 마지막에 목표 열이 있어야 한다 (목표/목표수/target 등)
+    - 변수 개수는 제한 없다
+    - 목표가 1 이상인 행만 쓴다
+
+    반환: (main_map, 사용된 컬럼 목록, 오류/경고 목록)
+    """
+    errs = []
+    if df_raw is None or df_raw.empty:
+        return {}, [], ["쿼터표 시트가 비어 있습니다."]
+
+    tcol = _find_target_col(df_raw.columns)
+    if tcol is None:
+        return {}, [], ["목표 열을 찾지 못했습니다. "
+                        "머리글에 '목표' 라는 열이 있어야 합니다."]
+
+    qcols = [c for c in df_raw.columns
+             if c != tcol and not str(c).startswith("Unnamed")]
+    if not qcols:
+        return {}, [], ["쿼터 변수 열이 없습니다."]
+
+    # 표 오른쪽에 메모나 합계 같은 보조 칸이 있으면 그것도 열로 읽힌다.
+    # 값이 거의 없는 열은 쿼터 변수가 아니라고 보고 무시한다.
+    dset = set(data_columns)
+    ignored = []
+    for c in list(qcols):
+        if c in dset:
+            continue
+        filled = df_raw[c].notna().sum()
+        if filled <= max(1, int(len(df_raw) * 0.1)):
+            qcols.remove(c)
+            ignored.append(c)
+    if ignored:
+        errs.append("표 밖의 열로 보여 무시했습니다: "
+                    + ", ".join(map(str, ignored[:8])))
+
+    unknown = [c for c in qcols if c not in dset]
+    if unknown:
+        return {}, [], [
+            "쿼터표 머리글이 데이터 컬럼명과 다릅니다: "
+            + ", ".join(map(str, unknown[:8]))
+            + ". 머리글을 데이터 컬럼명과 똑같이 적어 주세요."]
+
+    main_map, dups, bad = {}, [], []
+    for i, r in df_raw.iterrows():
+        ln = i + 2
+        key = tuple(norm_val(r[c]) for c in qcols)
+        if all(k == NA_TOKEN for k in key):
+            continue
+        try:
+            t = int(float(r[tcol])) if pd.notna(r[tcol]) else 0
+        except (TypeError, ValueError):
+            bad.append(f"{ln}행({' / '.join(key)})")
+            continue
+        if t <= 0:
+            continue
+        if key in main_map:
+            dups.append(f"{ln}행({' / '.join(key)})")
+            continue
+        main_map[key] = t
+
+    if bad:
+        errs.append(f"목표를 숫자로 읽지 못한 행 {len(bad)}개를 건너뜁니다: "
+                    + ", ".join(bad[:5]))
+    if dups:
+        errs.append(f"같은 조합이 두 번 나온 행 {len(dups)}개를 건너뜁니다: "
+                    + ", ".join(dups[:5]))
+    if not main_map:
+        errs.append("목표가 1 이상인 행이 하나도 없습니다.")
+    return main_map, qcols, errs
+
+
+def parse_extra_flat(df_raw, data_columns):
+    """
+    '추가쿼터' 시트를 읽어 추가 쿼터 설정 목록을 만든다.
+
+        그룹명 | 방식 | 변수            | 값1   | 값2     | 값3 | 목표
+        직업   | 단순 | DQ1            | 사무직 |         |     | 350
+        브랜드 | 단순 | Q5_1,Q5_2,Q5_3 | 삼성   |         |     | 400
+        권역x연령| 조합 | 권역,연령대     | 수도권 | 20~30대 |     | 180
+
+    - 같은 그룹명끼리 한 그룹으로 묶는다
+    - 단순형은 값1 만, 조합형은 변수 개수만큼 값1..값3 을 채운다
+    - 값을 한 칸에 쉼표로 잇지 않는 이유 : "1,000만원 이상" 처럼 라벨 안에
+      쉼표가 들어가는 경우가 있다
+
+    반환: ([{'name','mode','cols','map'}, ...], 오류 목록)
+    """
+    need = ["그룹명", "방식", "변수"]
+    if df_raw is None:
+        return [], []
+    tcol = _find_target_col(df_raw.columns)
+    miss = [c for c in need if c not in df_raw.columns]
+    if miss or tcol is None:
+        # 머리글이 아예 없으면 '시트가 비어 있다' 로 본다 (오류 아님)
+        if df_raw.empty:
+            return [], []
+        return [], ["필수 열이 없습니다: "
+                    + ", ".join(miss + ([] if tcol else ["목표"]))]
+    if df_raw.empty:
+        return [], []                      # 머리글만 있는 시트 = 추가 쿼터 없음
+
+    dcols = set(data_columns)
+    errs, order, buf = [], [], {}
+    for i, r in df_raw.iterrows():
+        ln = i + 2
+        name = str(r["그룹명"]).strip() if pd.notna(r["그룹명"]) else ""
+        if not name:
+            continue
+        mode_raw = str(r["방식"]).strip() if pd.notna(r["방식"]) else ""
+        if not (mode_raw.startswith("조합") or mode_raw.startswith("단순")):
+            errs.append(f"{ln}행: 방식은 '단순' 또는 '조합' 이어야 합니다 "
+                        f"('{mode_raw}')")
+            continue
+        mode = "grid" if mode_raw.startswith("조합") else "simple"
+
+        cols = [c.strip() for c in str(r["변수"]).split(",") if c.strip()] \
+            if pd.notna(r["변수"]) else []
+        if not cols:
+            errs.append(f"{ln}행: 변수가 비어 있습니다")
+            continue
+        nf = [c for c in cols if c not in dcols]
+        if nf:
+            errs.append(f"{ln}행: 데이터에 없는 변수 {', '.join(nf)}")
+            continue
+        try:
+            t = int(float(r[tcol])) if pd.notna(r[tcol]) else 0
+        except (TypeError, ValueError):
+            errs.append(f"{ln}행: 목표를 숫자로 읽을 수 없습니다 ('{r[tcol]}')")
+            continue
+
+        vals = []
+        for k in (1, 2, 3):
+            v = r.get(f"값{k}")
+            if pd.notna(v) and str(v).strip() != "":
+                vals.append(norm_val(v))
+        if mode == "simple":
+            if len(vals) != 1:
+                errs.append(f"{ln}행: 단순형은 값1 만 채워야 합니다 "
+                            f"(지금 {len(vals)}개)")
+                continue
+            key = vals[0]
+        else:
+            if len(vals) != len(cols):
+                errs.append(f"{ln}행: 조합형은 변수 {len(cols)}개만큼 값을 "
+                            f"채워야 합니다 (지금 {len(vals)}개)")
+                continue
+            key = tuple(vals)
+
+        if name not in buf:
+            buf[name] = {"name": name, "mode": mode, "cols": cols, "map": {}}
+            order.append(name)
+        cfg = buf[name]
+        if cfg["mode"] != mode or cfg["cols"] != cols:
+            errs.append(f"{ln}행: 그룹 '{name}' 안에서 방식/변수가 다릅니다")
+            continue
+        if key in cfg["map"]:
+            errs.append(f"{ln}행: 그룹 '{name}' 에 값 '{key}' 가 중복됩니다")
+            continue
+        cfg["map"][key] = t
+
+    return [buf[n] for n in order], errs
+
+
+def build_quota_form_xlsx(main_map, main_cols, ex_configs, source_name=""):
+    """
+    현재 화면 설정으로 '쿼터표 업로드 양식' 엑셀을 만든다.
+
+    한 번 화면에서 설정한 뒤 이 양식을 받아두면, 다음 조사에서는 목표 숫자만
+    고쳐서 업로드하면 된다. 만들어지는 시트는 parse_main_flat /
+    parse_extra_flat 이 그대로 읽을 수 있는 형식이다.
+
+      메인쿼터 : <컬럼명들> | 목표          (목록 형식, 변수 개수 제한 없음)
+      추가쿼터 : 그룹명 | 방식 | 변수 | 값1 | 값2 | 값3 | 목표
+      사용법   : 이 파일을 어떻게 고쳐 쓰는지
+
+    반환: bytes
+    """
+    import io as _io
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    F = "Arial"
+    HDR = PatternFill("solid", fgColor="1F3864")
+    HF = Font(name=F, bold=True, color="FFFFFF", size=10)
+    KEY = PatternFill("solid", fgColor="DDEBF7")
+    YEL = PatternFill("solid", fgColor="FFF2CC")
+    GRY = PatternFill("solid", fgColor="F2F2F2")
+    BODY = Font(name=F, size=10)
+    BOLD = Font(name=F, bold=True, size=10)
+    THIN = Border(*[Side(style="thin", color="BFBFBF")] * 4)
+
+    wb = Workbook()
+
+    # ── 메인쿼터 (목록 형식) ──────────────────────────────────────────
+    ws = wb.active
+    ws.title = "메인쿼터"
+    cols = [str(c) for c in (main_cols or [])]
+    no_main = not cols
+    if no_main:
+        # 메인 쿼터를 쓰지 않는 설정. 목록 형식으로 표현할 수 없으므로
+        # 머리글만 남기고, 총 목표 인원은 사용법 시트에 적어 둔다.
+        cols = []
+    ws.append(cols + ["목표"])
+    for j in range(1, len(cols) + 2):
+        c = ws.cell(1, j)
+        c.fill, c.font = HDR, HF
+        c.alignment = Alignment(horizontal="center")
+
+    def _sk(k):
+        return tuple(k) if isinstance(k, tuple) else (k,)
+
+    rows = sorted(main_map.items(), key=lambda kv: [natural_key(x)
+                                                    for x in _sk(kv[0])])
+    for k, v in rows:
+        ws.append(list(_sk(k)) + [int(v)])
+    for i in range(2, 2 + len(rows)):
+        for j in range(1, len(cols) + 2):
+            c = ws.cell(i, j)
+            c.font, c.border = BODY, THIN
+            if j == len(cols) + 1:
+                c.fill = YEL
+                c.alignment = Alignment(horizontal="center")
+            else:
+                c.fill = KEY
+    ws.freeze_panes = "A2"
+    for j in range(1, len(cols) + 2):
+        ws.column_dimensions[get_column_letter(j)].width = 13
+
+    # ── 추가쿼터 ──────────────────────────────────────────────────────
+    ws = wb.create_sheet("추가쿼터")
+    EC = ["그룹명", "방식", "변수", "값1", "값2", "값3", "목표"]
+    ws.append(EC)
+    for j in range(1, len(EC) + 1):
+        c = ws.cell(1, j)
+        c.fill, c.font = HDR, HF
+        c.alignment = Alignment(horizontal="center")
+
+    n_ex = 0
+    for cfg in (ex_configs or []):
+        if not cfg.get("cols") or not cfg.get("map"):
+            continue
+        mode_txt = "조합" if cfg.get("mode") == "grid" else "단순"
+        var_txt = ",".join(str(c) for c in cfg["cols"])
+        for k, v in sorted(cfg["map"].items(),
+                           key=lambda kv: [natural_key(x) for x in _sk(kv[0])]):
+            vals = list(_sk(k))[:3] + [None] * (3 - min(3, len(_sk(k))))
+            ws.append([cfg.get("name") or f"추가{n_ex+1}", mode_txt, var_txt]
+                      + vals + [int(v)])
+        n_ex += 1
+    last = ws.max_row
+    for i in range(2, last + 1):
+        simple = ws.cell(i, 2).value == "단순"
+        for j in range(1, len(EC) + 1):
+            c = ws.cell(i, j)
+            c.font, c.border = BODY, THIN
+            if j <= 3:
+                c.fill = KEY
+            elif j == len(EC):
+                c.fill = YEL
+                c.alignment = Alignment(horizontal="center")
+            else:
+                c.fill = GRY if (simple and j > 4) else YEL
+    ws.freeze_panes = "A2"
+    for j, w in enumerate([14, 8, 22, 14, 14, 14, 9], start=1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+    # [주의] 여기에 안내문 행을 넣으면 파서가 데이터로 읽어 오류가 난다.
+    # 추가 쿼터가 없으면 머리글만 남긴다. 설명은 사용법 시트에 있다.
+
+    # ── 사용법 ────────────────────────────────────────────────────────
+    ws = wb.create_sheet("사용법")
+    guide = [
+        ["쿼터표 업로드 양식 (현재 화면 설정으로 자동 생성)"],
+        [""],
+        ["만든 기준", f"데이터 파일: {source_name or '-'}"],
+        ["", (f"메인 쿼터: {' × '.join(cols)} / {len(main_map):,}셀 / "
+              f"목표 합계 {sum(main_map.values()):,}명") if not no_main else
+             (f"메인 쿼터: 사용 안 함 (전체 목표 "
+              f"{sum(main_map.values()):,}명 — 화면에서 직접 입력하세요)")],
+        ["", f"추가 쿼터: {n_ex}개 그룹"],
+        [""],
+        ["쓰는 법", "1) 노란 칸(목표)의 숫자만 고칩니다."],
+        ["", "2) 이 파일을 그대로 '쿼터 파일' 로 업로드합니다."],
+        ["", "3) 메인 쿼터 방식에서 '엑셀 업로드' 를 고르면 됩니다."],
+        [""],
+        ["메인쿼터 시트", "머리글이 데이터 컬럼명입니다. 그래서 화면에서 변수를"],
+        ["", "지정하지 않아도 됩니다. 컬럼명을 바꾸지 마세요."],
+        ["", "목표가 0이거나 빈 행은 '이 셀은 쓰지 않음' 으로 처리됩니다."],
+        ["", "행을 지워도 되고, 새 조합을 아래에 추가해도 됩니다."],
+        [""],
+        ["추가쿼터 시트", "같은 '그룹명' 끼리 한 그룹으로 묶입니다."],
+        ["", "방식은 '단순' 또는 '조합' 입니다."],
+        ["", "변수는 데이터 컬럼명이며 여러 개면 쉼표로 잇습니다."],
+        ["", "단순형은 값1만, 조합형은 변수 개수만큼 값1~값3을 채웁니다."],
+        ["", "회색 칸은 그 줄에서 쓰지 않는 칸입니다."],
+        [""],
+        ["주의", "· 값 표기를 바꾸지 마세요. 데이터의 값과 정확히 같아야 합니다."],
+        ["", "· SPSS 파일을 올린 경우 값이 '1) 서울' 형태입니다. 그대로 두세요."],
+        ["", "· 데이터 시트에 메모나 합계 칸을 넣지 마세요. 열로 읽힙니다."],
+        ["", "· 같은 조합/값을 두 번 적으면 그 줄은 건너뜁니다."],
+    ]
+    for g in guide:
+        ws.append(g)
+    ws["A1"].font = Font(name=F, bold=True, size=12)
+    for row in ws.iter_rows(min_row=2):
+        for c in row:
+            if not c.font.bold:
+                c.font = BODY
+    for rr in (3, 7, 11, 16, 22):
+        ws.cell(rr, 1).font = BOLD
+    ws.column_dimensions["A"].width = 15
+    ws.column_dimensions["B"].width = 86
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
