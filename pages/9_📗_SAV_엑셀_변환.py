@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SAV → 엑셀 변환 (v2.5)
+SAV → 엑셀 변환 (v2.7)
 
 SPSS .sav 파일을 업로드하면 여러 시트로 구성된 엑셀 파일을 내려받습니다.
   · Raw        : 숫자 코드 그대로
@@ -19,6 +19,7 @@ ID 로 짝을 맞춰 SAV 값을 덮어씁니다. 결과는 SAV 로도, 위 시�
 
 import io
 import os
+import random
 import re
 import tempfile
 import zipfile
@@ -724,21 +725,33 @@ want_code = s4.checkbox(
 want_guide = s5.checkbox("변수 가이드", value=True)
 
 # ── 머리글 색 ──
-PICK_OWN, NO_FILL = "직접 고르기", "색 없음"
+PICK_OWN, NO_FILL, RANDOM = "직접 고르기", "색 없음", "랜덤"
 choice = st.radio(
     "머리글 색",
-    list(HEAD_COLORS) + [PICK_OWN, NO_FILL],
+    [RANDOM] + list(HEAD_COLORS) + [PICK_OWN, NO_FILL],
     horizontal=True,
-    help="Code 시트는 변수명·문항 줄, 나머지 시트는 첫 행에 칠합니다.",
+    help="Code 시트는 변수명·문항 줄, 나머지 시트는 첫 행에 칠합니다."
+         + ("  ‘랜덤’ 은 파일끼리 색이 겹치지 않게 섞어 줍니다." if multi
+            else "  ‘랜덤’ 은 프리셋 중 하나를 골라 씁니다."),
 )
+random_color = choice == RANDOM
 if choice == NO_FILL:
     head_color = ""
+elif choice == RANDOM:
+    head_color = DEFAULT_HEAD_COLOR      # 실제 색은 파일마다 따로 정한다
 elif choice == PICK_OWN:
     head_color = st.color_picker("색 고르기", DEFAULT_HEAD_COLOR)
 else:
     head_color = HEAD_COLORS[choice]
 
-if head_color:
+if random_color:
+    st.caption(
+        (f"프리셋 {len(HEAD_COLORS)}가지를 섞어 파일마다 하나씩 씁니다. "
+         f"파일이 {len(HEAD_COLORS)}개를 넘으면 색이 돌아옵니다.")
+        if multi else
+        f"만들 때마다 프리셋 {len(HEAD_COLORS)}가지 중 하나를 골라 씁니다."
+    )
+elif head_color:
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:10px;'
         f'font-size:13px;opacity:.75;margin:2px 0 6px;">'
@@ -805,6 +818,11 @@ if multi:
 if st.button("만들기", type="primary", use_container_width=True):
     if multi:
         buf, used_names = io.BytesIO(), set()
+        # 파일마다 다른 색을 주려면 프리셋을 섞어 돌려 쓴다.
+        # 섞어 쓰므로 파일 수가 프리셋 수 이하면 색이 겹치지 않는다.
+        palette = list(HEAD_COLORS.values())
+        random.shuffle(palette)
+        picked_colors = []
         bar = st.progress(0.0, text="시작합니다…")
         try:
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -818,21 +836,27 @@ if st.button("만들기", type="primary", use_container_width=True):
                         name = f"{stem}({n}).xlsx"
                         n += 1
                     used_names.add(name)
+                    color = (palette[(i - 1) % len(palette)]
+                             if random_color else head_color)
+                    picked_colors.append({"파일": name, "머리글 색": color or "없음"})
                     zf.writestr(name,
                                 to_excel(build_sheets(d, cl, vlab, vtyp),
-                                         head_color))
+                                         color))
             bar.progress(1.0, text="다 됐습니다.")
         except Exception as e:
             st.error(f"파일 생성에 실패했습니다: {e}")
             st.stop()
         st.session_state["SX_zip"] = buf.getvalue()
         st.session_state["SX_zip_name"] = f"SAV_엑셀변환_{len(loaded)}개.zip"
+        st.session_state["SX_colors"] = picked_colors if random_color else None
         st.session_state.pop("SX_xlsx", None)
         st.session_state.pop("SX_sav", None)
     else:
+        color = (random.choice(list(HEAD_COLORS.values()))
+                 if random_color else head_color)
         with st.spinner("파일을 만드는 중입니다…"):
             try:
-                st.session_state["SX_xlsx"] = to_excel(sheets, head_color)
+                st.session_state["SX_xlsx"] = to_excel(sheets, color)
                 st.session_state["SX_sav"] = (
                     write_sav(work_df, col_labels, work_labels)
                     if patched else None)
@@ -841,10 +865,16 @@ if st.button("만들기", type="primary", use_container_width=True):
                 st.stop()
         st.session_state["SX_stem"] = (
             os.path.splitext(up.name)[0] + ("_반영" if patched else ""))
+        st.session_state["SX_used_color"] = color if random_color else None
         st.session_state.pop("SX_zip", None)
+        st.session_state.pop("SX_colors", None)
 
 if st.session_state.get("SX_zip"):
     st.success("다 됐습니다.")
+    if st.session_state.get("SX_colors"):
+        with st.expander("파일마다 쓴 색"):
+            st.dataframe(pd.DataFrame(st.session_state["SX_colors"]),
+                         hide_index=True, use_container_width=True)
     st.download_button(
         "zip 내려받기",
         data=st.session_state["SX_zip"],
@@ -855,6 +885,8 @@ if st.session_state.get("SX_zip"):
 
 if st.session_state.get("SX_xlsx"):
     st.success("다 됐습니다.")
+    if st.session_state.get("SX_used_color"):
+        st.caption(f"머리글 색: {st.session_state['SX_used_color'].upper()}")
     stem = st.session_state.get("SX_stem", "output")
     d1, d2 = st.columns(2)
     with d1:

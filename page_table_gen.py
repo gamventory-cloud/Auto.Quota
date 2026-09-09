@@ -673,8 +673,7 @@ with tab_manual:
             "표 제목 줄 색", value="#FFFFFF", key="bt_bank_fill",
             help="흰색이면 색을 넣지 않습니다 (SPSS 산출물과 같은 모양).",
         )
-        # 아래 옵션 줄들과 같은 3칸을 써서 체크박스가 세로로 줄을 맞춘다
-        e1, e2, _e3 = st.columns(3)
+        e1, e2 = st.columns(2)
         e1.download_button(
             "담아둔 표 전체 엑셀로",
             data=write_tables_xlsx(st.session_state["bt_results"],
@@ -885,67 +884,18 @@ with tab_quick:
                         if not value_labels.get(c)
                         and pd.api.types.is_numeric_dtype(df[c])]
 
-        # ── 빼는 변수 ──
-        # 주관식 문자 변수는 응답자마다 값이 달라서 빈도표가 사실상 원자료
-        # 나열이 된다 ('시설명' 400명 → 보기 400개). 데이터를 훑는 목적에는
-        # 방해가 되므로 기본으로 뺀다. 주관식을 정말 세고 싶으면 끄면 된다.
-        text_vars = [c for c in df.columns
-                     if not pd.api.types.is_numeric_dtype(df[c])]
-        # 응답이 아예 없는 변수 — '기타 open' 처럼 아무도 안 적은 칸.
-        # 다만 응답 0 자체가 확인거리일 수 있어서(로직·쿼터 점검) 기본은 켜 둔다.
-        empty_vars = [c for c in df.columns if int(df[c].notna().sum()) == 0]
-
-        st.session_state.setdefault("bt_freq_drop_text", True)
-        st.session_state.setdefault("bt_freq_drop_empty", False)
-
-        def kept(names: list[str]) -> list[str]:
-            """'빼기' 체크에 걸리는 변수를 걸러 낸다."""
-            out = list(names)
-            if st.session_state.get("bt_freq_drop_text"):
-                out = [c for c in out if c not in set(text_vars)]
-            if st.session_state.get("bt_freq_drop_empty"):
-                out = [c for c in out if c not in set(empty_vars)]
-            return out
-
-        def pick(names: list[str]) -> None:
-            set_freq_vars(kept(names))
-
         p1, p2, p3, p4 = st.columns(4)
-        p1.button("전체", key="bt_freq_all", on_click=pick,
+        p1.button("전체", key="bt_freq_all", on_click=set_freq_vars,
                   args=(list(df.columns),))
         p2.button(f"값 라벨 있는 것만 ({len(labelled)})", key="bt_freq_lab",
-                  on_click=pick, args=(labelled,))
+                  on_click=set_freq_vars, args=(labelled,))
         p3.button(f"숫자 변수만 ({len(numeric_only)})", key="bt_freq_num",
-                  on_click=pick, args=(numeric_only,))
+                  on_click=set_freq_vars, args=(numeric_only,))
         p4.button("비우기", key="bt_freq_clear", on_click=set_freq_vars, args=([],))
-
-        # 체크박스를 버튼 아래·고르는 칸 위에 둔다. 버튼이 이 설정을 따르므로
-        # 순서가 그렇게 읽혀야 한다.
-        # 아래 옵션 줄들과 같은 3칸을 써서 체크박스가 세로로 줄을 맞춘다
-        e1, e2, _e3 = st.columns(3)
-        e1.checkbox(
-            f"문자 변수 빼기 ({len(text_vars)}개)", key="bt_freq_drop_text",
-            disabled=not text_vars,
-            help="주관식처럼 값이 응답자마다 다른 문자 변수는 빈도표가 원자료 "
-                 "나열이 됩니다. 끄면 문자 변수도 넣되 많이 나온 값만 냅니다.",
-        )
-        e2.checkbox(
-            f"응답 없는 변수 빼기 ({len(empty_vars)}개)",
-            key="bt_freq_drop_empty", disabled=not empty_vars,
-            help="아무도 답하지 않은 변수('기타 open' 등)입니다. 응답이 0인 "
-                 "것 자체가 확인거리일 수 있어 기본은 넣어 둡니다.",
-        )
 
         freq_disp = st.multiselect("빈도표를 뽑을 변수", DISPLAY_NAMES,
                                    key="bt_freq_vars")
-        # 손으로 고른 변수도 같은 규칙으로 걸러 내고, 뺀 것은 밝혀 준다.
-        # 조용히 빼면 "왜 이 표가 없지" 를 데이터에서 찾게 된다.
-        freq_vars = kept(to_vars(freq_disp))
-        dropped = [c for c in to_vars(freq_disp) if c not in set(freq_vars)]
-        if dropped:
-            shown = ", ".join(dropped[:8])
-            more = f" 외 {len(dropped) - 8}개" if len(dropped) > 8 else ""
-            st.caption(f"빼기 설정으로 {len(dropped)}개 제외 — {shown}{more}")
+        freq_vars = to_vars(freq_disp)
 
         q1, q2, q3 = st.columns(3)
         freq_missing = q1.checkbox("무응답(결측) 행 표시", value=True,
