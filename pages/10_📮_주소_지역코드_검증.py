@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 주소 → 지역코드(areaM / areaD) 검증
-VBA 애드인(우편번호_주소_체크.xlam) 이식판  v3.0
+VBA 애드인(우편번호_주소_체크.xlam) 이식판  v5.1
 
 핵심 흐름
   1) 주소 파일(ID + 주소 + 우편번호)에서 ID→주소 사전 생성
   2) 주소 텍스트로 시군구가 확정된 건에서 「우편번호 → 시군구」 대조표를 자동 학습
   3) 데이터 파일(ID + areaM + areaD)의 각 행마다 코드 계산
-       판정 순서 : 주소 텍스트 → 우편번호 대조표 → 도로명 보정 규칙
+       판정 순서 : 읍면동 대조표(도로명+건물번호) → 주소 텍스트
+                  → 우편번호 대조표 → 도로명 보정 규칙
   4) 입력값과 계산값을 대조해 일치 / 불일치 / 구군미확인 등으로 판정
   5) 결과는 원본을 건드리지 않고 별도 엑셀 파일로 저장
+
+「지역정보 부여」 탭은 위의 2~3만 떼어 쓴다 — 주소만 넣으면 시도·시군구·
+행정동·법정동을 붙여 준다. ID 대조도, 입력값 비교도 하지 않는다.
 """
 from __future__ import annotations
 
@@ -263,15 +267,22 @@ class AreaResolver:
         hit = self._find_sgg(clean, sido)
         return (sido, hit[0]) if hit else None
 
-    def resolve(self, address, zipcode="") -> dict:
-        """판정 순서: 주소 텍스트 → 우편번호 대조표 → 도로명 규칙."""
+    def resolve(self, address, zipcode="", emd: Optional["EmdIndex"] = None) -> dict:
+        """판정 순서: 읍면동 대조표 → 주소 텍스트 → 우편번호 → 도로명 규칙."""
         clean = nospace(address)
         z = norm_zip(zipcode)
         zip_hit = self.zip_map.get(z) if z else None
 
         if not clean and not zip_hit:
             return {"status": RESULT_NO_ADDR, "areaM": None, "areaD": None,
-                    "시도": "", "시군구": "", "근거": ""}
+                    "시도": "", "시군구": "", "행정동": "", "법정동": "", "근거": ""}
+
+        # ⓞ 읍면동 대조표 — 도로명 + 건물번호로 조회 (읍면동만 얻는다)
+        db_sgg = adm_dong = leg_dong = ""
+        if emd is not None:
+            found = emd.lookup(address)
+            if found:
+                db_sgg, adm_dong, leg_dong = found
 
         # ① 주소 텍스트
         sido = self.detect_sido(clean) if clean else None
@@ -285,10 +296,28 @@ class AreaResolver:
         if text_hit:
             name, m, d = text_hit
             basis = "주소"
-            if zip_hit and zip_hit != (sido, name):
+            if adm_dong or leg_dong:
+                basis = "주소+읍면동 대조표"
+                # 대조표의 시군구가 주소와 어긋나면 알려 준다 (표기 차이는 제외)
+                a, b = nospace(db_sgg), nospace(name)
+                if a and b and a not in b and b not in a:
+                    basis = f"주소(대조표는 {db_sgg})"
+            elif zip_hit and zip_hit != (sido, name):
                 basis = f"주소(우편번호는 {zip_hit[1]})"
             return {"status": "OK", "areaM": m, "areaD": d,
-                    "시도": sido, "시군구": name, "근거": basis}
+                    "시도": sido, "시군구": name,
+                    "행정동": adm_dong, "법정동": leg_dong, "근거": basis}
+
+        # ① 주소에 시군구가 없을 때 — 대조표의 읍면동으로 확정 (세종이 이 경우)
+        if sido and leg_dong:
+            for target in (nospace(leg_dong), nospace(adm_dong)):
+                code = self._code_of(sido, target) if target else None
+                if code:
+                    name, m, d = code
+                    return {"status": "OK", "areaM": m, "areaD": d,
+                            "시도": sido, "시군구": name,
+                            "행정동": adm_dong, "법정동": leg_dong,
+                            "근거": "읍면동 대조표"}
 
         # ② 우편번호 대조표
         if zip_hit:
@@ -296,7 +325,8 @@ class AreaResolver:
             if code:
                 name, m, d = code
                 return {"status": "OK", "areaM": m, "areaD": d,
-                        "시도": zip_hit[0], "시군구": name, "근거": "우편번호"}
+                        "시도": zip_hit[0], "시군구": name,
+                        "행정동": adm_dong, "법정동": leg_dong, "근거": "우편번호"}
 
         # ③ 도로명 보정 규칙
         if sido:
@@ -307,13 +337,16 @@ class AreaResolver:
                         name, m, d = code
                         return {"status": "OK", "areaM": m, "areaD": d,
                                 "시도": sido, "시군구": name,
+                                "행정동": adm_dong, "법정동": leg_dong,
                                 "근거": f"도로명 규칙({token})"}
             return {"status": RESULT_NO_SGG,
                     "areaM": self.sido_code.get(sido), "areaD": None,
-                    "시도": sido, "시군구": "", "근거": "시도만 확인"}
+                    "시도": sido, "시군구": "",
+                    "행정동": adm_dong, "법정동": leg_dong, "근거": "시도만 확인"}
 
         return {"status": RESULT_NO_SIDO, "areaM": None, "areaD": None,
-                "시도": "", "시군구": "", "근거": ""}
+                "시도": "", "시군구": "",
+                "행정동": "", "법정동": "", "근거": ""}
 
 
 def to_code(value) -> Optional[int]:
@@ -338,11 +371,13 @@ def verify(
     col_m: str,
     col_d: str,
     resolver: AreaResolver,
+    emd: Optional["EmdIndex"] = None,
 ) -> pd.DataFrame:
     """검증 대상 DataFrame에 결과 열을 붙여 반환 (원본 열 보존)."""
     cache: Dict[Tuple[str, str], dict] = {}
     out_result, out_m, out_d = [], [], []
     out_sido, out_sgg, out_basis, out_addr, out_zip = [], [], [], [], []
+    out_adm, out_leg = [], []
 
     for _, row in target_df.iterrows():
         key = nospace(row[col_id])
@@ -354,12 +389,13 @@ def verify(
             out_m.append(None); out_d.append(None)
             out_sido.append(""); out_sgg.append(""); out_basis.append("")
             out_addr.append(""); out_zip.append("")
+            out_adm.append(""); out_leg.append("")
             continue
 
         address, zipcode = addr_map[key]
         ckey = (address, zipcode)
         if ckey not in cache:
-            cache[ckey] = resolver.resolve(address, zipcode)
+            cache[ckey] = resolver.resolve(address, zipcode, emd)
         info = cache[ckey]
 
         out_addr.append(address)
@@ -367,6 +403,8 @@ def verify(
         out_sido.append(info["시도"])
         out_sgg.append(info["시군구"])
         out_basis.append(info["근거"])
+        out_adm.append(info.get("행정동", ""))
+        out_leg.append(info.get("법정동", ""))
 
         if info["status"] in (RESULT_NO_ADDR, RESULT_NO_SIDO):
             out_result.append(info["status"])
@@ -390,6 +428,8 @@ def verify(
     res["계산_areaD"] = out_d
     res["매칭_시도"] = out_sido
     res["매칭_시군구"] = out_sgg
+    res["계산_행정동"] = out_adm
+    res["계산_법정동"] = out_leg
     res["판정근거"] = out_basis
     res["참조주소"] = out_addr
     res["참조우편번호"] = out_zip
@@ -458,6 +498,166 @@ def merge_zip_tables(*tables: Optional[pd.DataFrame]) -> pd.DataFrame:
         if c not in out.columns:
             out[c] = ""
     return out[["우편번호", "시도", "시군구", "출처"]].reset_index(drop=True)
+
+
+# ── 도로명 주소 파싱 ──────────────────────────────────────────
+_RE_SEJONG = re.compile(r"^세종\S*")
+_RE_SGG = re.compile(r"^(?P<sido>\S+?)\s+(?P<sgg>\S+?(?:구|군|시))\s+(?P<rest>.+)$")
+_RE_SJ = re.compile(r"^(?P<sido>세종\S*)\s+(?P<rest>.+)$")
+_RE_EMD = re.compile(r"^[가-힣]{1,8}(?:읍|면)$")
+_RE_GU = re.compile(r"^[가-힣]{1,8}구$")
+_RE_NUM = re.compile(r"^(?P<road>.+?)\s+(?P<jiha>지하\s*)?(?P<bon>\d+)(?:-(?P<bu>\d+))?$")
+
+
+def parse_road_address(address) -> Optional[Tuple[str, str, str, int, int, int]]:
+    """도로명 주소를 (시도, 시군구, 도로명, 지하, 본번, 부번) 으로 분해.
+
+    · 세종특별자치시는 시군구 단계가 없어 시군구를 빈 문자열로 둔다
+    · 통합시의 일반구(성남시 수정구)는 「성남시 수정구」로 합쳐 둔다
+    · 읍·면은 도로명 앞에 오므로 떼어낸다
+    분해할 수 없으면 None.
+    """
+    if address is None:
+        return None
+    if isinstance(address, float) and pd.isna(address):
+        return None
+    text = re.sub(r"\s+", " ", str(address)).strip()
+    if not text:
+        return None
+
+    if _RE_SEJONG.match(text):
+        m = _RE_SJ.match(text)
+        if not m:
+            return None
+        sido, sgg, parts = m.group("sido"), "", m.group("rest").split()
+    else:
+        m = _RE_SGG.match(text)
+        if not m:
+            return None
+        sido, sgg, parts = m.group("sido"), m.group("sgg"), m.group("rest").split()
+        if parts and _RE_GU.match(parts[0]) and sgg.endswith("시"):
+            sgg = sgg + " " + parts[0]
+            parts = parts[1:]
+    if parts and _RE_EMD.match(parts[0]):
+        parts = parts[1:]
+    n = _RE_NUM.match(" ".join(parts))
+    if not n:
+        return None
+    return (sido, sgg, n.group("road").strip(),
+            1 if n.group("jiha") else 0,
+            int(n.group("bon")), int(n.group("bu") or 0))
+
+
+EMD_KEY = ["시군구키", "도로명키", "지하", "본번", "부번"]
+
+
+def address_keys(addresses, resolver: "AreaResolver") -> pd.DataFrame:
+    """주소 목록을 조회 키 DataFrame 으로. 파싱 실패한 주소는 제외."""
+    rows = []
+    for addr in addresses:
+        parsed = parse_road_address(addr)
+        if parsed is None:
+            continue
+        raw_sido, sgg, road, jiha, bon, bu = parsed
+        rows.append({"주소": addr,
+                     "시도": resolver.detect_sido(nospace(raw_sido)) or "",
+                     "시군구키": nospace(sgg),
+                     "도로명키": nospace(road), "지하": jiha, "본번": bon, "부번": bu})
+    return pd.DataFrame(rows, columns=["주소", "시도", "시군구키",
+                                       "도로명키", "지하", "본번", "부번"])
+
+
+def build_emd_map(addresses, tables: Dict[str, pd.DataFrame],
+                  resolver: "AreaResolver"):
+    """주소 → (대조표 시군구, 행정동, 법정동) 사전을 만든다.
+
+    629만 건을 전부 딕셔너리에 올리면 5GB가 넘는다. 그래서 **찾을 주소를 먼저
+    키로 만들고, 대조표를 파일 하나씩 병합**해 필요한 것만 남긴다.
+    메모리는 가장 큰 시도 한 개분(경기 약 100만 행)만 쓴다.
+
+    반환: (사전, 파싱실패 건수)
+    """
+    keys = address_keys(addresses, resolver)
+    total = len(list(addresses)) if not hasattr(addresses, "__len__") else len(addresses)
+    if keys.empty:
+        return {}, total
+
+    want = keys.drop_duplicates(subset=EMD_KEY + ["주소"]).copy()
+    sido_of = dict(zip(keys["주소"], keys["시도"]))
+    sgg_of = dict(zip(keys["주소"], keys["시군구키"]))
+    found: Dict[str, Tuple[str, str, str]] = {}
+
+    def accept(addr, db_sgg, adm, leg) -> bool:
+        """찾아낸 값이 이 주소의 것인지 확인. 통과하지 못하면 버린다.
+
+        시군구를 무시한 2단계 조회는 엉뚱한 시도로 넘어갈 수 있다.
+        「중구」「남구」처럼 여러 시도에 같은 이름이 있어서, 그 시도에 그
+        시군구가 있는지만 보면 걸러지지 않는다
+        (예: 「서울 관악구 난곡로 30」이 울산 중구의 난곡로로 잡혔다).
+        그래서 **주소에 적힌 시군구와 직접 대조**한다. 표기 차이
+        (성남시 수정구 / 수정구)는 서로 포함 관계면 같은 것으로 본다.
+        """
+        sido = sido_of.get(addr, "")
+        if not sido:
+            return False
+        mine = sgg_of.get(addr, "")
+        theirs = nospace(db_sgg)
+        if mine:
+            return bool(theirs) and (theirs in mine or mine in theirs)
+        # 세종처럼 시군구 단계가 없는 시도 — 읍면동이 그 시도에 있어야 한다
+        probe = nospace(leg) or nospace(adm)
+        return bool(probe) and resolver._find_sgg(probe, sido) is not None
+
+    for df in tables.values():
+        todo = want[~want["주소"].isin(found)]
+        if todo.empty:
+            break
+        tbl = df.copy()
+        tbl["시군구키"] = tbl["시군구"].map(nospace) if "시군구" in tbl.columns else ""
+        tbl["도로명키"] = tbl["도로명"].map(nospace)
+        for c in ("지하", "본번", "부번"):
+            tbl[c] = pd.to_numeric(tbl[c], errors="coerce").fillna(0).astype("int64")
+        tbl = tbl[["시군구키", "도로명키", "지하", "본번", "부번",
+                   "시군구", "행정동", "법정동"]]
+
+        # ① 시군구까지 맞춘 완전키 — 같은 키에 값이 여러 개면 버린다
+        exact = tbl.drop_duplicates(subset=EMD_KEY + ["행정동", "법정동"])
+        dupe = exact.duplicated(subset=EMD_KEY, keep=False)
+        exact = exact[~dupe]
+        m = todo.merge(exact, on=EMD_KEY, how="inner")
+        for r in m.itertuples(index=False):
+            if r.주소 not in found and accept(r.주소, r.시군구, r.행정동, r.법정동):
+                found[r.주소] = (str(r.시군구), str(r.행정동), str(r.법정동))
+
+        # ② 시군구 표기가 다른 경우 — 시군구를 무시하고 도로명+번호로
+        todo2 = want[~want["주소"].isin(found)]
+        if not todo2.empty:
+            loose = tbl.drop_duplicates(subset=["도로명키", "지하", "본번", "부번",
+                                                "행정동", "법정동"])
+            dupe = loose.duplicated(subset=["도로명키", "지하", "본번", "부번"], keep=False)
+            loose = loose[~dupe]
+            m2 = todo2.merge(loose, on=["도로명키", "지하", "본번", "부번"], how="inner")
+            for r in m2.itertuples(index=False):
+                if r.주소 not in found and accept(r.주소, r.시군구, r.행정동, r.법정동):
+                    found[r.주소] = (str(r.시군구), str(r.행정동), str(r.법정동))
+
+        del tbl, exact
+    return found, total - len(keys["주소"].unique())
+
+
+class EmdIndex:
+    """build_emd_map 결과를 담는 얇은 조회 객체 (주소 문자열 → 읍면동)."""
+
+    def __init__(self, mapping: Dict[str, Tuple[str, str, str]]):
+        self.map = mapping
+
+    def __len__(self) -> int:
+        return len(self.map)
+
+    def lookup(self, address):
+        if address is None:
+            return None
+        return self.map.get(str(address).strip()) or self.map.get(address)
 
 
 def guess_col(columns: List[str], candidates: List[str]) -> Optional[str]:
@@ -530,6 +730,36 @@ def read_zip_csv(data: bytes) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(data), dtype=object, encoding_errors="replace")
 
 
+EMD_REQUIRED = ["시도", "시군구", "도로명", "지하", "본번", "부번", "행정동", "법정동"]
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def load_emd_folder(folder: str) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+    """emd_data 폴더의 시도별 csv.gz 를 읽어들인다. (표, 경고목록) 반환."""
+    from pathlib import Path
+    path = Path(folder).expanduser()
+    if not path.is_dir():
+        return {}, [f"폴더를 찾을 수 없습니다: {path}"]
+    files = sorted(p for p in path.iterdir()
+                   if p.name.endswith(".csv.gz") and not p.name.startswith("_"))
+    if not files:
+        return {}, [f"{path} 안에 시도별 .csv.gz 파일이 없습니다."]
+    tables, warn = {}, []
+    for f in files:
+        try:
+            df = pd.read_csv(f, dtype={"시군구": str, "도로명": str,
+                                       "행정동": str, "법정동": str},
+                             keep_default_na=False)
+            missing = [c for c in EMD_REQUIRED if c not in df.columns]
+            if missing:
+                warn.append(f"{f.name}: 열이 없습니다 {missing}")
+                continue
+            tables[f.name.replace(".csv.gz", "")] = df
+        except Exception as exc:
+            warn.append(f"{f.name}: 읽지 못했습니다 ({exc})")
+    return tables, warn
+
+
 def pick_sheet(label: str, data: bytes, filename: str, key: str) -> str:
     names = [n for n in sheet_names(data, filename) if n != "CodeDB"]
     if not names:
@@ -546,7 +776,7 @@ def _idx(options: List[str], value: Optional[str]) -> int:
 
 def build_output(result: pd.DataFrame, keep_cols: List[str], full: bool) -> pd.DataFrame:
     added = ["검증결과", "계산_areaM", "계산_areaD", "매칭_시도", "매칭_시군구",
-             "판정근거", "참조주소", "참조우편번호"]
+             "계산_행정동", "계산_법정동", "판정근거", "참조주소", "참조우편번호"]
     if full:
         return result
     cols = [c for c in keep_cols if c in result.columns] + added
@@ -581,7 +811,8 @@ def to_excel(result: pd.DataFrame, summary: pd.DataFrame,
                 continue
             ws = writer.sheets[sheet_name]
             for name in ["검증결과", "계산_areaM", "계산_areaD", "매칭_시도",
-                         "매칭_시군구", "판정근거", "참조주소", "참조우편번호"]:
+                         "매칭_시군구", "계산_행정동", "계산_법정동",
+                         "판정근거", "참조주소", "참조우편번호"]:
                 if name in cols:
                     cell = ws.cell(row=1, column=cols.index(name) + 1)
                     cell.fill = head_fill
@@ -619,6 +850,241 @@ def unresolved_zip_table(result: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("건수", ascending=False).reset_index(drop=True)
 
 
+ENRICH_COLS = ["시도", "시군구", "행정동", "법정동", "판정근거"]
+CODE_COLS = ["areaM", "areaD"]
+
+
+def emd_folder_input(key: str) -> str:
+    """읍면동 대조표 폴더 입력칸. 탭이 달라도 마지막에 넣은 값을 이어 쓴다."""
+    default = st.session_state.get("emd_path", "emd_data")
+    value = st.text_input("대조표 폴더 경로", value=default, key=key)
+    st.session_state["emd_path"] = value
+    return value
+
+
+def enrich_addresses(df: pd.DataFrame, col_addr: str, col_zip: Optional[str],
+                     resolver: AreaResolver, emd: Optional["EmdIndex"],
+                     include_codes: bool) -> pd.DataFrame:
+    """주소마다 시도·시군구·행정동·법정동을 붙인다. 원본 열은 그대로 둔다.
+
+    같은 주소는 한 번만 계산한다(사전 캐시).
+    """
+    cache: Dict[Tuple[str, str], dict] = {}
+    cols: Dict[str, list] = {c: [] for c in ENRICH_COLS + CODE_COLS}
+
+    zips = df[col_zip] if col_zip else [None] * len(df)
+    for addr, zipcode in zip(df[col_addr], zips):
+        ckey = (str(addr), norm_zip(zipcode))
+        if ckey not in cache:
+            cache[ckey] = resolver.resolve(addr, zipcode, emd)
+        info = cache[ckey]
+        cols["시도"].append(info["시도"])
+        cols["시군구"].append(info["시군구"])
+        cols["행정동"].append(info.get("행정동", ""))
+        cols["법정동"].append(info.get("법정동", ""))
+        cols["판정근거"].append(info["근거"] if info["status"] == "OK" else info["status"])
+        cols["areaM"].append(info["areaM"])
+        cols["areaD"].append(info["areaD"])
+
+    out = df.copy()
+    for c in ENRICH_COLS:
+        out[c] = cols[c]
+    if include_codes:
+        for c in CODE_COLS:
+            out[c] = cols[c]
+    return out
+
+
+def build_enrich_output(out: pd.DataFrame, col_id: Optional[str],
+                        col_zip: Optional[str], col_addr: str,
+                        extra: List[str], include_codes: bool,
+                        full: bool) -> pd.DataFrame:
+    """결과 파일에 담을 열만 골라낸다.
+
+    기본은 **지정한 열 + 생성된 열**. 주소 파일에는 이름·전화번호처럼
+    결과에 실릴 필요 없는 열이 딸려 있는 경우가 많다.
+    """
+    if full:
+        return out
+    picked: List[str] = []
+    for c in [col_id, col_zip, col_addr] + list(extra):
+        if c and c in out.columns and c not in picked:
+            picked.append(c)
+    for c in ENRICH_COLS + (CODE_COLS if include_codes else []):
+        if c in out.columns and c not in picked:
+            picked.append(c)
+    return out[picked]
+
+
+def to_excel_enrich(out: pd.DataFrame, stats: pd.DataFrame) -> bytes:
+    from openpyxl.styles import Font, PatternFill
+    buf = io.BytesIO()
+    unresolved = out[out["행정동"].astype(str) == ""]
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        stats.to_excel(writer, sheet_name="요약", index=False)
+        out.to_excel(writer, sheet_name="지역정보", index=False)
+        if not unresolved.empty:
+            # 열을 추리면 ID 가 빠져 추적이 안 되므로 결과와 같은 열 구성으로 둔다
+            unresolved.to_excel(writer, sheet_name="읍면동미확인", index=False)
+
+        ws = writer.sheets["지역정보"]
+        fill = PatternFill("solid", fgColor="E2EFDA")
+        cols = list(out.columns)
+        for name in ENRICH_COLS + CODE_COLS:
+            if name in cols:
+                cell = ws.cell(row=1, column=cols.index(name) + 1)
+                cell.fill = fill
+                cell.font = Font(bold=True)
+        ws.freeze_panes = "A2"
+    return buf.getvalue()
+
+
+def render_enrich_tab(ss) -> None:
+    """「지역정보 부여」 탭 — 주소만 넣으면 시도·시군구·행정동·법정동을 붙인다."""
+    st.markdown(
+        "주소 목록에 **시도 · 시군구 · 행정동 · 법정동**을 붙여 돌려줍니다. "
+        "ID 대조나 입력값 비교는 하지 않습니다."
+    )
+
+    st.subheader("1. 파일")
+    f = st.file_uploader("주소가 들어 있는 엑셀 또는 CSV",
+                         type=["xlsx", "xlsm", "xls", "csv"], key="up_enrich")
+    if f is None:
+        st.info("파일을 올리면 열 선택 화면이 나타납니다.")
+        return
+
+    data = f.getvalue()
+    try:
+        with st.spinner("파일을 읽는 중…"):
+            sheet = pick_sheet("시트", data, f.name, "sh_enrich")
+            df = read_sheet(data, f.name, sheet)
+    except Exception as exc:
+        st.error(f"파일을 읽지 못했습니다: {exc}")
+        return
+    st.caption(f"{len(df):,}행 · {len(df.columns)}열")
+
+    st.subheader("2. 열 지정")
+    cols = list(df.columns)
+    optional = [NONE_LABEL] + cols
+    c1, c2, c3 = st.columns(3)
+    col_addr = c1.selectbox("주소 열 (필수)", cols, key="en_addr",
+                            index=_idx(cols, guess_col(cols, ADDR_CANDS)))
+    col_zip_sel = c2.selectbox("우편번호 열 (선택)", optional, key="en_zip",
+                               index=_idx(optional, guess_col(cols, ZIP_CANDS)))
+    col_id_sel = c3.selectbox("ID 열 (선택)", optional, key="en_id",
+                              index=_idx(optional, guess_col(cols, ADDR_ID_CANDS)))
+    st.caption(
+        "우편번호는 없어도 됩니다. 읍면동 대조표 조회는 도로명과 건물번호만 쓰므로 "
+        "우편번호가 관여하지 않고, 대조표로 못 찾은 건의 시군구 판정에만 보조로 쓰입니다. "
+        "주소와 우편번호가 서로 다른 시군구를 가리키면 `판정근거`에 표시해 줍니다."
+    )
+    zip_col = None if col_zip_sel == NONE_LABEL else col_zip_sel
+    id_col = None if col_id_sel == NONE_LABEL else col_id_sel
+
+    rest = [c for c in cols if c not in (col_addr, zip_col, id_col)]
+    extra = st.multiselect("결과에 함께 남길 열 (선택)", rest, default=[], key="en_extra",
+                           help="지정하지 않은 열은 결과 파일에 담기지 않습니다. "
+                                "이름·전화번호처럼 결과에 필요 없는 열을 빼는 것이 기본 동작입니다.")
+
+    st.subheader("3. 읍면동 대조표 (선택)")
+    st.caption(
+        "`우편번호DB_변환.py` 로 만든 시도별 `.csv.gz` 폴더를 지정하면 행정동·법정동까지 채웁니다. "
+        "비워 두면 시도·시군구까지만 나옵니다 — 도로명주소에는 동 정보가 없어서 "
+        "대조표 없이는 추정할 수 없습니다."
+    )
+    folder = emd_folder_input("emd_folder_enrich")
+    tables: Dict[str, pd.DataFrame] = {}
+    if folder.strip():
+        tables, warn = load_emd_folder(folder.strip())
+        for w in warn:
+            st.warning(w)
+        if tables:
+            n = sum(len(v) for v in tables.values())
+            st.success(f"{len(tables)}개 시도 · {n:,}건 불러왔습니다")
+
+    o1, o2, o3 = st.columns(3)
+    include_codes = o1.checkbox("areaM · areaD 코드 열도 포함", value=False, key="en_codes")
+    full_cols = o2.checkbox("원본의 모든 열 포함", value=False, key="en_full",
+                            help="켜면 위 선택과 무관하게 원본 파일의 열을 전부 담습니다.")
+    infer = o3.checkbox("시도명 없는 주소는 시군구 이름으로 추정", value=True, key="en_infer")
+
+    if st.button("지역정보 부여", type="primary", use_container_width=True,
+                 key="en_run"):
+        with st.spinner("주소를 해석하는 중…"):
+            base = AreaResolver(ss.code_df, ss.road_df, infer_sido=infer)
+            zip_table = pd.DataFrame()
+            clash = pd.DataFrame()
+            if zip_col:
+                learned, clash = learn_zip_map(df, col_addr, zip_col, base)
+                zip_table = merge_zip_tables(
+                    learned[["우편번호", "시도", "시군구", "출처"]], ss.zip_manual)
+            else:
+                zip_table = merge_zip_tables(ss.zip_manual)
+            resolver = AreaResolver(ss.code_df, ss.road_df, zip_table, infer_sido=infer)
+
+            emd = None
+            emd_stat = None
+            if tables:
+                uniq = sorted({str(a).strip() for a in df[col_addr] if str(a).strip()})
+                mapping, unparsed = build_emd_map(uniq, tables, resolver)
+                emd = EmdIndex(mapping)
+                emd_stat = (len(uniq), len(mapping), unparsed)
+
+            out = enrich_addresses(df, col_addr, zip_col, resolver, emd, include_codes)
+        ss.enrich = dict(out=out, col_addr=col_addr, col_zip=zip_col,
+                         col_id=id_col, extra=list(extra),
+                         include_codes=include_codes, full_cols=full_cols,
+                         clash=clash, emd_stat=emd_stat, fname=f.name)
+
+    if ss.get("enrich") is None:
+        return
+
+    r = ss.enrich
+    out, col_addr = r["out"], r["col_addr"]
+    final = build_enrich_output(out, r["col_id"], r["col_zip"], col_addr,
+                                r["extra"], r["include_codes"], r["full_cols"])
+
+    st.subheader("4. 결과")
+    filled = {c: int((out[c].astype(str) != "").sum()) for c in
+              ["시도", "시군구", "행정동", "법정동"]}
+    for col, (name, n) in zip(st.columns(4), filled.items()):
+        col.metric(name, f"{n:,}", f"{n/len(out)*100:.1f}%" if len(out) else None)
+
+    stat = r.get("emd_stat")
+    if stat:
+        uniq_n, hit_n, unparsed_n = stat
+        msg = f"읍면동 대조표 조회 — 주소 {uniq_n:,}종 중 {hit_n:,}종 확인"
+        if unparsed_n:
+            msg += f" (도로명 주소로 분해되지 않은 주소 {unparsed_n:,}종 제외)"
+        (st.success if hit_n == uniq_n else st.info)(msg)
+    else:
+        st.info("읍면동 대조표를 지정하지 않아 시도·시군구까지만 판정했습니다.")
+
+    # 괄호 안 세부(도로명 규칙의 문구)는 열에만 남기고 요약에서는 묶는다
+    rough = out["판정근거"].astype(str).str.replace(r"\(.*\)", "", regex=True)
+    stats = rough.value_counts().rename_axis("판정근거").reset_index(name="건수")
+    st.caption("판정근거별 — " + " · ".join(f"{k} {v:,}건" for k, v
+                                        in zip(stats["판정근거"], stats["건수"])))
+
+    clash = r["clash"]
+    if clash is not None and len(clash):
+        st.error(f"같은 우편번호에 서로 다른 시군구가 붙은 건이 "
+                 f"{clash['우편번호'].nunique()}개 있습니다. 주소 오기재일 수 있습니다.")
+        st.dataframe(clash, use_container_width=True, height=180)
+
+    st.caption(f"결과 열 {len(final.columns)}개 — " + " · ".join(final.columns))
+    st.dataframe(final, use_container_width=True, height=380)
+
+    with st.spinner("결과 파일을 만드는 중…"):
+        blob = to_excel_enrich(final, stats)
+    st.download_button(
+        "결과 엑셀 내려받기", blob,
+        f"지역정보_{r['fname'].rsplit('.', 1)[0]}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True, key="en_dl",
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="주소 지역코드 검증", page_icon="📮", layout="wide")
     if not check_password():
@@ -633,9 +1099,13 @@ def main() -> None:
     ss.setdefault("zip_manual", pd.DataFrame(columns=["우편번호", "시도", "시군구", "출처"]))
     ss.setdefault("zip_learned", pd.DataFrame(columns=["우편번호", "시도", "시군구", "출처"]))
     ss.setdefault("result", None)
+    ss.setdefault("enrich", None)
 
-    tab_run, tab_zip, tab_code, tab_road = st.tabs(
-        ["검증", "우편번호 대조표", "지역코드 기준표", "도로명 보정 규칙"])
+    tab_run, tab_enrich, tab_zip, tab_code, tab_road = st.tabs(
+        ["검증", "지역정보 부여", "우편번호 대조표", "지역코드 기준표", "도로명 보정 규칙"])
+
+    with tab_enrich:
+        render_enrich_tab(ss)
 
     # ── 우편번호 대조표 ───────────────────────────────────────
     with tab_zip:
@@ -776,6 +1246,25 @@ def main() -> None:
 
         zip_col = None if c_zip == NONE_LABEL else c_zip
 
+        st.subheader("3. 읍면동 대조표 (선택)")
+        st.caption(
+            "`우편번호DB_변환.py` 로 만든 시도별 `.csv.gz` 폴더를 지정하면, "
+            "도로명 + 건물번호로 읍면동까지 정확히 판정합니다. "
+            "이 조회가 성공하면 주소 텍스트·우편번호·도로명 규칙보다 우선합니다. "
+            "비워 두면 기존 방식(시군구까지)으로만 동작합니다."
+        )
+        emd_folder = emd_folder_input("emd_folder_verify")
+        emd_tables, emd_warn = ({}, [])
+        if emd_folder.strip():
+            emd_tables, emd_warn = load_emd_folder(emd_folder.strip())
+            for w in emd_warn:
+                st.warning(w)
+            if emd_tables:
+                rows = sum(len(v) for v in emd_tables.values())
+                st.success(f"{len(emd_tables)}개 시도 · {rows:,}건 불러왔습니다 "
+                           f"({', '.join(sorted(emd_tables)[:6])}"
+                           f"{' …' if len(emd_tables) > 6 else ''})")
+
         if st.button("검증 실행", type="primary", use_container_width=True):
             with st.spinner("주소를 해석하는 중…"):
                 base = AreaResolver(ss.code_df, ss.road_df, infer_sido=infer)
@@ -787,8 +1276,16 @@ def main() -> None:
                 zip_table = merge_zip_tables(ss.zip_learned, ss.zip_manual)
                 resolver = AreaResolver(ss.code_df, ss.road_df, zip_table, infer_sido=infer)
                 addr_map, dup = make_addr_map(df_addr, c_sid, c_addr, zip_col)
-                result = verify(df_data, addr_map, c_tid, c_m, c_d, resolver)
+                emd = None
+                emd_stat = None
+                if emd_tables:
+                    uniq = sorted({a for a, _z in addr_map.values() if str(a).strip()})
+                    mapping, unparsed = build_emd_map(uniq, emd_tables, resolver)
+                    emd = EmdIndex(mapping)
+                    emd_stat = (len(uniq), len(mapping), unparsed)
+                result = verify(df_data, addr_map, c_tid, c_m, c_d, resolver, emd)
             ss.result = dict(result=result, dup=dup, clash=clash, zip_table=zip_table,
+                             emd_stat=emd_stat,
                              keep=[c for c in ("No", "no") if c in df_data.columns] + [c_tid, c_m, c_d],
                              full=full, fname=f_data.name)
 
@@ -798,7 +1295,7 @@ def main() -> None:
         r = ss.result
         result, output = r["result"], build_output(r["result"], r["keep"], r["full"])
 
-        st.subheader("3. 결과")
+        st.subheader("4. 결과")
         if r["dup"]:
             st.warning(f"주소 파일에 중복 ID가 {r['dup']:,}건 있습니다. 첫 번째 주소를 사용했습니다.")
 
@@ -809,6 +1306,14 @@ def main() -> None:
         for col, key in zip(st.columns(max(len(shown), 1)), shown):
             col.metric(key, f"{int(counts[key]):,}")
         summary = pd.DataFrame({"검증결과": shown, "건수": [int(counts[k]) for k in shown]})
+
+        stat = r.get("emd_stat")
+        if stat:
+            uniq_n, hit_n, unparsed_n = stat
+            msg = f"읍면동 대조표 조회 — 주소 {uniq_n:,}종 중 {hit_n:,}종 확인"
+            if unparsed_n:
+                msg += f" (도로명 주소로 분해되지 않은 주소 {unparsed_n:,}종은 제외)"
+            (st.success if hit_n == uniq_n else st.info)(msg)
 
         basis = result[result["판정근거"] != ""]["판정근거"].str.replace(r"\(.*\)", "", regex=True)
         if len(basis):
