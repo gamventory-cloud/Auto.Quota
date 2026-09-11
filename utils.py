@@ -1010,3 +1010,114 @@ def build_quota_form_xlsx(main_map, main_cols, ex_configs, source_name=""):
     buf = _io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def build_quota_report(main_map, main_cols, main_actual,
+                       ex_configs, ex_actual, n_selected):
+    """
+    쿼터표와 같은 배치로 '목표 / 달성 / 차이' 표를 만든다.
+
+    SPSS 에서 프리퀀시·크로스탭을 다시 돌리지 않아도 되도록, 화면에서 설정한
+    쿼터표 모양 그대로 실적을 채워 준다. 소프트 쿼터로 목표와 어긋난 셀이
+    어디인지 바로 보인다.
+
+    교차 방향은 쿼터 설정과 같게 잡는다 : 마지막 변수를 열, 나머지를 행.
+    변수가 1개면 교차 없이 목록으로 만든다.
+
+    반환: [(제목, DataFrame), ...]  — 호출부가 한 시트에 세로로 이어 붙인다
+    """
+    blocks = []
+    cols = [str(c) for c in (main_cols or [])]
+
+    def _sk(k):
+        return tuple(k) if isinstance(k, tuple) else (k,)
+
+    # ── 메인 쿼터 ────────────────────────────────────────────────────
+    if main_map:
+        keys = list(main_map)
+        if len(cols) >= 2:
+            row_cols = cols[:-1]
+            row_keys = sorted({_sk(k)[:-1] for k in keys},
+                              key=lambda t: [natural_key(x) for x in t])
+            col_keys = sorted({_sk(k)[-1] for k in keys}, key=natural_key)
+
+            def _pivot(getval):
+                data = []
+                for rk in row_keys:
+                    row = list(rk)
+                    for ck in col_keys:
+                        row.append(getval(tuple(rk) + (ck,)))
+                    row.append(sum(getval(tuple(rk) + (c,)) for c in col_keys))
+                    data.append(row)
+                tot = [""] * (len(row_cols) - 1) + ["합계"]
+                for ck in col_keys:
+                    tot.append(sum(getval(tuple(rk) + (ck,)) for rk in row_keys))
+                tot.append(sum(tot[len(row_cols):]))
+                data.append(tot)
+                return pd.DataFrame(
+                    data, columns=row_cols + [str(c) for c in col_keys] + ["합계"])
+
+            blocks.append(("메인 쿼터 — 목표", _pivot(
+                lambda k: int(main_map.get(k, 0)))))
+            blocks.append((f"메인 쿼터 — 달성 (통과 {n_selected:,}명)", _pivot(
+                lambda k: int(main_actual.get(k, 0)))))
+            blocks.append(("메인 쿼터 — 차이 (달성 − 목표)", _pivot(
+                lambda k: int(main_actual.get(k, 0)) - int(main_map.get(k, 0)))))
+        else:
+            name = cols[0] if cols else "전체"
+            rows = []
+            for k in sorted(keys, key=lambda x: [natural_key(y) for y in _sk(x)]):
+                t, a = int(main_map[k]), int(main_actual.get(k, 0))
+                rows.append({name: " / ".join(_sk(k)), "목표": t, "달성": a,
+                             "차이": a - t})
+            df = pd.DataFrame(rows)
+            df.loc[len(df)] = {name: "합계", "목표": df["목표"].sum(),
+                               "달성": df["달성"].sum(), "차이": df["차이"].sum()}
+            blocks.append((f"메인 쿼터 (통과 {n_selected:,}명)", df))
+
+    # ── 추가 쿼터 ────────────────────────────────────────────────────
+    for j, cfg in enumerate(ex_configs or []):
+        if not cfg.get("cols") or not cfg.get("map"):
+            continue
+        act = ex_actual[j] if j < len(ex_actual) else {}
+        is_grid = cfg.get("mode") == "grid" and len(cfg["cols"]) >= 2
+
+        if is_grid:
+            row_cols = cfg["cols"][:-1]
+            rks = sorted({_sk(k)[:-1] for k in cfg["map"]},
+                         key=lambda t: [natural_key(x) for x in t])
+            cks = sorted({_sk(k)[-1] for k in cfg["map"]}, key=natural_key)
+            data = []
+            for rk in rks:
+                row = list(rk)
+                for ck in cks:
+                    kk = tuple(rk) + (ck,)
+                    row.append(f"{int(act.get(kk, 0))} / {int(cfg['map'].get(kk, 0))}")
+                data.append(row)
+            df = pd.DataFrame(data, columns=[str(c) for c in row_cols]
+                              + [str(c) for c in cks])
+            blocks.append((f"추가 쿼터 — {cfg.get('name')} "
+                           f"(칸 안은 달성 / 목표)", df))
+        else:
+            rows = []
+            for k in sorted(cfg["map"], key=lambda x: natural_key(
+                    " / ".join(_sk(x)))):
+                t = int(cfg["map"][k])
+                a = int(act.get(k, 0))
+                rows.append({
+                    "값": " / ".join(_sk(k)) if isinstance(k, tuple) else str(k),
+                    "목표": t, "달성": a, "차이": a - t,
+                    "달성률": (a / t) if t else None,
+                    "구성비": (a / n_selected) if n_selected else None})
+            df = pd.DataFrame(rows)
+            df.loc[len(df)] = {
+                "값": "합계", "목표": df["목표"].sum(), "달성": df["달성"].sum(),
+                "차이": df["차이"].sum(),
+                "달성률": (df["달성"].sum() / df["목표"].sum())
+                if df["목표"].sum() else None,
+                "구성비": (df["달성"].sum() / n_selected) if n_selected else None}
+            multi = len(cfg["cols"]) > 1
+            blocks.append((f"추가 쿼터 — {cfg.get('name')}"
+                           + ("  (복수응답: 구성비 합이 100%를 넘을 수 있음)"
+                              if multi else ""), df))
+    return blocks
