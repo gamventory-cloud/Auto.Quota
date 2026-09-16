@@ -1121,3 +1121,32 @@ def build_quota_report(main_map, main_cols, main_actual,
                            + ("  (복수응답: 구성비 합이 100%를 넘을 수 있음)"
                               if multi else ""), df))
     return blocks
+
+
+def quota_report_frame(blocks):
+    """
+    build_quota_report 의 블록들을 한 장의 DataFrame 으로 이어 붙인다.
+
+    엔진 API(add_worksheet / writer.sheets)를 쓰지 않고 to_excel 한 번으로
+    쓰기 위해서다. pandas 2.x 에서는 writer.sheets 대입이 반영되지 않아
+    같은 이름의 시트를 다시 만들려다 DuplicateWorksheetName 으로 죽는다.
+    (pandas 3.x 에서는 통과해서 놓치기 쉬운 차이다)
+
+    제목 줄은 '■ ' 를 붙여 서식 없이도 구분되게 한다.
+    반환: DataFrame (header 없이 그대로 쓰면 된다)
+    """
+    width = 1
+    for _t, df in blocks:
+        width = max(width, df.shape[1])
+
+    rows = []
+    for title, df in blocks:
+        rows.append(["■ " + str(title)] + [None] * (width - 1))
+        hdr = [str(c) for c in df.columns]
+        rows.append(hdr + [None] * (width - len(hdr)))
+        for rec in df.itertuples(index=False):
+            vals = list(rec)
+            rows.append(vals + [None] * (width - len(vals)))
+        rows.append([None] * width)
+        rows.append([None] * width)
+    return pd.DataFrame(rows)

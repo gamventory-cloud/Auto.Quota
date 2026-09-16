@@ -157,6 +157,14 @@ v3 변경점 (추가 쿼터 100% 할당)
       복수응답 그룹은 구성비 합이 100%를 넘을 수 있다고 제목에 적는다.
     - 통과자 기준이다. SPSS 에서 프리퀀시·크로스탭을 다시 돌리지 않아도
       소프트 쿼터로 어긋난 셀을 바로 확인할 수 있다.
+33-B. [버그 수정] 쿼터_실적표 시트가 만들어지지 않던 문제
+    - 원인 두 가지였다.
+      ① 코드가 파일에 실제로 들어가지 않았다 (변경 이력만 적혀 있었다)
+      ② add_worksheet + writer.sheets 대입 방식은 pandas 2.x 에서 반영되지
+         않아, to_excel 이 같은 이름의 시트를 다시 만들려다
+         DuplicateWorksheetName 으로 죽는다. pandas 3.x 에서는 통과한다.
+    - 블록들을 한 장의 표로 합쳐 to_excel 한 번으로 쓰도록 바꿨다
+      (utils.quota_report_frame). 엔진 API 를 쓰지 않아 버전에 영향받지 않는다.
 34. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
@@ -1531,6 +1539,33 @@ if data_file:
                          'Diff': v - final_m[k]}
                         for k, v in main_map.items()
                     ]).to_excel(w, index=False, sheet_name='Main_Status')
+
+                # ── 쿼터 실적표 : 설정한 쿼터표 모양 그대로 목표/달성/차이 ──
+                #  SPSS 에서 프리퀀시·크로스탭을 다시 돌리지 않아도 되게 한다.
+                #
+                #  [주의] add_worksheet + writer.sheets 대입 방식은 쓰지 않는다.
+                #  pandas 2.x 에서는 그 대입이 반영되지 않아 to_excel 이 같은
+                #  이름의 시트를 다시 만들려다 DuplicateWorksheetName 으로 죽는다.
+                #  (pandas 3.x 에서는 통과해서 놓치기 쉬운 차이다)
+                #  블록을 한 장의 표로 합쳐 to_excel 한 번으로 쓴다.
+                try:
+                    _blocks = utils.build_quota_report(
+                        main_map, algo_main_cols, final_m,
+                        ex_configs, final_exs, len(df_pass))
+                    if _blocks:
+                        utils.quota_report_frame(_blocks).to_excel(
+                            w, sheet_name='쿼터_실적표',
+                            index=False, header=False)
+                        try:                      # 서식은 되면 좋고 안 되면 그만
+                            _ws = w.sheets.get('쿼터_실적표')
+                            if _ws is not None:
+                                _ws.set_column(0, 0, 16)
+                                _ws.set_column(1, 30, 11)
+                        except Exception:         # noqa: BLE001
+                            pass
+                except Exception as _re_:                     # noqa: BLE001
+                    st.warning(f"쿼터 실적표 생성 실패 — "
+                               f"{type(_re_).__name__}: {_re_}")
 
                 if plan_rows:
                     pd.DataFrame(plan_rows).to_excel(
