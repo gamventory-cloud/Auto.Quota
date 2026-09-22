@@ -94,7 +94,10 @@ def read_sav_bytes(data: bytes, filename: str):
                 dict(meta.column_names_to_labels or {}),
                 dict(meta.variable_value_labels or {}),
                 dict(getattr(meta, "readstat_variable_types", {}) or {}),
-                enc or "",
+                {"read": enc or "",
+                 # 파일이 스스로 밝힌 인코딩. 라벨 한도(120바이트)는 이 기준이라
+                 # 잘림 판정에 쓴다. (EUC-KR 파일을 UTF-8 로 재면 못 잡는다)
+                 "file": str(getattr(meta, "file_encoding", "") or "")},
             )
         raise last
     finally:
@@ -102,35 +105,105 @@ def read_sav_bytes(data: bytes, filename: str):
             os.unlink(tmp_path)
 
 
-# SPSS 한도 — 값 라벨 120바이트, 변수 라벨 256바이트 (한글 1자 = 3바이트)
+# SPSS 한도 — 값 라벨 120바이트, 변수 라벨 256바이트.
+# 한도는 **파일에 저장된 인코딩** 기준이다 (EUC-KR 한글 2B, UTF-8 3B).
 VALLABEL_LIMIT = 120
 VARLABEL_LIMIT = 256
 
+# 한도에서 자르면 마지막 온전한 글자 경계는 한도-2 ~ 한도 사이에 떨어진다
+# (2바이트 글자면 119·120, 3바이트 글자면 118·119·120).
+# 이보다 넓게 잡으면 우연히 그 길이인 멀쩡한 라벨까지 잘렸다고 잡는다.
+CEIL_SLACK = 2
 
-def _looks_truncated(text, limit: int) -> bool:
-    """SPSS 가 바이트 한도에서 잘라 먹은 라벨로 보이는지.
 
-    한도에 거의 닿았는데 끝이 '?' 나 '�' 로 끝나면, 한글 한 글자(3바이트)가
-    경계에 걸려 반토막 난 것이다. 잘린 글자는 파일에 남아 있지 않으므로
-    되살릴 수 없고, 어느 변수인지 알려 주는 것이 최선이다.
-    '만족하십니까?' 처럼 물음표로 끝나는 멀쩡한 라벨을 잡지 않도록
-    한도 근처인 것만 본다.
+_NUM_PREFIX = re.compile(r"^\s*\d+\s*[)\.]\s*")
+
+
+def _label_core(text) -> str:
+    """앞에 붙은 번호('  2) ')를 뗀 본문. 길이를 견줄 때 쓴다."""
+    return _NUM_PREFIX.sub("", str(text).strip()).rstrip()
+
+
+def _enc_len(text, encoding: str) -> int:
+    """그 인코딩으로 저장했을 때의 바이트 수."""
+    try:
+        return len(str(text).encode(encoding, errors="replace"))
+    except LookupError:
+        return len(str(text).encode("utf-8", errors="replace"))
+
+
+def _find_ceiling(labels, limit: int, encodings) -> str | None:
+    """라벨 길이가 한도에 '막혀' 있으면 그 기준이 된 인코딩을 돌려준다.
+
+    한도는 파일에 저장된 인코딩 기준이다. 같은 라벨이라도 EUC-KR 로는
+    120바이트인데 UTF-8 로 재면 168바이트라, 한 가지 기준으로만 보면
+    놓친다. 그래서 후보 인코딩으로 각각 재어 보고
+      · 한도를 넘는 라벨이 하나도 없고
+      · 한도에 딱 붙은 라벨이 여럿 있는
+    인코딩을 찾는다. 자연스럽게 생긴 길이 분포는 이렇게 되지 않는다.
+    """
+    best = None
+    for enc in encodings:
+        lens = [_enc_len(s, enc) for s in labels if str(s).strip()]
+        if not lens:
+            continue
+        top = max(lens)
+        if top > limit or top < limit - CEIL_SLACK:
+            continue                      # 천장이 없거나 한도와 무관하다
+        at_ceiling = sum(1 for n in lens if n >= limit - CEIL_SLACK)
+        if at_ceiling >= 3 and (best is None or at_ceiling > best[1]):
+            best = (enc, at_ceiling)
+    return best[0] if best else None
+
+
+def _looks_truncated(text, limit: int, encoding: str | None = None) -> bool:
+    """잘려 나간 라벨로 보이는지.
+
+    ① 천장이 확인된 인코딩에서 한도에 닿아 있으면 잘린 것이다.
+       (1차 조사 파일처럼 '?' 없이 문장만 뚝 끊긴 경우가 여기 해당한다)
+    ② 천장을 못 찾았어도, 한도 근처에서 '?' 나 '�' 로 끝나면 잘린 것이다.
+       한글 한 글자가 경계에 걸려 반토막 난 흔적이다.
+       '만족하십니까?' 같은 멀쩡한 라벨은 길이가 한참 짧아 걸리지 않는다.
     """
     s = str(text)
-    if not s.endswith(("?", "�")):
+    # 문장이 끝맺어져 있으면 길이가 한도에 닿았어도 잘린 것이 아니다.
+    # (우연히 118~120바이트인 멀쩡한 라벨이 실제로 있다 — '…지급합니다.')
+    # 잘린 라벨은 '…국민연금 가' 처럼 단어 중간에서 끊긴다.
+    if s.rstrip().endswith((".", "!", "。", "…")):
         return False
-    return len(s.encode("utf-8", errors="replace")) >= limit - 3
+    if encoding and _enc_len(s, encoding) >= limit - CEIL_SLACK:
+        return True
+    return (s.rstrip().endswith(("?", "�"))
+            and len(s.encode("utf-8", errors="replace")) >= limit - CEIL_SLACK)
 
 
-def find_broken_labels(col_labels: dict, value_labels: dict) -> list:
+def label_encodings(file_encoding: str = "") -> list:
+    """천장을 찾아볼 인코딩 후보. 파일이 말하는 것을 먼저 본다."""
+    out = []
+    for e in (file_encoding, "utf-8", "euc-kr"):
+        e = (e or "").strip()
+        if e and e.lower() not in {x.lower() for x in out}:
+            out.append(e)
+    return out
+
+
+def find_broken_labels(col_labels: dict, value_labels: dict,
+                       file_encoding: str = "") -> list:
     """잘려 나간 것으로 보이는 라벨 목록. [(변수, 위치, 라벨), ...]"""
+    encs = label_encodings(file_encoding)
+    v_labs = [l for mp in (value_labels or {}).values()
+              for l in (mp or {}).values()]
+    c_labs = [l for l in (col_labels or {}).values() if l]
+    v_enc = _find_ceiling(v_labs, VALLABEL_LIMIT, encs)
+    c_enc = _find_ceiling(c_labs, VARLABEL_LIMIT, encs)
+
     bad = []
     for var, lab in (col_labels or {}).items():
-        if _looks_truncated(lab, VARLABEL_LIMIT):
+        if lab and _looks_truncated(lab, VARLABEL_LIMIT, c_enc):
             bad.append((str(var), "변수 라벨", str(lab)))
     for var, mapping in (value_labels or {}).items():
         for code, lab in (mapping or {}).items():
-            if _looks_truncated(lab, VALLABEL_LIMIT):
+            if _looks_truncated(lab, VALLABEL_LIMIT, v_enc):
                 bad.append((str(var), f"코드 {_code_str(code)}", str(lab)))
     return bad
 
@@ -349,8 +422,23 @@ def read_codebook_xlsx(data: bytes):
 
 
 def apply_codebook(col_labels: dict, value_labels: dict,
-                   cb_col: dict, cb_val: dict, only_broken: bool):
-    """코드북 라벨로 .sav 라벨을 채운다. (새 변수라벨, 새 값라벨, 리포트)"""
+                   cb_col: dict, cb_val: dict, only_broken: bool,
+                   file_encoding: str = ""):
+    """코드북 라벨로 .sav 라벨을 채운다. (새 변수라벨, 새 값라벨, 리포트)
+
+    file_encoding 은 '이미 잘려 있는 라벨' 을 가려내는 데 쓴다.
+    한도는 파일에 저장된 인코딩 기준이라 이것 없이는 판정이 어긋난다.
+    """
+    # 복구 전에 어느 라벨이 잘려 있었는지 먼저 확정한다. 복구 뒤에 다시
+    # 찾으면 천장이 사라져(긴 원문이 들어가서) 못 채운 것까지 멀쩡해 보인다.
+    orig_broken = {(v, w) for v, w, _ in
+                   find_broken_labels(col_labels, value_labels, file_encoding)}
+    encs = label_encodings(file_encoding)
+    _v_enc = _find_ceiling(
+        [l for mp in (value_labels or {}).values() for l in (mp or {}).values()],
+        VALLABEL_LIMIT, encs)
+    _c_enc = _find_ceiling(
+        [l for l in (col_labels or {}).values() if l], VARLABEL_LIMIT, encs)
     new_col = dict(col_labels or {})
     new_val = {k: dict(v) for k, v in (value_labels or {}).items()}
     filled, skipped, unknown = [], [], []
@@ -369,20 +457,30 @@ def apply_codebook(col_labels: dict, value_labels: dict,
         else:
             mismatched.append(var)
 
-    def _no_gain(new_text) -> bool:
-        """이 라벨로 바꿔봐야 소용없는 경우.
+    def _no_gain(new_text, old_text) -> bool:
+        """이 라벨로 바꿔봐야 얻는 것이 없는 경우.
 
-        내보낸 Code 시트를 고치지 않고 그대로 다시 올리면, 잘린 라벨이
-        잘린 채로 돌아온다. 그걸 덮어쓰면 '?' 는 그대로인데 번호 접두사만
-        떨어져 나가고, 길이가 줄어 잘림 경고에서도 빠져버린다.
-        그래서 여전히 잘려 있는 라벨은 쓰지 않는다.
+        내보낸 Code 시트를 고치지 않고 그대로 다시 올리는 일이 흔하다.
+        그 안의 라벨은 잘린 채로 돌아오는 데다 번호 접두사('  2) ')까지
+        떨어져 나가 있어서, 덮어쓰면 오히려 글자가 줄고 잘림 경고에서도
+        빠져버린다. 잘림을 메우는 복구는 **반드시 길어진다**는 점을 쓴다.
+
+        ① 여전히 '?'·'�' 로 끝나면 그쪽도 잘린 것이라 쓰지 않는다
+        ② 지금 것보다 길어지지 않으면 복구가 아니다
         """
-        return str(new_text).rstrip().endswith(("?", "�"))
+        new_s, old_s = str(new_text).rstrip(), str(old_text).rstrip()
+        if new_s.endswith(("?", "�")):
+            return True
+        # 길이는 번호 접두사를 뗀 본문끼리 견준다. .sav 라벨에는 '  2) ' 가
+        # 붙어 있고 코드북에는 없는 경우가 많아, 그대로 재면 제대로 된 원문도
+        # '안 길어졌다' 고 걸러진다.
+        return len(_label_core(new_s)) <= len(_label_core(old_s))
 
     for var, lab in (cb_col or {}).items():
-        if var not in new_col or _no_gain(lab):
+        if var not in new_col or _no_gain(lab, new_col[var]):
             continue
-        if only_broken and not _looks_truncated(new_col[var], VARLABEL_LIMIT):
+        if only_broken and not _looks_truncated(new_col[var], VARLABEL_LIMIT,
+                                                _c_enc):
             continue
         if str(new_col[var]).strip() != str(lab).strip():
             new_col[var] = lab
@@ -395,18 +493,18 @@ def apply_codebook(col_labels: dict, value_labels: dict,
         by_code = {_code_str(c): c for c in new_val[var]}
         for code_s, lab in mapping.items():
             key = by_code.get(code_s)
-            if key is None or _no_gain(lab):
+            if key is None or _no_gain(lab, new_val[var][key]):
                 continue
             if only_broken and not _looks_truncated(new_val[var][key],
-                                                    VALLABEL_LIMIT):
+                                                    VALLABEL_LIMIT, _v_enc):
                 continue
             if str(new_val[var][key]).strip() == str(lab).strip():
                 continue
             new_val[var][key] = lab
             filled.append((var, f"코드 {code_s}"))
 
-    for var, where, _ in find_broken_labels(new_col, new_val):
-        skipped.append((var, where))
+    done = set(filled)
+    skipped = sorted(orig_broken - done)
 
     return new_col, new_val, {"filled": filled, "still_broken": skipped,
                               "unknown_vars": sorted(set(unknown)),
@@ -821,16 +919,18 @@ multi = len(ups) > 1
 loaded = []          # [(파일, df, col_labels, value_labels, var_types), ...]
 fallback_enc = []    # 기본값으로 못 읽어 다른 인코딩으로 넘어간 파일
 broken_labels = []   # 원본에서 이미 잘려 있는 라벨
+file_encs = []       # 파일이 밝힌 인코딩 (라벨 한도 판정에 쓴다)
 for f in ups:
     try:
-        _d, _cl, _vl, _vt, _enc = read_sav_bytes(f.getvalue(), f.name)
+        _d, _cl, _vl, _vt, _info = read_sav_bytes(f.getvalue(), f.name)
     except Exception as e:
         st.error(f"‘{f.name}’ 을 읽지 못했습니다: {e}")
         st.stop()
     loaded.append((f, _d, _cl, _vl, _vt))
-    if _enc:
-        fallback_enc.append((f.name, _enc))
-    for _var, _where, _lab in find_broken_labels(_cl, _vl):
+    file_encs.append(_info.get("file", ""))
+    if _info.get("read"):
+        fallback_enc.append((f.name, _info["read"]))
+    for _var, _where, _lab in find_broken_labels(_cl, _vl, _info.get("file", "")):
         broken_labels.append((f.name, _var, _where, _lab))
 
 if fallback_enc:
@@ -889,7 +989,8 @@ with st.expander("📑 코드북으로 잘린 라벨 채우기 (선택)",
             merged, reports = [], []
             for f, d, cl, vl, vt in loaded:
                 cl2, vl2, rep = apply_codebook(cl, vl, cb_col, cb_val,
-                                               only_broken)
+                                               only_broken,
+                                               file_encs[0] if file_encs else "")
                 merged.append((f, d, cl2, vl2, vt))
                 reports.append((f.name, rep))
 
