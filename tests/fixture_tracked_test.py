@@ -47,7 +47,13 @@ for fixture in FIXTURES:
     if not fixture.exists():
         print(f"\n=== {fixture.name}: 파일 없음 (건너뜀) ===")
         continue
-    variables = sl.parse_upload(fixture.read_bytes())
+    try:
+        variables = sl.parse_upload(fixture.read_bytes())
+    except sl.LegacyDocError as e:
+        # 구형 .doc 은 LibreOffice 가 있어야 변환된다. 없는 환경에서
+        # 앞의 .docx 검사 결과까지 날려버리지 않도록 건너뛴다.
+        print(f"\n=== {fixture.name}: 건너뜀 ({e}) ===")
+        continue
     table = {v.name: v for v in variables}
     print(f"\n=== {fixture.name} — 변수 {len(variables)}개 ===")
 
