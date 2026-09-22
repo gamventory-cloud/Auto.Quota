@@ -160,11 +160,19 @@ with tab_manual:
             else:
                 st.warning("그룹 이름과 변수 2개 이상이 필요합니다.")
 
-        for i, g in enumerate(st.session_state["bt_merge_banners"]):
+        # 삭제는 on_click 콜백으로 한다. 본문에서 pop 하면 지금 돌고 있는
+        # 루프의 목록이 줄어들어 바로 뒤 항목 하나가 이번 화면에서 빠진다.
+        # 콜백은 다시 그리기 전에 실행되므로 그런 일이 없다.
+        def _del_merge(idx: int) -> None:
+            lst = st.session_state["bt_merge_banners"]
+            if 0 <= idx < len(lst):
+                lst.pop(idx)
+
+        for i, g in enumerate(list(st.session_state["bt_merge_banners"])):
             gc1, gc2 = st.columns([6, 1])
             gc1.write(f"**{g['label']}** — {', '.join(g['varlist'])}")
-            if gc2.button("삭제", key=f"bt_del_merge_{i}"):
-                st.session_state["bt_merge_banners"].pop(i)
+            gc2.button("삭제", key=f"bt_del_merge_{i}",
+                       on_click=_del_merge, args=(i,))
 
     banners = [BannerSpec(kind="single", var=v) for v in to_vars(banner_disp)] + [
         BannerSpec(kind="merge", label=g["label"], varlist=g["varlist"])
@@ -646,8 +654,18 @@ with tab_manual:
             if i < len(blk_list) and j < len(blk_list):
                 blk_list[i], blk_list[j] = blk_list[j], blk_list[i]
 
+        def drop(i: int) -> None:
+            """목록에서 표 하나를 뺀다. move 와 같은 이유로 on_click 에서 한다.
+            본문에서 pop 하면 이번 화면에서 바로 뒤 표가 그려지지 않는다."""
+            res_list = st.session_state["bt_results"]
+            blk_list = st.session_state["bt_blocks"]
+            if 0 <= i < len(res_list):
+                res_list.pop(i)
+                if i < len(blk_list):
+                    blk_list.pop(i)
+
         n_kept = len(st.session_state["bt_results"])
-        for i, res in enumerate(st.session_state["bt_results"]):
+        for i, res in enumerate(list(st.session_state["bt_results"])):
             with st.expander(f"{i + 1}. {res.title}"):
                 st.dataframe(result_to_frame(res), **_WIDE)
                 for note in res.notes:
@@ -657,10 +675,8 @@ with tab_manual:
                           on_click=move, args=(i, -1))
                 m2.button("↓ 아래로", key=f"bt_down_{i}",
                           disabled=(i == n_kept - 1), on_click=move, args=(i, 1))
-                if m3.button("빼기", key=f"bt_del_result_{i}"):
-                    st.session_state["bt_results"].pop(i)
-                    if i < len(st.session_state["bt_blocks"]):
-                        st.session_state["bt_blocks"].pop(i)
+                m3.button("빼기", key=f"bt_del_result_{i}",
+                          on_click=drop, args=(i,))
 
         s1, s2 = st.columns([3, 1])
         split_sheets = s1.checkbox(

@@ -13,6 +13,7 @@ utils.check_password() 를 호출해야 한다.
 """
 
 import csv
+import importlib.util
 import io
 import os
 import tempfile
@@ -27,9 +28,15 @@ from hwp_survey.isas import (ISASWriter, items_to_isas_dsl, parse_isas,
 try:                                     # 검증 기능은 선택 사항
     from hwp_survey.verify import compare, docx_text, hwp_text, pdf_text
     VERIFY_READY = True
+    VERIFY_ERROR = ""
 except ImportError as err:
     VERIFY_READY = False
     VERIFY_ERROR = str(err)
+
+# verify.py 는 pypdf 를 함수 안에서 import 한다. 그래서 위 임포트는 pypdf 가
+# 없어도 성공하고, PDF 를 올린 뒤에야 ImportError 가 그대로 터진다.
+# 업로더를 그리기 전에 미리 확인해 안내로 바꾼다.
+HAS_PYPDF = importlib.util.find_spec("pypdf") is not None
 
 PAGE_TITLE = "설문지 변환 (한글 → 워드)"
 SS = "survey_docx"          # 다른 페이지와 섞이지 않도록 세션 키 접두어
@@ -308,7 +315,14 @@ if not VERIFY_READY:
 st.caption("한글에서 '다른 이름으로 저장 → PDF'로 저장한 원본을 올리면, 변환 결과와 "
            "문장 단위로 대조해 빠진 내용을 찾습니다.")
 
-pdf_file = st.file_uploader("원본 PDF (선택)", type=["pdf"], key=f"{SS}_pdf")
+if HAS_PYPDF:
+    pdf_file = st.file_uploader("원본 PDF (선택)", type=["pdf"], key=f"{SS}_pdf")
+else:
+    pdf_file = None
+    st.info("PDF 대조에는 `pypdf` 가 필요합니다. requirements.txt 에 "
+            "`pypdf` 를 넣고 앱을 다시 배포(Reboot)하면 이 칸이 나타납니다. "
+            "그 전까지는 아래 'PDF 없이 검사' 만 쓸 수 있습니다.")
+
 use_parser = st.checkbox(
     "PDF 없이 검사 (파서가 읽은 텍스트를 기준으로)", value=False,
     help="파서가 애초에 놓친 내용은 이 방식으로 검출되지 않습니다. "
@@ -321,6 +335,10 @@ if pdf_file is not None or use_parser:
             src_path = tmp.name
         try:
             source = pdf_text(src_path)
+        except ImportError as err:
+            st.error(f"PDF 를 읽지 못했습니다 — {err}. "
+                     "requirements.txt 의 `pypdf` 를 확인해 주세요.")
+            st.stop()
         finally:
             os.unlink(src_path)
     else:

@@ -330,9 +330,20 @@ def apply_patch(df: pd.DataFrame, value_labels: dict, var_types: dict,
             pairs.append((sc, pc))
 
     # ── ID 짝 맞추기 ──
-    key_map = {_to_text(v): i for i, v in enumerate(out[sav_key])}
+    # 같은 ID 가 두 번 이상 나오면 한쪽만 반영되고 나머지는 조용히 사라진다.
+    # 덮어쓰기 작업이라 조용히 넘기면 안 되므로 양쪽 모두 세어서 알린다.
+    key_map, dup_sav = {}, []
+    for i, v in enumerate(out[sav_key]):
+        kid = _to_text(v)
+        if kid == "":
+            continue
+        if kid in key_map:
+            dup_sav.append(kid)          # 먼저 나온 행을 쓴다
+            continue
+        key_map[kid] = i
+
     changes, to_text_cols, unmatched_ids = {}, [], []
-    matched_ids = set()
+    matched_ids, dup_patch = set(), []
 
     for _, prow in patch.iterrows():
         kid = _to_text(prow[patch_key])
@@ -342,6 +353,8 @@ def apply_patch(df: pd.DataFrame, value_labels: dict, var_types: dict,
         if idx is None:
             unmatched_ids.append(kid)
             continue
+        if kid in matched_ids:
+            dup_patch.append(kid)        # 뒤에 오는 행이 앞을 덮어쓴다
         matched_ids.add(kid)
         for sc, pc in pairs:
             v = prow[pc]
@@ -378,6 +391,8 @@ def apply_patch(df: pd.DataFrame, value_labels: dict, var_types: dict,
         "to_text": to_text_cols,
         "matched": len(matched_ids),
         "unmatched_ids": unmatched_ids,
+        "dup_sav": sorted(set(dup_sav)),
+        "dup_patch": sorted(set(dup_patch)),
     }
     return out, new_labels, report
 
@@ -655,6 +670,26 @@ else:
                 f"SAV 에 없는 ID {len(rep['unmatched_ids'])}개는 넘겼습니다 — "
                 + ", ".join(rep["unmatched_ids"][:10])
                 + (" …" if len(rep["unmatched_ids"]) > 10 else "")
+            )
+
+        if rep["dup_sav"]:
+            st.error(
+                f"**SAV 의 `{sav_key}` 에 같은 값이 여러 행에 있습니다 "
+                f"({len(rep['dup_sav'])}개 ID).** 각 ID 의 **첫 번째 행에만** "
+                "값이 들어가고 나머지 행은 그대로 남습니다. ID 열을 잘못 고른 "
+                "것은 아닌지 확인해 주세요 — "
+                + ", ".join(rep["dup_sav"][:10])
+                + (" …" if len(rep["dup_sav"]) > 10 else "")
+            )
+
+        if rep["dup_patch"]:
+            st.error(
+                f"**엑셀의 `{patch_key}` 에 같은 값이 여러 행에 있습니다 "
+                f"({len(rep['dup_patch'])}개 ID).** 같은 ID 끼리는 **아래쪽 행이 "
+                "위쪽을 덮어씁니다.** 의도한 것이 아니라면 엑셀에서 정리한 뒤 "
+                "다시 올려 주세요 — "
+                + ", ".join(rep["dup_patch"][:10])
+                + (" …" if len(rep["dup_patch"]) > 10 else "")
             )
 
         if rep["only_in_patch"]:
