@@ -1012,10 +1012,12 @@ def build_quota_form_xlsx(main_map, main_cols, ex_configs, source_name=""):
     return buf.getvalue()
 
 
-def _report_pivot_blocks(prefix, tmap, amap, row_cols, col_name, n_selected=None):
+def _report_pivot_blocks(prefix, tmap, amap, row_cols, n_selected=None):
     """
-    (목표 / 달성 / 차이) 세 표를 같은 배치로 만든다. 메인·조합형 공용.
-    반환: [(제목, DataFrame, meta), ...]
+    (목표 / 달성 / 차이) 세 표를 **가로로 나란히** 놓는 한 덩어리를 만든다.
+    세로로 쌓으면 추가 쿼터가 여러 개일 때 시트가 한없이 길어진다.
+
+    반환: 블록 dict 하나
     """
     def _sk(k):
         return tuple(k) if isinstance(k, tuple) else (k,)
@@ -1042,17 +1044,21 @@ def _report_pivot_blocks(prefix, tmap, amap, row_cols, col_name, n_selected=None
             data, columns=[str(c) for c in row_cols]
             + [str(c) for c in col_keys] + ["합계"])
 
-    meta = {"kind": "pivot", "label_cols": len(row_cols), "total_row": True}
     sub = f" (통과 {n_selected:,}명)" if n_selected is not None else ""
-    return [
-        (f"{prefix} — 목표", _pivot(lambda k: int(tmap.get(k, 0))),
-         dict(meta, diff=False)),
-        (f"{prefix} — 달성{sub}", _pivot(lambda k: int(amap.get(k, 0))),
-         dict(meta, diff=False)),
-        (f"{prefix} — 차이 (달성 − 목표)",
-         _pivot(lambda k: int(amap.get(k, 0)) - int(tmap.get(k, 0))),
-         dict(meta, diff=True)),
-    ]
+    return {
+        "title": f"{prefix}{sub}",
+        "label_cols": len(row_cols),
+        "total_row": True,
+        "pct_cols": [],
+        "parts": [
+            {"label": "목표", "df": _pivot(lambda k: int(tmap.get(k, 0))),
+             "diff": False},
+            {"label": "달성", "df": _pivot(lambda k: int(amap.get(k, 0))),
+             "diff": False},
+            {"label": "차이", "diff": True,
+             "df": _pivot(lambda k: int(amap.get(k, 0)) - int(tmap.get(k, 0)))},
+        ],
+    }
 
 
 def build_quota_report(main_map, main_cols, main_actual,
@@ -1065,11 +1071,11 @@ def build_quota_report(main_map, main_cols, main_actual,
     어디인지 바로 보인다.
 
     교차 방향은 쿼터 설정과 같게 잡는다 : 마지막 변수를 열, 나머지를 행.
-    조합형 추가 쿼터도 메인과 똑같이 목표/달성/차이 세 표로 나눈다.
+    목표/달성/차이는 **가로로 나란히** 둔다 (세로로 쌓으면 시트가 길어진다).
 
-    반환: [(제목, DataFrame, meta), ...]
-      meta = {'kind', 'label_cols', 'total_row', 'diff', 'pct_cols'}
-             diff=True 인 표는 음수 칸을 색칠한다
+    반환: [블록 dict, ...]
+      블록 = {'title', 'label_cols', 'total_row', 'pct_cols', 'parts':[...]}
+      parts 의 각 항목 = {'label', 'df', 'diff'}  — diff=True 면 음수를 색칠
     """
     blocks = []
     cols = [str(c) for c in (main_cols or [])]
@@ -1080,9 +1086,8 @@ def build_quota_report(main_map, main_cols, main_actual,
     # ── 메인 쿼터 ────────────────────────────────────────────────────
     if main_map:
         if len(cols) >= 2:
-            blocks += _report_pivot_blocks(
-                "메인 쿼터", main_map, main_actual, cols[:-1], cols[-1],
-                n_selected)
+            blocks.append(_report_pivot_blocks(
+                "메인 쿼터", main_map, main_actual, cols[:-1], n_selected))
         else:
             name = cols[0] if cols else "전체"
             rows = []
@@ -1094,9 +1099,10 @@ def build_quota_report(main_map, main_cols, main_actual,
             df = pd.DataFrame(rows)
             df.loc[len(df)] = {name: "합계", "목표": df["목표"].sum(),
                                "달성": df["달성"].sum(), "차이": df["차이"].sum()}
-            blocks.append((f"메인 쿼터 (통과 {n_selected:,}명)", df,
-                           {"kind": "table", "label_cols": 1,
-                            "total_row": True, "diff": True, "pct_cols": []}))
+            blocks.append({
+                "title": f"메인 쿼터 (통과 {n_selected:,}명)",
+                "label_cols": 1, "total_row": True, "pct_cols": [],
+                "parts": [{"label": "", "df": df, "diff": True}]})
 
     # ── 추가 쿼터 ────────────────────────────────────────────────────
     for j, cfg in enumerate(ex_configs or []):
@@ -1106,9 +1112,9 @@ def build_quota_report(main_map, main_cols, main_actual,
         nm = cfg.get("name")
 
         if cfg.get("mode") == "grid" and len(cfg["cols"]) >= 2:
-            blocks += _report_pivot_blocks(
+            blocks.append(_report_pivot_blocks(
                 f"추가 쿼터 — {nm}", cfg["map"], act,
-                [str(c) for c in cfg["cols"][:-1]], str(cfg["cols"][-1]))
+                [str(c) for c in cfg["cols"][:-1]]))
         else:
             rows = []
             for k in sorted(cfg["map"], key=lambda x: natural_key(
@@ -1128,11 +1134,13 @@ def build_quota_report(main_map, main_cols, main_actual,
                 if df["목표"].sum() else None,
                 "구성비": (df["달성"].sum() / n_selected) if n_selected else None}
             multi = len(cfg["cols"]) > 1
-            blocks.append((
-                f"추가 쿼터 — {nm}"
-                + ("  (복수응답: 구성비 합이 100%를 넘을 수 있음)" if multi else ""),
-                df, {"kind": "table", "label_cols": 1, "total_row": True,
-                     "diff": True, "pct_cols": ["달성률", "구성비"]}))
+            blocks.append({
+                "title": (f"추가 쿼터 — {nm}"
+                          + ("  (복수응답: 구성비 합이 100%를 넘을 수 있음)"
+                             if multi else "")),
+                "label_cols": 1, "total_row": True,
+                "pct_cols": ["달성률", "구성비"],
+                "parts": [{"label": "", "df": df, "diff": True}]})
     return blocks
 
 
@@ -1140,6 +1148,7 @@ def write_quota_report(writer, sheet_name, blocks):
     """
     쿼터 실적표를 서식과 함께 한 시트에 쓴다. (xlsxwriter 엔진 전용)
 
+      · 목표 / 달성 / 차이를 가로로 나란히 둔다 (세로로 쌓으면 시트가 길어진다)
       · 머리글 / 행 이름 / 합계 : 회색 배경 + 굵게 + 테두리
       · '차이' 표의 음수 칸 : 연한 빨강 배경 + 진한 빨강 글씨
         (엑셀 조건부서식의 '연한 빨강 채우기' 와 같은 색이라 눈에 익고,
@@ -1147,8 +1156,7 @@ def write_quota_report(writer, sheet_name, blocks):
 
     [주의] add_worksheet + writer.sheets 대입은 쓰지 않는다. pandas 2.x 에서
     반영되지 않아 to_excel 이 같은 이름의 시트를 또 만들려다 죽는다.
-    빈 표를 to_excel 로 먼저 써서 pandas 가 시트를 만들게 한 뒤, 그 시트에
-    직접 값을 쓴다.
+    빈 표를 to_excel 로 먼저 써서 pandas 가 시트를 만들게 한 뒤 직접 쓴다.
     """
     if not blocks:
         return
@@ -1157,65 +1165,95 @@ def write_quota_report(writer, sheet_name, blocks):
     ws = writer.sheets[sheet_name]
     bk = writer.book
 
-    BORDER = {'border': 1, 'border_color': '#000000'}
+    BD = {'border': 1, 'border_color': '#000000'}
     f_title = bk.add_format({'bold': True, 'font_size': 11,
                              'font_color': '#1F3864'})
-    f_head = bk.add_format({**BORDER, 'bold': True, 'bg_color': '#D9D9D9',
+    f_corner = bk.add_format({**BD, 'bold': True, 'bg_color': '#DDEBF7',
+                              'align': 'center', 'valign': 'vcenter'})
+    f_head = bk.add_format({**BD, 'bold': True, 'bg_color': '#D9D9D9',
                             'align': 'center', 'valign': 'vcenter'})
-    f_data = bk.add_format({**BORDER, 'align': 'center'})
-    f_tot = bk.add_format({**BORDER, 'bold': True, 'bg_color': '#D9D9D9',
+    f_data = bk.add_format({**BD, 'align': 'center'})
+    f_tot = bk.add_format({**BD, 'bold': True, 'bg_color': '#D9D9D9',
                            'align': 'center'})
-    f_neg = bk.add_format({**BORDER, 'align': 'center',
+    f_neg = bk.add_format({**BD, 'align': 'center',
                            'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-    f_neg_t = bk.add_format({**BORDER, 'bold': True, 'align': 'center',
+    f_neg_t = bk.add_format({**BD, 'bold': True, 'align': 'center',
                              'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-    f_pct = bk.add_format({**BORDER, 'align': 'center', 'num_format': '0.0%'})
-    f_pct_t = bk.add_format({**BORDER, 'bold': True, 'bg_color': '#D9D9D9',
+    f_pct = bk.add_format({**BD, 'align': 'center', 'num_format': '0.0%'})
+    f_pct_t = bk.add_format({**BD, 'bold': True, 'bg_color': '#D9D9D9',
                              'align': 'center', 'num_format': '0.0%'})
+
+    def _is_neg(v):
+        """
+        음수인지 판정. isinstance(v, int) 로 보면 안 된다 —
+        DataFrame 에서 꺼낸 값은 numpy.int64 라 파이썬 int 가 아니고,
+        그래서 음수 색칠이 통째로 빠졌다(실제로 겪음).
+        """
+        if isinstance(v, bool) or v is None or v == "":
+            return False
+        try:
+            return float(v) < 0
+        except (TypeError, ValueError):
+            return False
 
     row = 0
     max_col = 1
-    for title, df, meta in blocks:
-        ncol = df.shape[1]
-        max_col = max(max_col, ncol)
-        ws.write(row, 0, "■ " + str(title), f_title)
+    for blk in blocks:
+        parts = blk.get("parts") or []
+        if not parts:
+            continue
+        lab = int(blk.get("label_cols", 1))
+        pct_cols = set(blk.get("pct_cols") or [])
+        ws.write(row, 0, "■ " + str(blk.get("title", "")), f_title)
         row += 1
 
-        for j, c in enumerate(df.columns):
-            ws.write(row, j, str(c), f_head)
+        # 각 표의 시작 열 (표 사이에 빈 열 하나)
+        offs, off = [], 0
+        for pt in parts:
+            offs.append(off)
+            off += pt["df"].shape[1] + 1
+        max_col = max(max_col, off)
+
+        # 머리글 : 왼쪽 위 모서리 칸에 목표/달성/차이 라벨을 넣는다
+        for pt, o in zip(parts, offs):
+            df = pt["df"]
+            for j, c in enumerate(df.columns):
+                txt = str(c)
+                fmt = f_head
+                if j == 0 and pt.get("label"):
+                    txt, fmt = pt["label"], f_corner
+                ws.write(row, o + j, txt, fmt)
         row += 1
 
-        lab = int(meta.get("label_cols", 1))
-        pct_cols = set(meta.get("pct_cols") or [])
-        mark = bool(meta.get("diff"))
-        last = len(df) - 1
-        for i, rec in enumerate(df.itertuples(index=False)):
-            is_total = meta.get("total_row") and i == last
-            for j, v in enumerate(rec):
-                name = str(df.columns[j])
-                is_lab = j < lab
-                is_sum = name in ("합계", "계")
-                if pd.isna(v):
-                    v = ""
-                if name in pct_cols:
-                    fmt = f_pct_t if (is_total or is_sum) else f_pct
-                elif is_lab or is_total or is_sum:
-                    fmt = f_tot if not (mark and isinstance(v, (int, float))
-                                        and not isinstance(v, bool) and v < 0) \
-                        else f_neg_t
-                    if is_lab:
-                        fmt = f_head if not is_total else f_tot
-                else:
-                    fmt = f_data
-                    if (mark and isinstance(v, (int, float))
-                            and not isinstance(v, bool) and v < 0):
-                        fmt = f_neg
-                ws.write(row, j, v, fmt)
+        nrow = max(len(pt["df"]) for pt in parts)
+        for i in range(nrow):
+            for pt, o in zip(parts, offs):
+                df = pt["df"]
+                if i >= len(df):
+                    continue
+                mark = bool(pt.get("diff"))
+                is_total = blk.get("total_row") and i == len(df) - 1
+                rec = df.iloc[i]
+                for j, c in enumerate(df.columns):
+                    v = rec.iloc[j]
+                    name = str(c)
+                    if pd.isna(v):
+                        v = ""
+                    is_lab = j < lab
+                    is_sum = name in ("합계", "계")
+                    if name in pct_cols:
+                        fmt = f_pct_t if (is_total or is_sum) else f_pct
+                    elif is_lab:
+                        fmt = f_tot if is_total else f_head
+                    elif is_total or is_sum:
+                        fmt = f_neg_t if (mark and _is_neg(v)) else f_tot
+                    else:
+                        fmt = f_neg if (mark and _is_neg(v)) else f_data
+                    ws.write(row, o + j, v, fmt)
             row += 1
         row += 2
 
-    ws.set_column(0, 0, 16)
-    ws.set_column(1, max(1, max_col - 1), 11)
-    ws.freeze_panes(0, 1)
+    ws.set_column(0, 0, 14)
+    ws.set_column(1, max(1, max_col), 10)
 
 
