@@ -1110,11 +1110,26 @@ def screen_w2l_multi(df, cols, base_name, src_labels, src_vlabels):
     use_map = dict(zip(ged["그룹"], ged["사용"]))
     name_map = dict(zip(ged["그룹"], ged["결과 값 열 이름"]))
     final_groups = {}
+    name_owner = {}                      # 결과 이름 -> 그것을 쓴 그룹
+    dup_names = []
     for g in groups:
         if not use_map.get(g, True):
             continue
         nm = str(name_map.get(g) or g).strip() or g
+        # 이름이 겹치면 dict 가 앞의 그룹을 통째로 덮어써서 조용히 사라진다.
+        # (wide_to_long_multi 의 중복 검사는 이 dict 를 거친 뒤라 못 잡는다)
+        if nm in final_groups:
+            dup_names.append((nm, name_owner[nm], g))
+            continue
+        name_owner[nm] = g
         final_groups[nm] = groups[g]
+
+    if dup_names:
+        st.error(
+            "**결과 값 열 이름이 겹칩니다.** 그대로 두면 뒤쪽 그룹이 사라지므로 "
+            "변환을 멈췄습니다. 위 표에서 서로 다른 이름을 적어 주세요 — "
+            + ", ".join(f"`{nm}` ← {a} · {b}" for nm, a, b in dup_names))
+        st.stop()
     level_labels = {str(k): (str(v).strip() or str(k))
                     for k, v in zip(led["수준"], led[ltgt])}
 

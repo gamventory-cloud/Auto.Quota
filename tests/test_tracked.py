@@ -24,13 +24,21 @@ def check(cond, msg):
         fails += 1
 
 
-d = {v.name: v for v in sl.parse_docx(str(FIXTURE))}
-check("SQ1" in d, "추적 없는 문항 인식")
-check("SQ2" in d, "추적으로 삽입된 문항 인식 (<w:ins> 안의 글자)")
-check(d.get("SQ1") and sorted(d["SQ1"].values) == [1, 2], "탭으로 나열된 보기 분리 유지")
-check(d.get("SQ2") and sorted(d["SQ2"].values) == [1, 2],
-      "삽입된 보기 인식")
-check(d.get("SQ2") and "추적으로 삽입된" in d["SQ2"].label, "삽입된 문항 라벨 유지")
+# 전용 견본은 저장소에 넣지 않는다 (tests/add_tracked_questions.py 로 만든다).
+# 같은 내용이 fixture_patterns.docx 에 합쳐져 fixture_tracked_test.py 가
+# 검증하므로, 견본이 없으면 문항 검사는 건너뛰고 아래 셀 검사만 돌린다.
+if FIXTURE.exists():
+    d = {v.name: v for v in sl.parse_docx(str(FIXTURE))}
+    check("SQ1" in d, "추적 없는 문항 인식")
+    check("SQ2" in d, "추적으로 삽입된 문항 인식 (<w:ins> 안의 글자)")
+    check(d.get("SQ1") and sorted(d["SQ1"].values) == [1, 2],
+          "탭으로 나열된 보기 분리 유지")
+    check(d.get("SQ2") and sorted(d["SQ2"].values) == [1, 2],
+          "삽입된 보기 인식")
+    check(d.get("SQ2") and "추적으로 삽입된" in d["SQ2"].label, "삽입된 문항 라벨 유지")
+else:
+    print(f"  건너뜀 {FIXTURE.name} 없음 — 문항 검사는 "
+          "fixture_tracked_test.py 가 대신 합니다")
 
 # 표 셀에 문단이 여러 개일 때 공백이 붙어버리지 않아야 한다
 from docx import Document

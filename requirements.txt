@@ -1,23 +1,35 @@
-streamlit
+# ── 주의 ────────────────────────────────────────────────────────────
+# 같은 패키지를 두 줄에 적으면 pip 는 **첫 줄만 쓰고 뒤의 버전 조건을
+# 조용히 버린다.** (openpyxl 와 openpyxl>=3.1 을 같이 적으면 >=3.1 이 무시됨)
+# 패키지마다 한 줄씩만 두고, 버전 조건은 그 줄에 붙인다.
+# ────────────────────────────────────────────────────────────────────
+
+# 화면
+streamlit>=1.36         # st.navigation / st.Page 를 쓴다
 altair
-beautifulsoup4>=4.12    # pyhwp가 내놓는 XHTML 파싱
-chardet
-joblib
-lxml>=5.0               # 위 파서 백엔드 / .hwpx XML
-olefile>=0.47
-openpyxl
-openpyxl>=3.1
-ortools
-pandas
-pdfplumber>=0.11       # 표 많은 PDF 대비 폴백
-pyhwp>=0.1b15           # .hwp (HWP 5.x) 읽기
-pypdf>=5.0             # 원본 PDF 텍스트 읽기 (누락 검증)
-pyreadstat
-pyreadstat>=1.2
-python-docx
-python-docx>=1.1
-python-docx>=1.1.0      # 워드 문서 생성
-streamlit>=1.36
-xlrd
-XlsxWriter
+
+# 데이터
+pandas>=2.1             # DataFrame.map (구 applymap) 을 쓴다
 numpy
+joblib                  # 쿼터 솔루션의 그리디 병렬 실행
+ortools                 # 쿼터 솔루션의 ILP 솔버 (없으면 그리디만 동작)
+
+# 엑셀 / CSV
+openpyxl>=3.1
+XlsxWriter
+xlrd                    # 구형 .xls 읽기
+chardet                 # CSV 인코딩 판별
+
+# SPSS
+pyreadstat>=1.2
+
+# 워드 / 한글 설문지
+python-docx>=1.1.0      # 워드 문서 생성
+pyhwp>=0.1b15           # .hwp (HWP 5.x) 읽기
+olefile>=0.47
+beautifulsoup4>=4.12    # pyhwp가 내놓는 XHTML 파싱
+lxml>=5.0               # 위 파서 백엔드 / .hwpx XML
+
+# PDF (변환 누락 검증)
+pypdf>=5.0              # 원본 PDF 텍스트 읽기
+pdfplumber>=0.11        # 표 많은 PDF 대비 폴백
