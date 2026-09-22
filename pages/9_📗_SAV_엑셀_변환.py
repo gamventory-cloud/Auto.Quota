@@ -135,6 +135,156 @@ def find_broken_labels(col_labels: dict, value_labels: dict) -> list:
     return bad
 
 
+# ──────────────────────────────────────────────────────────────
+# 코드북에서 잘리지 않은 원문 가져오기
+#
+#   .sav 의 값 라벨은 120바이트(한글 40자)에서 잘려 있다. 잘려 나간 글자는
+#   파일에 남아 있지 않아 .sav 만으로는 되살릴 수 없다.
+#   원문은 코드북에 있으므로, 그것을 받아 Code/Label 시트를 채운다.
+# ──────────────────────────────────────────────────────────────
+CB_HEADER_HINTS = ("변수명", "변수 명")
+
+
+def _cb_split_values(text) -> dict:
+    """'1=남성 | 2=여성' -> {'1': '남성', '2': '여성'}"""
+    out = {}
+    for chunk in str(text or "").split("|"):
+        if "=" not in chunk:
+            continue
+        code, _, lab = chunk.partition("=")
+        code, lab = code.strip(), lab.strip()
+        if code and lab:
+            out[_code_str(_as_number(code) if _as_number(code) is not None
+                          else code)] = lab
+    return out
+
+
+def read_codebook_xlsx(data: bytes):
+    """코드북 엑셀에서 라벨을 뽑는다. 두 가지 형식을 모두 받는다.
+
+    ① SPSS 라벨링 페이지의 코드북
+         변수명 · 변수라벨 · 값라벨('1=남성 | 2=여성') 열을 가진 표
+    ② 이 페이지가 내보낸 Code 시트
+         변수 / 내용 두 열에 블록이 이어지는 형태. 받은 엑셀에서 잘린 칸만
+         고쳐 다시 올리는 방법이라, 코드북이 없어도 쓸 수 있다.
+
+    반환: (변수라벨 dict, 값라벨 dict{변수: {코드문자열: 라벨}}, 형식이름)
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    try:
+        # ① 코드북 형식 — '변수명' 머리글이 있는 시트를 찾는다
+        for ws in wb.worksheets:
+            rows = ws.iter_rows(values_only=True)
+            try:
+                header = [str(h or "").strip() for h in next(rows)]
+            except StopIteration:
+                continue
+            if not any(h in CB_HEADER_HINTS for h in header):
+                continue
+            i_name = next(i for i, h in enumerate(header) if h in CB_HEADER_HINTS)
+            i_lab = header.index("변수라벨") if "변수라벨" in header else None
+            i_val = header.index("값라벨") if "값라벨" in header else None
+            cl, vl = {}, {}
+            for row in rows:
+                if i_name >= len(row) or row[i_name] is None:
+                    continue
+                name = str(row[i_name]).strip()
+                if not name:
+                    continue
+                if i_lab is not None and i_lab < len(row) and row[i_lab]:
+                    cl[name] = str(row[i_lab]).strip()
+                if i_val is not None and i_val < len(row) and row[i_val]:
+                    got = _cb_split_values(row[i_val])
+                    if got:
+                        vl[name] = got
+            if cl or vl:
+                return cl, vl, f"코드북 ({ws.title} 시트)"
+
+        # ② Code 시트 형식 — '코드값' 줄 바로 위가 변수 머리줄이다
+        for ws in wb.worksheets:
+            cl, vl = {}, {}
+            prev = None
+            cur = None
+            for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+                a = "" if row[0] is None else str(row[0]).strip()
+                b = "" if len(row) < 2 or row[1] is None else str(row[1]).strip()
+                if a == "코드값":
+                    if prev and prev[0]:
+                        cur = prev[0]
+                        cl.setdefault(cur, prev[1])
+                        vl.setdefault(cur, {})
+                    continue
+                if not a:
+                    cur = None
+                elif cur is not None:
+                    if b:
+                        vl[cur][_code_str(_as_number(a) if _as_number(a)
+                                          is not None else a)] = b
+                prev = (a, b)
+            vl = {k: v for k, v in vl.items() if v}
+            if vl:
+                return cl, vl, f"Code 시트 ({ws.title})"
+    finally:
+        wb.close()
+
+    raise ValueError(
+        "라벨을 찾지 못했습니다. SPSS 라벨링 페이지의 코드북(변수명·값라벨 열이 "
+        "있는 표)이나, 이 페이지가 내보낸 엑셀의 Code 시트를 올려 주세요."
+    )
+
+
+def apply_codebook(col_labels: dict, value_labels: dict,
+                   cb_col: dict, cb_val: dict, only_broken: bool):
+    """코드북 라벨로 .sav 라벨을 채운다. (새 변수라벨, 새 값라벨, 리포트)"""
+    new_col = dict(col_labels or {})
+    new_val = {k: dict(v) for k, v in (value_labels or {}).items()}
+    filled, skipped, unknown = [], [], []
+
+    def _no_gain(new_text) -> bool:
+        """이 라벨로 바꿔봐야 소용없는 경우.
+
+        내보낸 Code 시트를 고치지 않고 그대로 다시 올리면, 잘린 라벨이
+        잘린 채로 돌아온다. 그걸 덮어쓰면 '?' 는 그대로인데 번호 접두사만
+        떨어져 나가고, 길이가 줄어 잘림 경고에서도 빠져버린다.
+        그래서 여전히 잘려 있는 라벨은 쓰지 않는다.
+        """
+        return str(new_text).rstrip().endswith(("?", "�"))
+
+    for var, lab in (cb_col or {}).items():
+        if var not in new_col or _no_gain(lab):
+            continue
+        if only_broken and not _looks_truncated(new_col[var], VARLABEL_LIMIT):
+            continue
+        if str(new_col[var]).strip() != str(lab).strip():
+            new_col[var] = lab
+            filled.append((var, "변수 라벨"))
+
+    for var, mapping in (cb_val or {}).items():
+        if var not in new_val:
+            unknown.append(var)
+            continue
+        by_code = {_code_str(c): c for c in new_val[var]}
+        for code_s, lab in mapping.items():
+            key = by_code.get(code_s)
+            if key is None or _no_gain(lab):
+                continue
+            if only_broken and not _looks_truncated(new_val[var][key],
+                                                    VALLABEL_LIMIT):
+                continue
+            if str(new_val[var][key]).strip() == str(lab).strip():
+                continue
+            new_val[var][key] = lab
+            filled.append((var, f"코드 {code_s}"))
+
+    for var, where, _ in find_broken_labels(new_col, new_val):
+        skipped.append((var, where))
+
+    return new_col, new_val, {"filled": filled, "still_broken": skipped,
+                              "unknown_vars": sorted(set(unknown))}
+
+
 def build_raw(df: pd.DataFrame) -> pd.DataFrame:
     return df.map(_clean)
 
@@ -575,10 +725,83 @@ if broken_labels:
                          columns=["파일", "변수", "위치", "잘린 라벨"]),
             hide_index=True, use_container_width=True,
         )
-        st.caption(
-            "SPSS 에서 라벨을 40자 이내로 줄여 다시 저장하면 `?` 없이 나옵니다. "
-            "길이를 줄일 수 없다면 Code 시트를 받은 뒤 엑셀에서 직접 고치세요."
-        )
+
+# ── 코드북으로 원문 채우기 ────────────────────────────────────────────────
+with st.expander("📑 코드북으로 잘린 라벨 채우기 (선택)",
+                 expanded=bool(broken_labels)):
+    st.caption(
+        "`.sav` 의 값 라벨은 120바이트(한글 40자)에서 잘려 있어 원문을 되살릴 수 "
+        "없습니다. 원문이 남아 있는 코드북을 올리면 Code·Label 시트를 채웁니다.\n\n"
+        "올릴 수 있는 것 — **SPSS 라벨링 페이지가 만든 코드북**(변수명·값라벨 열이 "
+        "있는 표), 또는 **이 페이지가 내보낸 엑셀의 Code 시트**(받은 파일에서 잘린 "
+        "칸만 고쳐 다시 올리면 됩니다)."
+    )
+    cb_file = st.file_uploader("코드북 또는 Code 시트 (.xlsx)", type=["xlsx"],
+                               key="SX_codebook")
+    only_broken = st.checkbox(
+        "잘린 라벨만 채우기", value=True, key="SX_cb_only_broken",
+        help="끄면 코드북에 있는 라벨로 전부 덮어씁니다. 코드북이 이 데이터의 "
+             "것이 맞는지 확실할 때만 끄세요.",
+    )
+
+    if cb_file is not None:
+        try:
+            cb_col, cb_val, cb_kind = read_codebook_xlsx(cb_file.getvalue())
+        except Exception as exc:                          # noqa: BLE001
+            st.error(f"코드북을 읽지 못했습니다 — {exc}")
+        else:
+            st.success(
+                f"{cb_kind} 에서 읽었습니다 — 변수 {len(cb_val)}개 · "
+                f"값 라벨 {sum(len(v) for v in cb_val.values())}개"
+            )
+            total_filled, reports = 0, []
+            for i, (f, d, cl, vl, vt) in enumerate(loaded):
+                cl2, vl2, rep = apply_codebook(cl, vl, cb_col, cb_val,
+                                               only_broken)
+                loaded[i] = (f, d, cl2, vl2, vt)
+                total_filled += len(rep["filled"])
+                reports.append((f.name, rep))
+
+            if total_filled:
+                st.success(f"✅ 라벨 {total_filled}개를 원문으로 채웠습니다.")
+            else:
+                st.warning(
+                    "채운 라벨이 없습니다. 변수명과 코드가 .sav 와 맞는지 "
+                    "확인해 주세요."
+                )
+
+            rows = []
+            for fname, rep in reports:
+                for var, where in rep["filled"]:
+                    rows.append({"파일": fname, "변수": var, "위치": where,
+                                 "결과": "채움"})
+                for var, where in rep["still_broken"]:
+                    rows.append({"파일": fname, "변수": var, "위치": where,
+                                 "결과": "코드북에도 없음 — 그대로 잘려 있음"})
+            if rows:
+                st.dataframe(pd.DataFrame(rows), hide_index=True,
+                             use_container_width=True)
+
+            unknown = sorted({v for _, r in reports
+                              for v in r["unknown_vars"]})
+            if unknown:
+                st.caption(
+                    f"코드북에는 있지만 이 .sav 에 없는 변수 {len(unknown)}개 — "
+                    + ", ".join(unknown[:12])
+                    + (" …" if len(unknown) > 12 else "")
+                )
+            st.caption(
+                "채운 라벨은 **엑셀 시트에만** 들어갑니다. SPSS 형식이 120바이트를 "
+                "넘는 값 라벨을 담지 못하므로, 내려받는 `.sav` 는 그대로 잘린 "
+                "라벨을 씁니다."
+            )
+
+if broken_labels:
+    st.caption(
+        "SPSS 에서 라벨을 40자 이내로 줄여 다시 저장하면 애초에 `?` 가 생기지 "
+        "않습니다. 다만 문장 자체가 조사 대상이면 줄이기 어려우니, 위의 "
+        "코드북 채우기를 쓰시는 편이 낫습니다."
+    )
 
 if multi:
     st.dataframe(
