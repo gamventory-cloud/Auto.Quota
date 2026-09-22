@@ -405,6 +405,8 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
                 ex_as_target=False, ex_weights=None,
                 main_hard=False, ex_overflow=False, overflow_weight=1,
                 ex_tol_abs=0, ex_tol_pct=0.0, ex_tol_unlimited=False,
+                total_mode="exact", total_lo=None, total_hi=None,
+                total_target=None, keep_mix=False, mix_tol_pp=0.05,
                 skip_groups=frozenset(), cap_bonus=None,
                 priority=False, balance=False, balance_relative=True,
                 min_fill=0.0, time_limit=30.0, workers=8, log=False):
@@ -434,12 +436,17 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
     for idx, ((mk, _), _rows) in enumerate(profiles):
         by_main[mk].append(idx)
 
+    # total_mode 가 exact 가 아니면 메인 셀 등식을 걸지 않는다.
+    # (메인 쿼터를 쓰지 않는 경우에만 쓰이며, 셀이 하나뿐이다)
+    free_total = (total_mode != "exact")
     short_main = {}
-    for k, tgt in main_map.items():
-        # main_hard 면 부족을 0 으로 묶는다 = 하드 쿼터 (정확히 tgt 명)
-        s = model.NewIntVar(0, 0 if main_hard else tgt, f"sM{len(short_main)}")
-        short_main[k] = s
-        model.Add(sum(n_vars[i] for i in by_main.get(k, [])) + s == tgt)
+    if not free_total:
+        for k, tgt in main_map.items():
+            # main_hard 면 부족을 0 으로 묶는다 = 하드 쿼터 (정확히 tgt 명)
+            s = model.NewIntVar(0, 0 if main_hard else tgt,
+                                f"sM{len(short_main)}")
+            short_main[k] = s
+            model.Add(sum(n_vars[i] for i in by_main.get(k, [])) + s == tgt)
 
     # --- 추가 쿼터 ---
     by_ex = collections.defaultdict(list)
@@ -492,10 +499,50 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
                 model.Add(sum(n_vars[i] for i in members) <= eff)
 
     total_avail = sum(len(rows) for _sig, rows in profiles)
+    N_expr = sum(n_vars)
+
+    # ── 총 인원 제약 (메인 쿼터를 쓰지 않을 때) ──────────────────────────
+    if free_total:
+        if total_lo is not None:
+            model.Add(N_expr >= int(total_lo))
+        if total_hi is not None:
+            model.Add(N_expr <= int(total_hi))
+
+    # ── 복수응답 그룹의 '응답 개수 분포' 유지 ────────────────────────────
+    #  최소 인원으로 풀면 한 명이 여러 목표를 동시에 채우는 쪽이 유리해서
+    #  응답을 많이 한 사람만 뽑히고 표본이 치우친다. 원자료의 개수 분포를
+    #  그대로 유지하도록 묶어 이 편향을 막는다.
+    #      n_k / N  ≈  원자료 비율 p_k   (±mix_tol_pp)
+    #  N 이 변수이므로 양변에 N 을 곱해 선형으로 만든다.
+    if keep_mix:
+        SC = 1000
+        tol = max(0.0, float(mix_tol_pp))
+        for j, e_map in enumerate(ex_maps):
+            if not e_map or j in skip_groups:
+                continue
+            cnt_by_k = collections.defaultdict(list)
+            avail_by_k = collections.Counter()
+            for idx, ((_mk, sig_ex), rows) in enumerate(profiles):
+                kcnt = len(sig_ex[j]) if j < len(sig_ex) else 0
+                cnt_by_k[kcnt].append(idx)
+                avail_by_k[kcnt] += len(rows)
+            if len(avail_by_k) <= 1:
+                continue                      # 단일응답 그룹은 편향이 없다
+            tot = sum(avail_by_k.values())
+            for kcnt, idxs in cnt_by_k.items():
+                p = avail_by_k[kcnt] / tot if tot else 0.0
+                nk = sum(n_vars[i] for i in idxs)
+                hi_c = int(round(SC * min(1.0, p + tol)))
+                lo_c = int(round(SC * max(0.0, p - tol)))
+                model.Add(SC * nk <= hi_c * N_expr)
+                model.Add(SC * nk >= lo_c * N_expr)
 
     # --- 목적함수 단계 구성 ---
     w = weights or {}
-    stages = [("main", sum(w.get(k, 1) * s for k, s in short_main.items()))]
+    stages = []
+    if short_main:
+        stages.append(("main", sum(w.get(k, 1) * s
+                                   for k, s in short_main.items())))
 
     if (ex_as_target or ex_overflow) and short_ex:
         ew = ex_weights or {}
@@ -508,8 +555,21 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
                 terms.append(wj * int(overflow_weight) * ov)
         stages.append(("ex", sum(terms)))
 
-    sw = scarcity_weights(profiles, main_map) if priority else None
-    if priority:
+    # 총 인원 단계 : 추가 쿼터 부족을 맞춘 뒤에 인원수를 조정한다
+    if free_total:
+        if total_mode == "min":
+            stages.append(("total", N_expr))
+        elif total_mode == "max":
+            stages.append(("total", -N_expr))
+        elif total_mode == "approx" and total_target is not None:
+            _ub = max(1, total_avail)
+            _dv = model.NewIntVar(0, _ub, "devN")
+            model.Add(_dv >= N_expr - int(total_target))
+            model.Add(_dv >= int(total_target) - N_expr)
+            stages.append(("total", _dv))
+
+    sw = scarcity_weights(profiles, main_map) if (priority and short_main) else None
+    if priority and short_main:
         stages.append(("scarcity", sum(sw.get(k, 1) * s
                                        for k, s in short_main.items())))
 
@@ -569,7 +629,7 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
     for si, (name, expr) in enumerate(stages):
         # 희소 셀 우선 단계 직전에 '셀별 최소 달성률' 하한을 건다
         guard = False
-        if name == "scarcity" and min_fill and min_fill > 0:
+        if name == "scarcity" and min_fill and min_fill > 0 and short_main:
             for k, tgt in main_map.items():
                 keep = int(math.ceil(tgt * float(min_fill)))
                 cap_short = max(0, tgt - keep)
@@ -812,7 +872,9 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
                     ex_as_target=False, ex_weights=None, unlisted="free",
                     balance_relative=True, main_hard=False,
                     ex_overflow=False, overflow_weight=1,
-                    ex_tol_abs=0, ex_tol_pct=0.0, ex_tol_unlimited=False):
+                    ex_tol_abs=0, ex_tol_pct=0.0, ex_tol_unlimited=False,
+                    total_mode="exact", total_target=None, total_tol_pct=0.10,
+                    keep_mix=False, mix_tol_pp=0.05):
     """
     쿼터 할당 최적화.
 
@@ -842,6 +904,16 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
       ex_tol_pct   : 항목별 허용 편차(비율). 예: 0.1 → 각 항목 ±10%까지
                      (두 값 중 큰 쪽이 적용된다. 둘 다 0 이면 편차 0 = 하드)
       ex_tol_unlimited : True 면 편차 한계 없이 최소화만 한다
+      total_mode   : 총 인원을 어떻게 다룰지. **메인 쿼터를 쓰지 않을 때만** 쓴다.
+                     "exact"  정확히 목표 인원 (기본, 예전 동작)
+                     "approx" 목표 ±total_tol_pct 범위 안에서 목표에 가깝게
+                     "min"    추가 쿼터 목표를 채우는 최소 인원
+                     "max"    가능한 최대 인원
+      total_target : approx / 표시에 쓰는 기준 인원
+      keep_mix     : 복수응답 그룹의 '응답 개수 분포' 를 원자료와 비슷하게 유지.
+                     최소 인원으로 풀면 한 명이 여러 목표를 채우는 쪽이 유리해
+                     응답을 많이 한 사람만 뽑히고 표본이 치우친다. 이를 막는다.
+      mix_tol_pp   : 그 분포의 허용 오차(비율 포인트). 기본 0.05 = ±5%p
       overflow_weight : 초과 1명을 부족 몇 명만큼 싫어할지. 기본 1 (동등).
                      주의: 단일응답 그룹에서는 다음 항등식 때문에 이 값이 결과를
                      바꾸지 못한다.
@@ -900,8 +972,26 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
         )
 
     notes = []
+    # 메인 쿼터를 실제로 쓰는 경우엔 총 인원이 셀 목표로 정해지므로 모드를 무시
+    if total_mode != "exact" and len(main_map) > 1:
+        notes_pre = ("메인 쿼터를 쓰고 있어 총 인원 방식을 '정확히 맞춤' 으로 "
+                     "되돌렸습니다. 총 인원은 셀별 목표의 합으로 정해집니다.")
+        total_mode = "exact"
+    else:
+        notes_pre = None
+
+    _tt = total_target
+    if _tt is None and main_map:
+        _tt = sum(main_map.values())
+    _lo = _hi = None
+    if total_mode == "approx" and _tt:
+        _lo = max(0, int(round(_tt * (1 - float(total_tol_pct)))))
+        _hi = int(round(_tt * (1 + float(total_tol_pct))))
+
     kw = dict(weights=weights, ex_as_target=ex_as_target, ex_weights=ex_weights,
               overflow_weight=overflow_weight,
+              total_mode=total_mode, total_lo=_lo, total_hi=_hi,
+              total_target=_tt, keep_mix=keep_mix, mix_tol_pp=mix_tol_pp,
               priority=priority, balance=balance, balance_relative=balance_relative,
               time_limit=time_limit, workers=workers)
 
@@ -914,6 +1004,8 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
 
     # 완화 순서 : ① 추가 쿼터 편차 한계 → ② 메인 하드
     # 메인 쿼터가 총량을 정의하므로 메인을 마지막에 풀어준다.
+    if notes_pre:
+        notes.append(notes_pre)
     (res, used) = _try()
     ok = res[0]
 
@@ -926,6 +1018,16 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
             "최대한 줄이는 쪽으로 다시 계산했습니다.")
         ex_overflow, ex_tol_unlimited = True, True
         (res, used) = _try(ex_overflow=True, ex_tol_unlimited=True)
+        ok = res[0]
+
+    if not ok and keep_mix:
+        notes.append(
+            "응답 개수 분포를 원자료와 비슷하게 유지하는 조건에서는 해가 "
+            "없습니다. 그 조건을 빼고 다시 계산했습니다. 복수응답을 많이 한 "
+            "응답자 쪽으로 표본이 치우칠 수 있습니다.")
+        keep_mix = False
+        kw["keep_mix"] = False
+        (res, used) = _try()
         ok = res[0]
 
     if ok == "HARD_INFEASIBLE":

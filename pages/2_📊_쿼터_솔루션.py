@@ -157,6 +157,16 @@ v3 변경점 (추가 쿼터 100% 할당)
       복수응답 그룹은 구성비 합이 100%를 넘을 수 있다고 제목에 적는다.
     - 통과자 기준이다. SPSS 에서 프리퀀시·크로스탭을 다시 돌리지 않아도
       소프트 쿼터로 어긋난 셀을 바로 확인할 수 있다.
+33-C. 쿼터_실적표 서식 적용
+    - 머리글·행 이름·합계 : 회색 배경 + 굵게 + 테두리
+    - '차이' 표의 음수 칸 : 연한 빨강(#FFC7CE) + 진한 빨강 글씨(#9C0006)
+      엑셀 조건부서식의 '연한 빨강 채우기' 와 같은 색이라 눈에 익고,
+      흑백 출력해도 글자가 진해 구분된다.
+    - 추가 쿼터 표에도 같은 규칙 적용 (차이 열, 달성률·구성비는 % 서식)
+    - 조합형 추가 쿼터도 메인처럼 목표/달성/차이 세 표로 분리
+      (예전에는 '달성 / 목표' 를 한 칸에 문자로 넣어 계산에 못 썼다)
+    - 서식은 LibreOffice 로 렌더링해 눈으로 확인했다. openpyxl/xlsxwriter
+      모델만 믿으면 "모델엔 있는데 화면엔 안 보이는" 것을 놓친다.
 33-B. [버그 수정] 쿼터_실적표 시트가 만들어지지 않던 문제
     - 원인 두 가지였다.
       ① 코드가 파일에 실제로 들어가지 않았다 (변경 이력만 적혀 있었다)
@@ -165,7 +175,19 @@ v3 변경점 (추가 쿼터 100% 할당)
          DuplicateWorksheetName 으로 죽는다. pandas 3.x 에서는 통과한다.
     - 블록들을 한 장의 표로 합쳐 to_excel 한 번으로 쓰도록 바꿨다
       (utils.quota_report_frame). 엔진 API 를 쓰지 않아 버전에 영향받지 않는다.
-34. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
+34. 총 인원 기준 선택 (메인 쿼터를 쓰지 않을 때)
+    - 정확히 맞춤 / 대략(±%) / 최소 인원 / 최대 인원
+    - 추가 쿼터만 맞추면 되는 조사에서 총 인원을 정확히 묶는 것이 오히려
+      제약이 되어, 맞출 수 있는 배분을 놓치던 문제를 푼다.
+    - 메인 쿼터를 실제로 쓰면 총 인원이 셀 목표 합으로 정해지므로 무시하고 알린다.
+35. 복수응답 쿼터의 '응답 개수 분포 유지' 옵션
+    - 최소 인원으로 풀면 한 명이 여러 목표를 동시에 채우는 쪽이 유리해
+      응답을 많이 한 사람만 뽑히고 표본이 치우친다. 실측:
+        원자료 평균 1.93개 -> 최소 인원 2.88개 (1개 응답자는 0명 선정)
+      분포 유지를 켜면 2.13개 / 1개 응답자 36.4% 로 복원된다.
+    - n_k / N ~ 원자료 비율 (±mix_tol_pp) 을 선형 제약으로 건다.
+    - 지킬 수 없으면 자동으로 풀고 사유를 알린다.
+36. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
 """
@@ -608,6 +630,7 @@ if data_file:
     algo_main_cols = []
     main_mode = 'grid'
 
+    total_mode, total_mode_label, total_tol_pct = "exact", "정확히 맞춤", 0.10
     if use_main:
         _qm = ["엑셀 업로드", "화면 설계"]
         q_mode = st.radio(
@@ -745,11 +768,40 @@ if data_file:
             _p_total = int(_p_total) if _p_total else 1000
         except (TypeError, ValueError):
             _p_total = 1000
-        main_map = {('All',): st.number_input(
+        _tv = st.number_input(
             "전체 목표", 1, 1000000, max(1, _p_total), key="QS_total_only",
             help="메인 쿼터를 쓰지 않을 때 뽑을 총 인원입니다. "
-                 "설정을 저장하면 이 값도 함께 저장됩니다.")}
+                 "설정을 저장하면 이 값도 함께 저장됩니다.")
+        main_map = {('All',): _tv}
         algo_main_cols = []
+
+        # 총 인원을 얼마나 엄격하게 볼지.
+        #  추가 쿼터만 맞추면 되는 조사에서는 총 인원을 정확히 묶는 것이
+        #  오히려 제약이 되어, 맞출 수 있는 배분을 놓친다.
+        _tm_opts = ["정확히 맞춤", "대략 (±%)", "최소 인원", "최대 인원"]
+        _tm = st.radio(
+            "총 인원 기준", _tm_opts, horizontal=True,
+            index=_tm_opts.index(preset_get("main.total_mode_label", "정확히 맞춤"))
+            if preset_get("main.total_mode_label") in _tm_opts else 0,
+            help="'정확히 맞춤' 은 입력한 인원을 그대로 맞춥니다. "
+                 "총 인원이 중요하지 않고 추가 쿼터만 맞으면 될 때는 "
+                 "'대략' 이나 '최소 인원' 이 낫습니다.")
+        total_mode = {"정확히 맞춤": "exact", "대략 (±%)": "approx",
+                      "최소 인원": "min", "최대 인원": "max"}[_tm]
+        total_mode_label = _tm
+        total_tol_pct = 0.10
+        if total_mode == "approx":
+            total_tol_pct = st.number_input(
+                "허용 범위 (±%)", 1, 50,
+                int(round(float(preset_get("main.total_tol_pct", 0.10)) * 100)),
+                help=f"입력한 {_tv:,}명 기준으로 이 비율만큼 벗어나도 됩니다.") / 100.0
+            st.caption(f"선정 인원이 "
+                       f"{int(round(_tv*(1-total_tol_pct))):,} ~ "
+                       f"{int(round(_tv*(1+total_tol_pct))):,}명 사이가 됩니다.")
+        elif total_mode == "min":
+            st.caption("추가 쿼터 목표를 채우는 최소 인원으로 뽑습니다. "
+                       "복수응답 쿼터가 있으면 응답을 많이 한 사람 쪽으로 "
+                       "표본이 치우칠 수 있습니다 (실행 옵션에서 막을 수 있습니다).")
 
     # --------------------------------------------------------------------------
     # 추가 쿼터
@@ -1010,6 +1062,23 @@ if data_file:
         ex_overflow, overflow_weight = False, 1
         ex_tol_abs, ex_tol_pct, ex_tol_unlimited = 0, 0.0, False
 
+    # 복수응답 추가 쿼터가 있을 때만 의미가 있는 옵션
+    _has_multi = any(c.get('cols') and len(c['cols']) > 1 and
+                     c.get('mode') != 'grid' for c in ex_configs)
+    keep_mix, mix_tol_pp = False, 0.05
+    if _has_multi and use_ilp:
+        keep_mix = st.checkbox(
+            "복수응답 쿼터의 응답 개수 분포를 원자료와 비슷하게 유지",
+            value=False,
+            help="복수응답 쿼터에서 인원을 줄이려 하면 한 명이 여러 목표를 "
+                 "동시에 채우는 쪽이 유리해, 응답을 많이 한 사람만 뽑히고 "
+                 "표본이 치우칩니다. 원자료의 응답 개수 분포를 유지해 이를 막습니다.")
+        if keep_mix:
+            mix_tol_pp = st.number_input(
+                "허용 오차 (±%p)", 1, 50, 5,
+                help="원자료 분포에서 이만큼까지 벗어나도 됩니다. "
+                     "너무 좁으면 해가 없어 자동으로 풀립니다.") / 100.0
+
     # [제거] '메인 쿼터를 하드 쿼터로' 옵션
     #   사전식 최적화라 1단계에서 메인 부족을 최소화하고 그 값을 고정한 뒤에야
     #   추가 쿼터를 다룬다. 따라서 메인이 달성 가능하면 이 옵션과 무관하게 항상
@@ -1152,6 +1221,8 @@ if data_file:
             "cols": list(algo_main_cols),
             "total": (int(list(main_map.values())[0])
                       if (not use_main and main_map) else None),
+            "total_mode_label": total_mode_label if not use_main else None,
+            "total_tol_pct": float(total_tol_pct),
             "targets": {_enc_key(k): int(v) for k, v in main_map.items()},
         }
         _extras_state = []
@@ -1336,7 +1407,10 @@ if data_file:
                         ex_overflow=ex_overflow,
                         overflow_weight=overflow_weight,
                         ex_tol_abs=ex_tol_abs, ex_tol_pct=ex_tol_pct,
-                        ex_tol_unlimited=ex_tol_unlimited)
+                        ex_tol_unlimited=ex_tol_unlimited,
+                        total_mode=total_mode, total_target=target_total,
+                        total_tol_pct=total_tol_pct,
+                        keep_mix=keep_mix, mix_tol_pp=mix_tol_pp)
                 g_best_cnt, g_best_idxs = ilp_sol.total, ilp_sol.selected
 
             # ======================================================================
@@ -1542,27 +1616,12 @@ if data_file:
 
                 # ── 쿼터 실적표 : 설정한 쿼터표 모양 그대로 목표/달성/차이 ──
                 #  SPSS 에서 프리퀀시·크로스탭을 다시 돌리지 않아도 되게 한다.
-                #
-                #  [주의] add_worksheet + writer.sheets 대입 방식은 쓰지 않는다.
-                #  pandas 2.x 에서는 그 대입이 반영되지 않아 to_excel 이 같은
-                #  이름의 시트를 다시 만들려다 DuplicateWorksheetName 으로 죽는다.
-                #  (pandas 3.x 에서는 통과해서 놓치기 쉬운 차이다)
-                #  블록을 한 장의 표로 합쳐 to_excel 한 번으로 쓴다.
+                #  '차이' 표의 음수 칸은 연한 빨강으로 표시한다.
                 try:
                     _blocks = utils.build_quota_report(
                         main_map, algo_main_cols, final_m,
                         ex_configs, final_exs, len(df_pass))
-                    if _blocks:
-                        utils.quota_report_frame(_blocks).to_excel(
-                            w, sheet_name='쿼터_실적표',
-                            index=False, header=False)
-                        try:                      # 서식은 되면 좋고 안 되면 그만
-                            _ws = w.sheets.get('쿼터_실적표')
-                            if _ws is not None:
-                                _ws.set_column(0, 0, 16)
-                                _ws.set_column(1, 30, 11)
-                        except Exception:         # noqa: BLE001
-                            pass
+                    utils.write_quota_report(w, '쿼터_실적표', _blocks)
                 except Exception as _re_:                     # noqa: BLE001
                     st.warning(f"쿼터 실적표 생성 실패 — "
                                f"{type(_re_).__name__}: {_re_}")
@@ -1575,6 +1634,13 @@ if data_file:
                     {'항목': '실행 시각', '값': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')},
                     {'항목': '계산 방식', '값': solver_kind},
                     {'항목': '총 인원 허용 오차(명)', '값': tol},
+                    {'항목': '총 인원 기준',
+                     '값': (total_mode_label +
+                            (f" ±{total_tol_pct:.0%}" if total_mode == "approx"
+                             else "")) if not use_main else "메인 쿼터가 결정"},
+                    {'항목': '응답 개수 분포 유지',
+                     '값': (f"사용 (±{mix_tol_pp:.0%}p)" if keep_mix
+                            else "사용 안 함")},
                     {'항목': '추가 쿼터 처리', '값': '목표(100% 지향)' if ex_as_target else '상한'},
                     {'항목': '추가 쿼터 허용 편차',
                      '값': (f"±{ex_tol_abs}명" if ex_tol_abs else

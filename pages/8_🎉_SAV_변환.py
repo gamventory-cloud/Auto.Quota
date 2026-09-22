@@ -43,7 +43,7 @@ import unicodedata
 import pandas as pd
 import streamlit as st
 
-PAGE_VERSION = "1.1"
+PAGE_VERSION = "1.2"
 PRESET_VERSION = 1
 
 # ==============================================================================
@@ -1523,7 +1523,16 @@ if st.session_state.get("sav_bytes"):
         tmp.write(data)
         tmp.close()
         try:
-            back, meta = pyreadstat.read_sav(tmp.name, user_missing=True)
+            # encoding 을 지정해야 한다.
+            # pyreadstat 이 쓴 .sav 에는 문자셋 표시가 들어가지 않아서,
+            # 읽는 쪽이 시스템 로캘로 짐작한다. 한국어 윈도우면 CP949 로
+            # 해석하려다 한글 UTF-8 바이트에서 깨진다
+            # (ReadstatError: Unable to convert string to the requested encoding).
+            # 여기서 읽는 파일은 우리가 방금 쓴 것이므로 항상 UTF-8 이다.
+            # 사용자가 올린 .sav 를 읽을 때는 지정하면 안 된다 —
+            # SPSS 가 만든 파일에는 문자셋이 제대로 들어 있다.
+            back, meta = pyreadstat.read_sav(tmp.name, user_missing=True,
+                                             encoding="UTF-8")
             st.write(f"{len(back):,}행 × {len(back.columns)}열")
             mr = meta.missing_ranges or {}
             st.dataframe(
