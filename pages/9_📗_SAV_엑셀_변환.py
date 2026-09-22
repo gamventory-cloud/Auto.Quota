@@ -143,6 +143,111 @@ def find_broken_labels(col_labels: dict, value_labels: dict) -> list:
 #   원문은 코드북에 있으므로, 그것을 받아 Code/Label 시트를 채운다.
 # ──────────────────────────────────────────────────────────────
 CB_HEADER_HINTS = ("변수명", "변수 명")
+GUIDE_VNAME_HINTS = ("v변수명", "V변수명", "원변수명", "원본변수명")
+GUIDE_DESC_HINTS = ("변수 설명", "변수설명", "변수라벨", "변수 내용", "문항")
+
+
+def _code_blocks(ws) -> list:
+    """'코드값 | 보기' 머리줄로 시작하는 블록을 **순서대로** 읽는다.
+
+    변수명이 적혀 있지 않은 Code 시트가 있다. 그런 코드북은 블록 순서가
+    변수가이드의 행 순서와 같다는 것이 유일한 연결 고리라, 코드가 하나도
+    없는 블록(주관식 문항 등)도 자리를 지키도록 빈 dict 로 남겨 둔다.
+
+    열 위치는 파일마다 다르므로(A/B 인 것도, B/C 인 것도 있다) 머리줄에서
+    '코드값' 과 '보기' 가 나란히 있는 자리를 찾아 쓴다.
+    """
+    blocks, cur, c_code, c_lab = [], None, None, None
+    for row in ws.iter_rows(values_only=True):
+        cells = ["" if c is None else str(c).strip() for c in row]
+        head = next((i for i in range(len(cells) - 1)
+                     if cells[i] == "코드값" and cells[i + 1] == "보기"), None)
+        if head is not None:
+            c_code, c_lab = head, head + 1
+            cur = {}
+            blocks.append(cur)
+            continue
+        if cur is None or c_code is None:
+            continue
+        code = cells[c_code] if c_code < len(cells) else ""
+        lab = cells[c_lab] if c_lab < len(cells) else ""
+        if not code:
+            cur = None                      # 빈 줄 = 블록 끝
+            continue
+        if lab:
+            num = _as_number(code)
+            cur[_code_str(num if num is not None else code)] = lab
+    return blocks
+
+
+def _read_guide_pair(wb):
+    """'변수가이드' + '「코드값/보기」만 있는 Code' 두 시트로 된 코드북.
+
+    Code 시트에 변수명이 없으므로 **블록 순서 ↔ 변수가이드 행 순서** 로만
+    짝을 지을 수 있다. 개수가 다르면 어느 한쪽이 밀린 것이므로, 엉뚱한
+    변수에 라벨을 붙이는 대신 읽기를 포기한다.
+    """
+    guide = None
+    for ws in wb.worksheets:
+        try:
+            header = [str(h or "").strip()
+                      for h in next(ws.iter_rows(max_row=1, values_only=True))]
+        except StopIteration:
+            continue
+        if any(h in CB_HEADER_HINTS for h in header) and \
+                any(h in GUIDE_DESC_HINTS for h in header):
+            guide = (ws, header)
+            break
+    if guide is None:
+        return None
+
+    ws_g, header = guide
+    i_name = next(i for i, h in enumerate(header) if h in CB_HEADER_HINTS)
+    i_desc = next(i for i, h in enumerate(header) if h in GUIDE_DESC_HINTS)
+    i_vname = next((i for i, h in enumerate(header) if h in GUIDE_VNAME_HINTS),
+                   None)
+
+    rows = []
+    for row in ws_g.iter_rows(min_row=2, values_only=True):
+        name = "" if i_name >= len(row) or row[i_name] is None \
+            else str(row[i_name]).strip()
+        if not name:
+            continue
+        desc = "" if i_desc >= len(row) or row[i_desc] is None \
+            else str(row[i_desc]).strip()
+        vname = ""
+        if i_vname is not None and i_vname < len(row) and row[i_vname]:
+            vname = str(row[i_vname]).strip()
+        rows.append((name, vname, desc))
+    if not rows:
+        return None
+
+    for ws in wb.worksheets:
+        if ws is ws_g:
+            continue
+        blocks = _code_blocks(ws)
+        if not blocks:
+            continue
+        if len(blocks) != len(rows):
+            raise ValueError(
+                f"‘{ws.title}’ 시트의 보기 블록이 {len(blocks)}개인데 "
+                f"‘{ws_g.title}’ 의 변수는 {len(rows)}개입니다. "
+                "이 코드북은 Code 시트에 변수명이 없어 **순서로만** 짝을 지을 수 "
+                "있는데, 개수가 다르면 한 칸씩 밀려 엉뚱한 변수에 라벨이 붙습니다. "
+                "두 시트의 행을 맞춘 뒤 다시 올려 주세요."
+            )
+        cl, vl = {}, {}
+        for (name, vname, desc), block in zip(rows, blocks):
+            for key in (name, vname):
+                if not key:
+                    continue
+                if desc:
+                    cl.setdefault(key, desc)
+                if block:
+                    vl.setdefault(key, dict(block))
+        if vl:
+            return cl, vl, f"코드북 ({ws_g.title} + {ws.title} 시트, 순서로 매칭)"
+    return None
 
 
 def _cb_split_values(text) -> dict:
@@ -160,11 +265,14 @@ def _cb_split_values(text) -> dict:
 
 
 def read_codebook_xlsx(data: bytes):
-    """코드북 엑셀에서 라벨을 뽑는다. 두 가지 형식을 모두 받는다.
+    """코드북 엑셀에서 라벨을 뽑는다. 세 가지 형식을 받는다.
 
     ① SPSS 라벨링 페이지의 코드북
          변수명 · 변수라벨 · 값라벨('1=남성 | 2=여성') 열을 가진 표
-    ② 이 페이지가 내보낸 Code 시트
+    ② 변수가이드 + Code 두 시트로 된 코드북 (DP 납품본에서 흔하다)
+         Code 시트에 변수명이 없고 '코드값 | 보기' 블록만 이어진다.
+         블록 순서가 변수가이드 행 순서와 같다는 것으로 짝을 짓는다.
+    ③ 이 페이지가 내보낸 Code 시트
          변수 / 내용 두 열에 블록이 이어지는 형태. 받은 엑셀에서 잘린 칸만
          고쳐 다시 올리는 방법이라, 코드북이 없어도 쓸 수 있다.
 
@@ -202,7 +310,12 @@ def read_codebook_xlsx(data: bytes):
             if cl or vl:
                 return cl, vl, f"코드북 ({ws.title} 시트)"
 
-        # ② Code 시트 형식 — '코드값' 줄 바로 위가 변수 머리줄이다
+        # ② 변수가이드 + Code 두 시트 (Code 에 변수명이 없는 코드북)
+        got = _read_guide_pair(wb)
+        if got:
+            return got
+
+        # ③ Code 시트 형식 — '코드값' 줄 바로 위가 변수 머리줄이다
         for ws in wb.worksheets:
             cl, vl = {}, {}
             prev = None
@@ -241,6 +354,20 @@ def apply_codebook(col_labels: dict, value_labels: dict,
     new_col = dict(col_labels or {})
     new_val = {k: dict(v) for k, v in (value_labels or {}).items()}
     filled, skipped, unknown = [], [], []
+
+    # 순서로 짝을 지은 코드북은 한 칸만 밀려도 엉뚱한 변수에 라벨이 붙는다.
+    # 양쪽에 다 있는 변수의 '코드 집합' 이 같은지 세어 두고, 어긋나는 것이
+    # 많으면 화면에서 경고한다.
+    matched_vars, mismatched = 0, []
+    for var, mapping in (cb_val or {}).items():
+        if var not in new_val:
+            continue
+        sav_codes = {_code_str(c) for c in new_val[var]}
+        cb_codes = set(mapping)
+        if cb_codes and sav_codes and cb_codes <= sav_codes:
+            matched_vars += 1
+        else:
+            mismatched.append(var)
 
     def _no_gain(new_text) -> bool:
         """이 라벨로 바꿔봐야 소용없는 경우.
@@ -282,7 +409,9 @@ def apply_codebook(col_labels: dict, value_labels: dict,
         skipped.append((var, where))
 
     return new_col, new_val, {"filled": filled, "still_broken": skipped,
-                              "unknown_vars": sorted(set(unknown))}
+                              "unknown_vars": sorted(set(unknown)),
+                              "code_ok": matched_vars,
+                              "code_mismatch": sorted(set(mismatched))}
 
 
 def build_raw(df: pd.DataFrame) -> pd.DataFrame:
@@ -754,21 +883,57 @@ with st.expander("📑 코드북으로 잘린 라벨 채우기 (선택)",
                 f"{cb_kind} 에서 읽었습니다 — 변수 {len(cb_val)}개 · "
                 f"값 라벨 {sum(len(v) for v in cb_val.values())}개"
             )
-            total_filled, reports = 0, []
-            for i, (f, d, cl, vl, vt) in enumerate(loaded):
+            # 먼저 계산만 해 보고, 짝이 어긋나 보이면 적용하지 않는다.
+            # 순서로 짝지은 코드북은 한 칸만 밀려도 엉뚱한 변수에 라벨이 붙는데,
+            # 같은 척도(1~4)를 쓰는 문항이 많으면 코드만으로는 티가 안 난다.
+            merged, reports = [], []
+            for f, d, cl, vl, vt in loaded:
                 cl2, vl2, rep = apply_codebook(cl, vl, cb_col, cb_val,
                                                only_broken)
-                loaded[i] = (f, d, cl2, vl2, vt)
-                total_filled += len(rep["filled"])
+                merged.append((f, d, cl2, vl2, vt))
                 reports.append((f.name, rep))
 
-            if total_filled:
-                st.success(f"✅ 라벨 {total_filled}개를 원문으로 채웠습니다.")
-            else:
-                st.warning(
-                    "채운 라벨이 없습니다. 변수명과 코드가 .sav 와 맞는지 "
-                    "확인해 주세요."
+            total_filled = sum(len(r["filled"]) for _, r in reports)
+            ok = sum(r["code_ok"] for _, r in reports)
+            bad = sorted({v for _, r in reports for v in r["code_mismatch"]})
+            shifted = len(bad) > max(3, ok * 0.1)
+
+            if bad:
+                (st.error if shifted else st.warning)(
+                    f"⚠️ **코드북에만 있는 코드를 가진 변수가 {len(bad)}개입니다** "
+                    f"(코드가 맞는 변수 {ok}개). 짝이 제대로 맞은 코드북은 보통 "
+                    "0개입니다. 코드북 행이 밀렸거나 다른 조사의 코드북일 수 "
+                    "있습니다 — " + ", ".join(bad[:12])
+                    + (" …" if len(bad) > 12 else "")
                 )
+            else:
+                st.caption(
+                    f"코드북과 .sav 의 코드가 모두 일치합니다 (변수 {ok}개). "
+                    "짝이 제대로 맞았습니다."
+                )
+
+            force = False
+            if shifted:
+                force = st.checkbox(
+                    "그래도 적용하기", value=False, key="SX_cb_force",
+                    help="엉뚱한 변수에 라벨이 붙을 수 있습니다. 위 목록을 "
+                         "확인하고 문제가 없을 때만 켜세요.",
+                )
+                if not force:
+                    st.info(
+                        "짝이 어긋나 보여 **적용하지 않았습니다.** 코드북을 "
+                        "확인해 다시 올리시거나, 확인을 마쳤으면 위 상자를 켜세요."
+                    )
+
+            if not shifted or force:
+                loaded[:] = merged
+                if total_filled:
+                    st.success(f"✅ 라벨 {total_filled}개를 원문으로 채웠습니다.")
+                else:
+                    st.warning(
+                        "채운 라벨이 없습니다. 변수명과 코드가 .sav 와 맞는지 "
+                        "확인해 주세요."
+                    )
 
             rows = []
             for fname, rep in reports:
