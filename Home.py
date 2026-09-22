@@ -12,6 +12,12 @@
 # ── 페이지 추가하는 법 ────────────────────────────────────────────────
 #   PAGES 표에 (찾을 단어, 제외할 단어, 사이드바 이름, 아이콘) 을 넣습니다.
 #   못 찾으면 사이드바에 안내가 뜨고 실제 파일 목록도 함께 보여줍니다.
+#
+# ── '제외할 단어' 를 꼭 쓰는 경우 ────────────────────────────────────
+#   같은 폴더에 사본을 남길 때입니다. 예전에 2___쿼터_솔루션_백업.py 가
+#   '쿼터' 후보로 같이 잡혔고, 본 파일 이름이 더 짧아서 겨우 이겼습니다.
+#   이름을 조금만 길게 고쳤다면 구버전이 사이드바에 걸렸을 겁니다.
+#   그래서 ("백업",) 을 미리 넣어 둡니다. 사본은 pages/ 밖에 두는 것이 낫습니다.
 # =====================================================================
 
 from pathlib import Path
@@ -28,7 +34,7 @@ PAGES: dict = {
         (("홈화면",), (), "홈", "🏠"),
     ],
     "표본 확정": [
-        (("쿼터",), (), "쿼터 솔루션", "🎯"),
+        (("쿼터",), ("백업",), "쿼터 솔루션", "🎯"),
     ],
     "내보내기": [
         (("SAV", "변환"), ("엑셀",), "Excel → Sav", "💾"),
@@ -60,12 +66,22 @@ here = Path(__file__).resolve().parent
 SKIP = {"home.py", "utils.py", "spss_labels.py",
         "dp_syntax.py", "sps_engine.py"}
 
+# ── 훑지 않을 폴더 ────────────────────────────────────────────────────
+#   화면 파일이 들어 있지 않은 폴더는 반드시 빼야 한다.
+#   tests/ 를 훑으면 test_spss_정제.py 가 '정제' 키워드에 걸리는데,
+#   그 파일은 import 되는 순간 sys.modules["streamlit"] 를 MagicMock 으로
+#   갈아끼우므로 앱 전체가 죽는다. (이름 길이가 실제 페이지와 동률이라
+#   폴더 순서 하나로 승부가 갈렸다)
+SKIP_DIRS = {"tests", "test", "baseline", "hwp_survey", "venv", "env",
+             "node_modules", "emd_data", "site-packages"}
+
 candidates: list = []
 for p in sorted(here.glob("*.py")):
     if p.name.lower() not in SKIP:
         candidates.append(p)
 for sub in sorted(here.iterdir()):
-    if sub.is_dir() and not sub.name.startswith((".", "__")):
+    if (sub.is_dir() and not sub.name.startswith((".", "__"))
+            and sub.name.lower() not in SKIP_DIRS):
         for p in sorted(sub.glob("*.py")):
             if p.name.lower() not in SKIP:
                 candidates.append(p)
@@ -80,8 +96,9 @@ def find_page(want: tuple, avoid: tuple):
     ]
     if not hits:
         return None
-    # 여러 개면 이름이 짧은 쪽을 고른다
-    return min(hits, key=lambda p: len(p.stem))
+    # 여러 개면 이름이 짧은 쪽을 고른다.
+    # 길이가 같을 때 폴더를 훑은 순서로 승부가 갈리지 않도록 경로까지 본다.
+    return min(hits, key=lambda p: (len(p.stem), p.as_posix()))
 
 
 def file_list() -> str:
