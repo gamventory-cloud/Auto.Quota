@@ -66,22 +66,73 @@ def _clean(v):
 
 @st.cache_data(show_spinner=False, max_entries=5)
 def read_sav_bytes(data: bytes, filename: str):
-    """업로드된 바이트를 임시파일로 떨어뜨려 pyreadstat으로 읽는다."""
+    """업로드된 바이트를 임시파일로 떨어뜨려 pyreadstat으로 읽는다.
+
+    .sav 에 문자셋 표시가 없는 경우가 있다 (pyreadstat 으로 쓴 파일이 그렇다).
+    그러면 읽는 쪽이 짐작하는데, 빗나가면 한글이 깨지거나
+    ReadstatError 로 아예 못 읽는다. 기본 → UTF-8 → CP949 순으로 시도한다.
+
+    반환 끝에 쓴 인코딩을 붙인다 ("" = 기본값으로 읽음).
+    """
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tmp:
             tmp.write(data)
             tmp_path = tmp.name
-        df, meta = pyreadstat.read_sav(tmp_path, apply_value_formats=False)
-        return (
-            df,
-            dict(meta.column_names_to_labels or {}),
-            dict(meta.variable_value_labels or {}),
-            dict(getattr(meta, "readstat_variable_types", {}) or {}),
-        )
+
+        last = None
+        for enc in (None, "UTF-8", "CP949"):
+            kw = {} if enc is None else {"encoding": enc}
+            try:
+                df, meta = pyreadstat.read_sav(
+                    tmp_path, apply_value_formats=False, **kw)
+            except Exception as exc:              # noqa: BLE001, PERF203
+                last = exc
+                continue
+            return (
+                df,
+                dict(meta.column_names_to_labels or {}),
+                dict(meta.variable_value_labels or {}),
+                dict(getattr(meta, "readstat_variable_types", {}) or {}),
+                enc or "",
+            )
+        raise last
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+# SPSS 한도 — 값 라벨 120바이트, 변수 라벨 256바이트 (한글 1자 = 3바이트)
+VALLABEL_LIMIT = 120
+VARLABEL_LIMIT = 256
+
+
+def _looks_truncated(text, limit: int) -> bool:
+    """SPSS 가 바이트 한도에서 잘라 먹은 라벨로 보이는지.
+
+    한도에 거의 닿았는데 끝이 '?' 나 '�' 로 끝나면, 한글 한 글자(3바이트)가
+    경계에 걸려 반토막 난 것이다. 잘린 글자는 파일에 남아 있지 않으므로
+    되살릴 수 없고, 어느 변수인지 알려 주는 것이 최선이다.
+    '만족하십니까?' 처럼 물음표로 끝나는 멀쩡한 라벨을 잡지 않도록
+    한도 근처인 것만 본다.
+    """
+    s = str(text)
+    if not s.endswith(("?", "�")):
+        return False
+    return len(s.encode("utf-8", errors="replace")) >= limit - 3
+
+
+def find_broken_labels(col_labels: dict, value_labels: dict) -> list:
+    """잘려 나간 것으로 보이는 라벨 목록. [(변수, 위치, 라벨), ...]"""
+    bad = []
+    for var, lab in (col_labels or {}).items():
+        if _looks_truncated(lab, VARLABEL_LIMIT):
+            bad.append((str(var), "변수 라벨", str(lab)))
+    for var, mapping in (value_labels or {}).items():
+        for code, lab in (mapping or {}).items():
+            if _looks_truncated(lab, VALLABEL_LIMIT):
+                bad.append((str(var), f"코드 {_code_str(code)}", str(lab)))
+    return bad
 
 
 def build_raw(df: pd.DataFrame) -> pd.DataFrame:
@@ -489,13 +540,45 @@ multi = len(ups) > 1
 
 # ── 올린 파일 읽기 ──
 loaded = []          # [(파일, df, col_labels, value_labels, var_types), ...]
+fallback_enc = []    # 기본값으로 못 읽어 다른 인코딩으로 넘어간 파일
+broken_labels = []   # 원본에서 이미 잘려 있는 라벨
 for f in ups:
     try:
-        _d, _cl, _vl, _vt = read_sav_bytes(f.getvalue(), f.name)
+        _d, _cl, _vl, _vt, _enc = read_sav_bytes(f.getvalue(), f.name)
     except Exception as e:
         st.error(f"‘{f.name}’ 을 읽지 못했습니다: {e}")
         st.stop()
     loaded.append((f, _d, _cl, _vl, _vt))
+    if _enc:
+        fallback_enc.append((f.name, _enc))
+    for _var, _where, _lab in find_broken_labels(_cl, _vl):
+        broken_labels.append((f.name, _var, _where, _lab))
+
+if fallback_enc:
+    st.info(
+        "문자셋 표시가 없어 인코딩을 바꿔 읽었습니다 — "
+        + ", ".join(f"{n} → {e}" for n, e in fallback_enc)
+        + ". 한글이 깨져 보이면 알려 주세요."
+    )
+
+if broken_labels:
+    st.warning(
+        f"**원본 .sav 에서 이미 잘려 있는 라벨이 {len(broken_labels)}개 있습니다.** "
+        "SPSS 는 값 라벨을 120바이트(한글 40자), 변수 라벨을 256바이트에서 자르는데, "
+        "경계가 한글 글자 가운데에 걸리면 그 글자가 `?` 로 남습니다. "
+        "**잘려 나간 글자는 파일에 남아 있지 않아 이 도구가 되살릴 수 없습니다.** "
+        "아래 목록의 라벨은 설문지나 코드북을 보고 직접 채워 주세요."
+    )
+    with st.expander(f"잘린 라벨 {len(broken_labels)}개 보기"):
+        st.dataframe(
+            pd.DataFrame(broken_labels,
+                         columns=["파일", "변수", "위치", "잘린 라벨"]),
+            hide_index=True, use_container_width=True,
+        )
+        st.caption(
+            "SPSS 에서 라벨을 40자 이내로 줄여 다시 저장하면 `?` 없이 나옵니다. "
+            "길이를 줄일 수 없다면 Code 시트를 받은 뒤 엑셀에서 직접 고치세요."
+        )
 
 if multi:
     st.dataframe(
