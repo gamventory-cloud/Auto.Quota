@@ -197,6 +197,18 @@ v3 변경점 (추가 쿼터 100% 할당)
 36. ID 컬럼과 intval 컬럼의 기본 선택을 이름으로 자동 매칭
     - intval / int_val / intValue 컬럼이 있으면 그것을 기본값으로 잡는다.
       대소문자와 앞뒤 공백은 무시한다. 없으면 첫 컬럼.
+37. [프리셋 버그] 불러온 뒤 아무 위젯이나 만지면 추가 쿼터가 초기화되던 문제
+    - 불러온 직후엔 변수·목표가 맞게 보이다가 '추가 쿼터도 100% 맞추기'
+      같은 체크박스를 누르면 추가 쿼터 변수가 비어 다시 지정해야 했다.
+    - 원인: key 가 붙은 위젯은 ID 가 key 로만 정해진다 (Streamlit 1.4x~).
+      29번에서 session_state 는 지웠지만 브라우저는 옛 값을 같은 ID 로
+      들고 있다가 다음 리런에 되돌려 보냈다.
+    - 프리셋 적용/해제 때마다 세대 번호(QS_gen)를 올리고 key 에 붙인다
+      (wkey). 새 ID 의 위젯이 되므로 옛 값이 끼어들지 않는다.
+38. '추가 쿼터도 목표로 100% 맞추기' 기본값을 켬으로, 프리셋에서도 복원
+    - 저장은 되고 있었지만(options.ex_as_target) 불러올 때 쓰지 않았다.
+    - 예전 프리셋처럼 값이 없으면 기본값(켬)을 따른다.
+    - '빠른 근사' 에서는 지원하지 않으므로 그때는 꺼진 채로 둔다.
 """
 
 import streamlit as st
@@ -340,11 +352,24 @@ def _reset_widget_state():
     "불러왔는데 안 바뀐다" 가 된다.
     """
     # 접두사만 보면 msg_xxx, edit_xxx 처럼 무관한 키까지 걸리므로
-    # "이름 + 숫자" 형태만 정확히 집는다.
-    pat = _re.compile(r'^(ms|ed|ex_mode_|ex_rv_|ex_cv_|ex_ed_grid_)\d+$')
-    for k in [k for k in list(st.session_state)
-              if k == "QS_total_only" or pat.match(k)]:
+    # "이름 + 숫자 (+ _g세대)" 형태만 정확히 집는다.
+    pat = _re.compile(
+        r'^(ms|ed|ex_mode_|ex_rv_|ex_cv_|ex_ed_grid_)\d+(_g\d+)?$'
+        r'|^QS_total_only(_g\d+)?$')
+    for k in [k for k in list(st.session_state) if pat.match(k)]:
         st.session_state.pop(k, None)
+    # session_state 를 지우는 것만으로는 부족하다. key 가 붙은 위젯은 ID 가
+    # key 로만 정해져서, 브라우저가 이전 값을 같은 ID 로 들고 있다가 다음
+    # 리런(아무 위젯이나 만질 때) 에 그대로 되돌려 보낸다. 그래서 불러온 직후엔
+    # 맞게 보이다가 '추가 쿼터도 100% 맞추기' 같은 체크박스를 누르는 순간
+    # 추가 쿼터가 옛 값(보통 빈 칸)으로 돌아갔다.
+    # 세대 번호를 key 에 붙여 새 위젯으로 만들면 옛 값이 들어올 자리가 없다.
+    st.session_state["QS_gen"] = st.session_state.get("QS_gen", 0) + 1
+
+
+def wkey(name):
+    """프리셋 적용 세대를 붙인 위젯 key. _reset_widget_state 참고."""
+    return f"{name}_g{st.session_state.get('QS_gen', 0)}"
 
 
 def preset_get(key, default=None):
@@ -776,7 +801,7 @@ if data_file:
         except (TypeError, ValueError):
             _p_total = 1000
         _tv = st.number_input(
-            "전체 목표", 1, 1000000, max(1, _p_total), key="QS_total_only",
+            "전체 목표", 1, 1000000, max(1, _p_total), key=wkey("QS_total_only"),
             help="메인 쿼터를 쓰지 않을 때 뽑을 총 인원입니다. "
                  "설정을 저장하면 이 값도 함께 저장됩니다.")
         main_map = {('All',): _tv}
@@ -892,7 +917,7 @@ if data_file:
             _p_this = _p_ex[i] if i < len(_p_ex) else {}
             _p_mode = (_p_this or {}).get("mode")
             ex_mode = st.radio(
-                f"설정 방식 (그룹 {i+1})", _em, key=f"ex_mode_{i}", horizontal=True,
+                f"설정 방식 (그룹 {i+1})", _em, key=wkey(f"ex_mode_{i}"), horizontal=True,
                 index=1 if _p_mode == "grid" else 0
             )
             config = {'cols': [], 'map': {}, 'name': f"Extra_{i+1}", 'mode': 'simple'}
@@ -902,7 +927,7 @@ if data_file:
                 _pc = [c for c in ((_p_this or {}).get("cols") or [])
                        if c in df_survey.columns] if _p_mode == "simple" else []
                 cols = st.multiselect(f"변수 선택 (그룹 {i+1})", df_survey.columns,
-                                      default=_pc, key=f"ms{i}")
+                                      default=_pc, key=wkey(f"ms{i}"))
                 if cols:
                     config['cols'] = cols
                     config['name'] = "_".join(str(c) for c in cols)
@@ -936,7 +961,7 @@ if data_file:
                                        + ", ".join(map(str, only_old[:6]))
                             (st.warning if (only_new or only_old) else st.caption)(msg)
                         ed = st.data_editor(cnt, use_container_width=True,
-                                            disabled=['값', '현재'], key=f"ed{i}", hide_index=True)
+                                            disabled=['값', '현재'], key=wkey(f"ed{i}"), hide_index=True)
                         bad = []
                         for _, r in ed.iterrows():
                             t = parse_target(r['목표'])
@@ -958,11 +983,11 @@ if data_file:
                 _g_cv = _gc[-1] if _gc else None
                 _all = list(df_survey.columns)
                 ex_rv = st.multiselect(f"행(Row) 변수 (그룹 {i+1})", _all,
-                                       default=_g_rv, key=f"ex_rv_{i}")
+                                       default=_g_rv, key=wkey(f"ex_rv_{i}"))
                 ex_cv = st.selectbox(
                     f"열(Col) 변수 (그룹 {i+1})", ["(선택)"] + _all,
                     index=(_all.index(_g_cv) + 1) if _g_cv in _all else 0,
-                    key=f"ex_cv_{i}")
+                    key=wkey(f"ex_cv_{i}"))
 
                 if ex_rv and ex_cv != "(선택)":
                     if ex_cv in ex_rv:
@@ -991,7 +1016,7 @@ if data_file:
                                 st.caption(f"저장된 설정에서 {_hit:,}개 셀의 목표를 "
                                            f"불러왔습니다.")
                             ed = st.data_editor(pi_init, use_container_width=True,
-                                                disabled=ex_rv, key=f"ex_ed_grid_{i}")
+                                                disabled=ex_rv, key=wkey(f"ex_ed_grid_{i}"))
                             mlt = ed.melt(id_vars=ex_rv, var_name=ex_cv, value_name='target')
                             bad = []
                             for _, r in mlt.iterrows():
@@ -1027,8 +1052,12 @@ if data_file:
     use_ilp = solver_kind.startswith("최선 보장")
 
     # ── 추가 쿼터를 상한이 아니라 '목표'로 다룰지 ──────────────────────────
+    #  기본은 켬. 저장된 설정이 있으면 그 값을 따른다.
+    #  '빠른 근사' 에서는 지원하지 않으므로 꺼진 채로 보이고 값도 False 로 둔다.
+    _p_ext = bool(preset_get("options.ex_as_target", True))
     ex_as_target = st.checkbox(
-        "🎯 추가 쿼터도 목표로 100% 맞추기", value=False, disabled=not use_ilp,
+        "🎯 추가 쿼터도 목표로 100% 맞추기", value=_p_ext and use_ilp,
+        disabled=not use_ilp,
         help="끄면 추가 쿼터는 상한으로만 작동합니다(초과 금지, 부족 허용). "
              "켜면 부족도 최소화합니다. 초과는 두 경우 모두 금지됩니다. "
              "'최선 보장' 방식에서만 지원합니다.")
