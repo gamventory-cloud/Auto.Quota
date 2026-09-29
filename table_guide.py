@@ -190,6 +190,22 @@ class Data:
     def labels(self, v: str) -> dict:
         return self.vl.get(v, {}) or {}
 
+    def has_data(self, v: str) -> bool:
+        """빈칸·결측이 아닌 응답이 하나라도 있는지."""
+        s = self.df[v]
+        if s.dtype == object:
+            return bool(s.astype(str).str.strip().replace({"nan": ""}).ne("").any())
+        return bool(s.notna().any())
+
+    def ma_set(self, code: str) -> list[str]:
+        """code_1, code_2 … 가 복수응답 세트(변수마다 자기 코드 하나)면 그 목록."""
+        from banner_table_engine import is_category_coded_set
+
+        mem = [c for c in self.numbered(code) if self.labels(c)]
+        if len(mem) < 2 or any(self.labels(c) != self.labels(mem[0]) for c in mem):
+            return []
+        return mem if is_category_coded_set(self.df, mem) else []
+
     def valid_codes(self, v: str) -> list[float]:
         """척도 계산에 쓸 보기 코드. 모름·무응답처럼 번호가 동떨어진 코드는 뺀다.
 
@@ -272,6 +288,12 @@ def _item_text(label: str) -> str:
     return s.strip()
 
 
+def _label_code(label: str) -> str:
+    """라벨 맨 앞 문항 번호. 'Q12-1. 귀하께서는 …' → 'Q12_1', 없으면 ''."""
+    m = re.match(r"\s*([A-Za-z]+\d+(?:-\d+)*)\.", label or "")
+    return m.group(1).replace("-", "_").upper() if m else ""
+
+
 def _norm(s: str) -> str:
     return re.sub(r"[^가-힣A-Za-z0-9%]", "", s).lower()
 
@@ -284,22 +306,39 @@ def _find_vars(title: str, data: Data) -> tuple[list[str], str | None, str, str]
     sub_us = re.findall(r"_(\d+)", subs)         # 'B4_1' 의 1   (문항 안의 부분)
     code = q + subs.replace("-", "_")
 
-    # 순위: '1순위' / '1~3순위' / '1+2순위'
-    rk = re.search(r"(1\+2\+3|1\+2|1~3|1~2|1)\s*순위", rest)
+    # 순위: '1순위' / '2순위' / '1~3순위' / '1+2순위'
+    rk = re.search(r"(\d(?:\s*[+~]\s*\d)*)\s*순위", rest)
     if rk:
-        n = {"1": 1, "1+2": 2, "1~2": 2, "1+2+3": 3, "1~3": 3}[rk.group(1)]
+        nums = [int(x) for x in re.findall(r"\d", rk.group(1))]
+        ranks = list(range(nums[0], nums[-1] + 1)) if "~" in rk.group(1) else nums
+        kind = "single" if len(ranks) == 1 else "multi"
         mem = [c for c in data.cols if re.fullmatch(rf"{re.escape(code)}_\d", c, re.I)]
-        if len(mem) >= n:
-            return mem[:n], ("single" if n == 1 else "multi"), OK, ""
+        if len(mem) >= max(ranks):
+            return [mem[r - 1] for r in ranks], kind, OK, ""
+        # 라벨의 'N순위' 로 찾는다. '[에너지]' 같은 꼬리표가 있으면 라벨에도 있어야 한다.
+        tags = [_norm(t) for t in re.findall(r"\[([^\]]+)\]", rest)]
+        by_rank: dict[int, list[str]] = collections.defaultdict(list)
+        for c in data.family(code) or data.family(q):
+            m2 = re.search(r"(\d)\s*순위", data.cl[c])
+            # 꼬리표는 대괄호 뒤(항목 부분)에서만 본다. 대괄호 안 문항 문구에는
+            # '(에너지 및 자동차 분야)' 처럼 모든 꼬리표가 다 들어 있기도 하다.
+            item = _norm(_item_text(data.cl[c]))
+            if m2 and data.labels(c) and all(t in item for t in tags):
+                by_rank[int(m2.group(1))].append(c)
+        if all(len(by_rank.get(r, [])) == 1 for r in ranks):
+            return ([by_rank[r][0] for r in ranks], kind, CHECK,
+                    "라벨의 'N순위'" + (" 와 꼬리표" if tags else "") + " 로 순위 변수를 찾았습니다")
         if sub_dash == ["1"]:                     # 'Q32-1' 의 순위가 Q32_1 ~ Q32_3 인 경우
-            mem = [c for c in data.cols if re.fullmatch(rf"{re.escape(q)}_\d", c, re.I)]
-            if len(mem) >= n:
-                return (mem[:n], ("single" if n == 1 else "multi"), CHECK,
+            mem = [c for c in data.cols if re.fullmatch(rf"{re.escape(q)}_\d", c, re.I)
+                   and data.labels(c) and data.has_data(c)]
+            if len(mem) >= max(ranks):
+                return ([mem[r - 1] for r in ranks], kind, CHECK,
                         f"{code}_1 이 없어 {mem[0]} ~ 을 순위 변수로 봤습니다")
         return [], None, NEED, f"순위 변수 {code}_1 … 을 찾지 못했습니다"
 
-    # 항목 번호: '_3)' 또는 끝의 '_3' / '- 3'
-    it = re.search(r"_(\d+)\)", rest) or re.search(r"(?:_|\s-\s*)(\d+)\s*$", rest)
+    # 항목 번호: '_3)' / ' - 3)' 또는 끝의 '_3' / '- 3'
+    it = (re.search(r"_(\d+)\)", rest) or re.search(r"(?:^|\s)-\s*(\d+)\)", rest)
+          or re.search(r"(?:_|\s-\s*)(\d+)\s*$", rest))
     k = it.group(1) if it else None
     names = []
     if k:
@@ -311,10 +350,25 @@ def _find_vars(title: str, data: Data) -> tuple[list[str], str | None, str, str]
             names.append(f"{q}_{k}_{sub_dash[-1]}")
     for nm in names:
         v = data.get(nm)
-        if v:
+        # 응답이 하나도 없는 변수는 건너뛴다. 'Q4-1. … - 1)' 의 Q4_1_1 은 항목이 아니라
+        # 뒤따르는 주관식 문항이라 비어 있다.
+        if v and data.has_data(v):
             return [v], None, OK, ""
+    # 'Q12-1.' 은 하위 문항인데, 데이터의 Q12_1 은 'Q12.' 의 1) 항목이고 Q12-1 문항은
+    # Q12_1_1 에 있을 수 있다. 라벨 맨 앞 문항 번호가 제목과 정확히 같은 변수가
+    # 따로 하나 있을 때만 그쪽으로 바꾼다. (한국은행 'Q20-1.' 처럼 Q20_1 의 라벨이
+    # 'Q20. 1) …' 이고 다른 후보가 없으면 Q20_1 이 맞다)
+    if sub_dash and not k and data.get(code) \
+            and _label_code(data.cl[data.get(code)]) not in ("", code.upper()):
+        same = [c for c in data.family(code) if c != data.get(code)
+                and _label_code(data.cl[c]) == code.upper()
+                and data.labels(c) and data.has_data(c)]
+        if len(same) == 1:
+            return same, None, CHECK, (f"{data.get(code)} 는 다른 문항의 항목이라 라벨 문항 번호가 "
+                                       f"맞는 {same[0]} 를 골랐습니다")
     if data.get(code):
-        if k:
+        # 'Q4-1. … - 1)' 처럼 항목 번호가 하위 문항 번호를 되풀이한 것이면 그대로 맞다
+        if k and not (sub_dash and k == sub_dash[-1]):
             return [data.get(code)], None, CHECK, f"항목 번호 {k} 에 맞는 변수가 없어 {data.get(code)} 를 썼습니다"
         return [data.get(code)], None, OK, ""
 
@@ -341,9 +395,14 @@ def _find_vars(title: str, data: Data) -> tuple[list[str], str | None, str, str]
             and re.fullmatch(rf"{re.escape(code)}_\d+", c, re.I)]
     if len(main) == 1 and not k:
         return main, None, CHECK, f"같은 문항의 대표 변수 {main[0]} 를 골랐습니다"
+    # 복수응답 세트: 문항 번호 바로 아래 변수들(Q1_1 ~ Q1_3)만 본다.
+    # 더 깊은 변수(Q1_1_1 = Q1-1 문항)와 섞으면 세트를 못 알아본다.
+    ma = data.ma_set(code)
+    if ma and not k:
+        return ma, "multi", CHECK, "복수응답 세트로 봤습니다"
     labeled = [c for c in fam if data.labels(c)]
     if len(labeled) > 1 and all(data.labels(c) == data.labels(labeled[0]) for c in labeled) \
-            and len(labeled) == len(fam):
+            and len(labeled) == len(fam) and not k:
         return labeled, "multi", CHECK, "보기가 같은 변수 묶음이라 복수응답으로 봤습니다"
     scored = sorted(((_overlap(tail, data.cl[c]), c) for c in fam), reverse=True)
     if scored and scored[0][0] >= 0.5 and (len(scored) == 1 or scored[0][0] > scored[1][0]):
@@ -385,6 +444,14 @@ def _one_cond(raw: str, data: Data, grid: dict, family_hint: list[str]):
     m = re.fullmatch(var + r"\s*(<=|>=|=|<|>)\s*(-?\d+)", raw)
     if m and data.get(m.group(1)):
         return f"{data.get(m.group(1))}{m.group(2)}{m.group(3)}", OK
+    # 복수응답 문항: 'Q3=1' 인데 Q3 는 없고 Q3_1 ~ Q3_3 세트 → 보기 1 을 고른 사람
+    m = re.fullmatch(var + r"\s*=\s*(\d+(?:\s*(?:,|or)\s*\d+)*)", raw, re.I)
+    if m and not data.get(m.group(1)):
+        ma = data.ma_set(m.group(1).replace("-", "_"))
+        if ma:
+            vals = re.split(r"\s*(?:,|or)\s*", m.group(2), flags=re.I)
+            parts = [f"any({v},{','.join(ma)})" for v in vals]
+            return (parts[0] if len(parts) == 1 else "(" + " | ".join(parts) + ")"), CHECK
     # 격자형: 'B1-1_3)=1' / 'B1-1_1)~3)=1'
     m = re.fullmatch(r"([A-Z]+\d+-\d+)_(\d+)\)(?:\s*~\s*(\d+)\))?\s*=\s*(\d+)", raw)
     if m:
@@ -475,7 +542,9 @@ def infer_tables(guide: Guide, df: pd.DataFrame, meta) -> list[TableSpec]:
                            + (f" (데이터에 없는 변수: {', '.join(miss)})" if miss else ""))
             cond, status = "", NEED
         elif cstat == CHECK:
-            reasons.append("베이스를 보기 이름으로 풀었습니다")
+            reasons.append("복수응답 문항 베이스를 any(보기, 세트 변수) 로 풀었습니다"
+                           if "any(" in cond and not re.search(r"any\([A-Za-z]", cond)
+                           else "베이스를 보기 이름으로 풀었습니다")
             status = CHECK if status == OK else status
 
         extra = ""
@@ -590,6 +659,14 @@ def infer_banners(guide: Guide, specs: list[TableSpec], df, meta) -> list[Banner
         cands = ([src] if src else []) + [c for c in data.family(b.code.replace("-", "_"))
                                           if c != src]
         chosen, reason, status, recode = None, "", OK, ""
+        ma = [] if src else data.ma_set(b.code.replace("-", "_"))
+        if ma:
+            # 복수응답 문항을 배너로 쓰면 bv 하나로 COMPUTE 할 수 없다
+            out.append(BannerSpec(
+                name, b.label, ma[0], "", b.values, NEED,
+                f"{b.code} 는 복수응답({ma[0]} ~ {ma[-1]})이라 COMPUTE 로 만들 수 없습니다. "
+                "복수응답 배너는 직접 작업해야 합니다"))
+            continue
         for c in cands:                         # 보기 문구가 같은 변수를 찾는다
             have = [_norm(_strip_code(l)) for _, l in sorted(data.labels(c).items())]
             if not want or (have and have == want):
