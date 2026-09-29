@@ -567,9 +567,22 @@ def key_series(sr: pd.Series) -> pd.Series:
     return pd.Series([one(x) for x in sr.tolist()], dtype=object)
 
 
-def merge_side(frames: dict, key: str, keep_all: bool,
+SIDE_LEFT = "첫 번째 파일 기준"
+SIDE_OUTER = "모두 남기기"
+SIDE_INNER = "양쪽에 다 있는 사람만"
+SIDE_HOW = {SIDE_LEFT: "left", SIDE_OUTER: "outer", SIDE_INNER: "inner"}
+
+
+def merge_side(frames: dict, key: str, how: str = "left",
                unit: str = "시트") -> tuple:
-    """시트나 파일을 옆으로 붙인다(같은 응답자, 다른 문항)."""
+    """
+    시트나 파일을 옆으로 붙인다(같은 응답자, 다른 문항).
+
+    how
+      left  : 첫 번째 것에 있는 응답자만 남긴다. 뒤쪽에만 있는 응답자는 뺀다.
+      outer : 어느 한쪽에라도 있으면 남긴다.
+      inner : 모두에게 있는 응답자만 남긴다.
+    """
     notes, base, base_name = [], None, None
     seen_cols = set()
 
@@ -620,18 +633,30 @@ def merge_side(frames: dict, key: str, keep_all: bool,
                 head += ("  ⚠ 값이 다른 열: " + ", ".join(diff_cols[:8])
                          + " — 어느 쪽이 맞는지 확인하세요.")
             notes.append(head)
+        # 연결 열은 앞쪽 것을 쓰므로 여기서 뺀다. 다만 outer 로 붙이면 뒤쪽에만
+        # 있는 응답자는 앞쪽 연결 열이 비므로, 그 값을 채우려고 따로 챙겨 둔다.
+        # (예전엔 이걸 안 해서 그런 응답자의 ID 가 빈칸으로 저장됐다)
+        rkey = d[key] if key in drop else None
         d = d.drop(columns=drop)
+        if rkey is not None:
+            d["__rkey__"] = rkey
 
         only_l = len(set(base["__key__"]) - set(d["__key__"]))
         only_r = len(set(d["__key__"]) - set(base["__key__"]))
         if only_l or only_r:
-            notes.append(
-                f"‘{name}’ 와 대조: 앞쪽에만 있는 응답자 {only_l}명, "
-                f"이 {unit}에만 있는 응답자 {only_r}명"
-            )
+            msg = (f"‘{name}’ 와 대조: 앞쪽에만 있는 응답자 {only_l}명, "
+                   f"이 {unit}에만 있는 응답자 {only_r}명")
+            if how == "left" and only_r:
+                msg += f" → 이 {unit}에만 있는 {only_r}명은 뺐습니다 (첫 번째 {unit} 기준)"
+            elif how == "inner":
+                msg += " → 양쪽에 다 있는 사람만 남겼습니다"
+            notes.append(msg)
 
-        base = base.merge(d, on="__key__", how="outer" if keep_all else "inner")
-        seen_cols |= {c for c in d.columns if c != "__key__"}
+        base = base.merge(d, on="__key__", how=how)
+        if "__rkey__" in base.columns:
+            base[key] = base[key].where(base[key].notna(), base["__rkey__"])
+            base = base.drop(columns="__rkey__")
+        seen_cols |= {c for c in d.columns if c not in ("__key__", "__rkey__")}
         notes.append(f"‘{name}’ 붙인 뒤 {len(base):,}행 × {len(base.columns)-1}열")
 
     return base.drop(columns="__key__"), notes
@@ -942,7 +967,7 @@ SHEET_ONE = "시트 하나만 쓰기"
 
 sheet_mode = SHEET_ONE
 
-merge_mode, join_key, keep_all, add_sheet_col = None, None, True, False
+merge_mode, join_key, side_keep, add_sheet_col = None, None, SIDE_LEFT, False
 offset_col, offset_step = None, 0
 src_label = "시트"                                    # 합친 출처를 뭐라 부를지
 
@@ -1069,7 +1094,7 @@ if sheet_mode == SHEET_JOIN and multi_file and any(
             frames[fname] = next(iter(sheets_map.values()))
             continue
         try:
-            merged, notes = merge_side(sheets_map, sheet_key, True, "시트")
+            merged, notes = merge_side(sheets_map, sheet_key, "outer", "시트")
         except Exception as e:                       # noqa: BLE001
             st.error(f"‘{fname}’ 안의 시트를 붙이지 못했습니다 — {e}")
             st.stop()
@@ -1103,13 +1128,20 @@ elif merge_mode == MODE_SIDE:
         join_key = st.selectbox("연결 열", common, key="sav_key",
                                 help=f"{src_label}끼리 같은 응답자를 알아보는 기준 열")
     with k2:
-        seed("sav_keep", "모두 남기기")
-        keep_all = st.radio(
+        if st.session_state.get("sav_keep") not in SIDE_HOW:
+            st.session_state.pop("sav_keep", None)
+        seed("sav_keep", SIDE_LEFT)
+        side_keep = st.radio(
             "한쪽에만 있는 응답자",
-            ["모두 남기기", "양쪽에 다 있는 사람만"],
-            key="sav_keep", horizontal=True) == "모두 남기기"
+            list(SIDE_HOW),
+            key="sav_keep", horizontal=True,
+            help=f"첫 번째 파일 기준 : 처음 올린 {src_label}의 응답자만 남기고, "
+                 f"뒤쪽 {src_label}에서는 그 응답자의 변수만 붙입니다.\n\n"
+                 f"모두 남기기 : 어느 {src_label}에라도 있으면 남깁니다. "
+                 f"한쪽에만 있는 사람은 다른 쪽 변수가 빈칸이 됩니다.")
     try:
-        df, merge_notes = merge_side(frames, join_key, keep_all, src_label)
+        df, merge_notes = merge_side(frames, join_key, SIDE_HOW[side_keep],
+                                     src_label)
     except Exception as e:                           # noqa: BLE001
         st.error(f"{src_label}을 붙이지 못했습니다 — {e}")
         st.stop()
@@ -1211,7 +1243,7 @@ with st.expander("원본 미리보기 (앞 20행)", expanded=False):
 # ── 열 설정 표 ────────────────────────────────────────────────────────────
 sig = hashlib.md5(
     f"{'|'.join(f'{n}:{len(d)}' for n, d in files)}|{'/'.join(keys)}|"
-    f"{header_row}|{merge_mode}|{join_key}|{keep_all}|{add_sheet_col}|"
+    f"{header_row}|{merge_mode}|{join_key}|{side_keep}|{add_sheet_col}|"
     f"{offset_col}|{offset_step}|{sheet_mode}".encode()
 ).hexdigest()
 
@@ -1446,8 +1478,7 @@ if run:
             {"header_row": int(header_row),
              "merge_mode": merge_mode,
              "join_key": join_key,
-             "keep_all_label": ("모두 남기기" if keep_all
-                                else "양쪽에 다 있는 사람만"),
+             "keep_all_label": side_keep,
              "add_sheet_col": bool(add_sheet_col),
              "sheet_mode": sheet_mode,
              "offset_col": offset_col,
