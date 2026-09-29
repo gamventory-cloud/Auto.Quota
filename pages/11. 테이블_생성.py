@@ -9,7 +9,9 @@
 #   멀티페이지 앱은 session_state 를 모든 페이지가 함께 씁니다.
 #   다른 페이지와 겹치지 않도록 이 페이지의 키는 모두 'bt_' 로 시작합니다.
 
+import collections
 import hashlib
+import re
 import tempfile
 from pathlib import Path
 
@@ -48,6 +50,7 @@ from banner_table_form import (
     write_filled_form,
     write_form_template,
 )
+import table_guide as tg
 from table_picker import (
     KIND_LABEL,
     KIND_MULTI,
@@ -160,8 +163,9 @@ st.session_state.setdefault("bt_merge_banners", [])
 st.session_state.setdefault("bt_results", [])
 st.session_state.setdefault("bt_blocks", [])      # 담아둔 표의 '정의' (설정 저장용)
 
-tab_manual, tab_form, tab_quick, tab_syntax = st.tabs(
-    ["변수 골라서 만들기", "엑셀 폼으로 만들기", "빈도 · 교차표", "신텍스로 한 번에"]
+tab_manual, tab_form, tab_quick, tab_syntax, tab_guide = st.tabs(
+    ["변수 골라서 만들기", "엑셀 폼으로 만들기", "빈도 · 교차표", "신텍스로 한 번에",
+     "가이드로 신텍스 만들기"]
 )
 
 
@@ -1401,3 +1405,195 @@ with tab_syntax:
                     st.dataframe(result_to_frame(res), **_WIDE)
                     for note in res.notes:
                         st.caption(f"· {note}")
+
+
+# =============================================================================
+# 테이블 가이드로 신텍스 만들기 (.sav + 사내 테이블 가이드 엑셀)
+# =============================================================================
+with tab_guide:
+    st.write(
+        "사내 **테이블 가이드**(Basic Table · Banner 시트)와 위에서 올린 .sav 로 "
+        "`3] Command.sps`(배너·리코드) 와 `4] Table.sps` 를 만듭니다. "
+        "규칙으로 확신하지 못한 줄은 표시해 두니 **그 줄만 확인**하면 됩니다."
+    )
+    guide_file = st.file_uploader("테이블 가이드 (.xlsx)", type=["xlsx"], key="bt_guide_up")
+
+    if guide_file is None:
+        st.info("가이드 엑셀을 올려 주세요. 'Basic Table' 시트의 표 목록과 'Banner' 시트의 "
+                "배너를 읽습니다. 'TG' 시트가 있으면 격자형 문항의 베이스를 푸는 데 씁니다.")
+    else:
+        @st.cache_data(show_spinner="가이드를 읽고 표를 맞추는 중…")
+        def _guide_infer(guide_bytes: bytes, sav_bytes: bytes):
+            g = tg.read_guide(guide_bytes)
+            specs = tg.infer_tables(g, df, meta)
+            return g, specs, tg.infer_banners(g, specs, df, meta)
+
+        try:
+            guide, specs0, banners0 = _guide_infer(guide_file.getvalue(), sav_file.getvalue())
+        except ValueError as e:
+            st.error(str(e))
+            guide = None
+
+        if guide is not None:
+            _sig = hashlib.md5(guide_file.getvalue() + sav_file.getvalue()).hexdigest()[:12]
+
+            # ── 양식 ──
+            st.subheader("1. 양식")
+            orient_g = st.radio(
+                "배너 위치", ["배너를 행으로 (왼쪽에 배너)", "배너를 열로 (위쪽에 배너)"],
+                horizontal=True, key="bt_guide_orient",
+                help="배너를 행으로: 왼쪽에 성별·연령 등 배너가 세로로 오고 위쪽에 보기가 "
+                     "옵니다 (`/table=@t3+ bv1+ … by t2+ …`).\n\n"
+                     "배너를 열로: 위쪽에 배너가 가로로 오고 왼쪽에 보기가 옵니다 "
+                     "(`/table=t3+ … by @t2+ bv1+ …`).",
+            )
+            orientation_g = tg.ROW if orient_g.startswith("배너를 행") else tg.COL
+            proj = re.sub(r"_DATA.*$", "", Path(sav_file.name).stem, flags=re.I).strip()
+            kms = guide.info.get("kms", "")
+            p1, p2, p3 = st.columns([2, 1.3, 1.3])
+            work_dir = p1.text_input(
+                "작업 폴더 (CD)",
+                value=f"D:\\{kms[:4]}\\({kms}) {proj}" if kms[:4].isdigit() else f"D:\\{proj}",
+                key=f"bt_guide_cd_{_sig}")
+            data_file = p2.text_input("원본 데이터 파일", value=sav_file.name,
+                                      key=f"bt_guide_data_{_sig}")
+            final_file = p3.text_input("Command 결과 파일", value=f"{proj}_Final.sav",
+                                       key=f"bt_guide_final_{_sig}")
+
+            # ── 배너 ──
+            st.subheader("2. 배너")
+            main0 = [b for b in banners0 if not b.extra]
+            bdf = pd.DataFrame({
+                "배너": [b.name for b in main0],
+                "상태": [tg.STATUS_LABEL[b.status] for b in main0],
+                "이름": [b.label for b in main0],
+                "원본 변수": [b.source for b in main0],
+                "리코드": [b.recode for b in main0],
+                "보기": [" / ".join(f"{c}) {l}" for c, l in b.values)[:80] for b in main0],
+                "사유": [b.reason for b in main0],
+            })
+            bed = st.data_editor(
+                bdf, key=f"bt_guide_ban_{_sig}", hide_index=True, **_WIDE,
+                disabled=["배너", "상태", "보기", "사유"],
+                column_config={
+                    "리코드": st.column_config.TextColumn(
+                        help="비우면 COMPUTE 로 그대로 씁니다. 예: (1 2=1)(3=2)(4=3)"),
+                    "원본 변수": st.column_config.TextColumn(help="배너로 쓸 .sav 변수 이름"),
+                },
+            )
+            cols_up = {c.upper(): c for c in df.columns}
+            banners_g = []
+            for b, (_, r) in zip(main0, bed.iterrows()):
+                src = cols_up.get(str(r["원본 변수"]).strip().upper(), str(r["원본 변수"]).strip())
+                edited = (src != b.source or str(r["리코드"]).strip() != b.recode
+                          or str(r["이름"]).strip() != b.label)
+                banners_g.append(tg.BannerSpec(
+                    b.name, str(r["이름"]).strip() or b.label, src,
+                    str(r["리코드"] or "").strip(), b.values,
+                    tg.OK if edited and src in df.columns else b.status, b.reason))
+            bad_src = [b.name for b in banners_g if b.source not in df.columns]
+            if bad_src:
+                st.warning(f"원본 변수가 .sav 에 없는 배너: {', '.join(bad_src)}")
+
+            # ── 표 목록 ──
+            st.subheader("3. 표 목록")
+            cnt = collections.Counter(s.status for s in specs0)
+            st.caption(
+                f"가이드 {len(specs0)}줄 — {tg.STATUS_LABEL[tg.OK]} {cnt[tg.OK]} · "
+                f"{tg.STATUS_LABEL[tg.CHECK]} {cnt[tg.CHECK]} · "
+                f"{tg.STATUS_LABEL[tg.NEED]} {cnt[tg.NEED]}. "
+                "확인이 필요한 줄이 위로 오게 정렬했습니다. 신텍스는 가이드 순서대로 나갑니다.")
+            order = sorted(range(len(specs0)),
+                           key=lambda i: ({tg.NEED: 0, tg.CHECK: 1, tg.OK: 2}[specs0[i].status], i))
+            tdf = pd.DataFrame({
+                "#": [i + 1 for i in order],
+                "상태": [tg.STATUS_LABEL[specs0[i].status] for i in order],
+                "제목": [specs0[i].title for i in order],
+                "유형": [tg.KIND_LABEL[specs0[i].kind] for i in order],
+                "변수": [specs0[i].vars for i in order],
+                "조건": [specs0[i].cond for i in order],
+                "정렬": [specs0[i].sort for i in order],
+                "추가배너": [specs0[i].extra_banner for i in order],
+                "통계값": [specs0[i].stats for i in order],
+                "가이드 베이스": [specs0[i].base for i in order],
+                "사유": [specs0[i].reason for i in order],
+            })
+            ted = st.data_editor(
+                tdf, key=f"bt_guide_tab_{_sig}", hide_index=True, **_WIDE,
+                disabled=["#", "상태", "가이드 베이스", "사유"],
+                column_config={
+                    "#": st.column_config.NumberColumn(width="small"),
+                    "상태": st.column_config.TextColumn(width="small"),
+                    "제목": st.column_config.TextColumn(width="medium"),
+                    "유형": st.column_config.SelectboxColumn(
+                        options=[tg.KIND_LABEL[k] for k in tg.KINDS], required=True,
+                        width="small"),
+                    "변수": st.column_config.TextColumn(
+                        help="'q1' · 'q16_1 to q16_3' · 'b2_1 b2_2 …' (Summary 는 구성 변수)"),
+                    "조건": st.column_config.TextColumn(
+                        help="Select if 에 & 로 붙는 SPSS 조건. 비우면 응답자 전체. "
+                             "예: A5=1 · Range(A6,2,4) · any(D1,2,3)"),
+                    "정렬": st.column_config.CheckboxColumn(help="내림차순 (/sort= m_down)"),
+                    "추가배너": st.column_config.TextColumn(help="이 표에만 더 붙일 배너 변수"),
+                    "통계값": st.column_config.TextColumn(
+                        help="척도 묶음과 100점 환산. 예: BOT2/SoSo/TOP2,Mean, 100점환산 평균"),
+                },
+            )
+            edited_by_no = {int(r["#"]): r for _, r in ted.iterrows()}
+            specs_g, var_problems = [], []
+            for i, s0 in enumerate(specs0):
+                r = edited_by_no[i + 1]
+                vars_txt = str(r["변수"] or "").strip()
+                _vs, bad = tg.parse_vars(vars_txt, tg.Data(df, meta))
+                if bad:
+                    var_problems.append(f"#{i + 1} {s0.title[:30]} — 없는 변수: {', '.join(bad)}")
+                changed = (vars_txt != s0.vars or str(r["조건"] or "").strip() != s0.cond
+                           or tg.LABEL_KIND.get(r["유형"], s0.kind) != s0.kind)
+                specs_g.append(tg.TableSpec(
+                    title=str(r["제목"]).strip() or s0.title,
+                    kind=tg.LABEL_KIND.get(r["유형"], s0.kind),
+                    vars=vars_txt, cond=str(r["조건"] or "").strip(),
+                    sort=bool(r["정렬"]), extra_banner=str(r["추가배너"] or "").strip(),
+                    stats=str(r["통계값"] or ""), base=s0.base,
+                    status=(tg.OK if changed and vars_txt and not bad else s0.status),
+                    reason=s0.reason, row=s0.row))
+            for msg in var_problems[:8]:
+                st.warning(msg)
+            banners_g += tg.extra_banners(specs_g, df, meta, start=len(banners_g) + 1)
+
+            # ── 내려받기 ──
+            st.subheader("4. 내려받기")
+            left = sum(1 for s in specs_g if s.status == tg.NEED)
+            if left:
+                st.warning(f"❌ 직접 입력이 남은 표 {left}개는 신텍스에 '* 확인 필요' 주석과 함께 "
+                           "나갑니다. 변수가 비어 있으면 그 표는 건너뜁니다.")
+            enc_disp = st.radio("인코딩", ["CP949 (SPSS 한글 윈도우)", "UTF-8"],
+                                horizontal=True, key="bt_guide_enc")
+            enc = "cp949" if enc_disp.startswith("CP949") else "utf-8"
+            try:
+                cmd_txt = tg.write_command(banners_g, specs_g, df, meta, work_dir=work_dir,
+                                           data_file=data_file, final_file=final_file)
+                tab_txt = tg.write_table(specs_g, banners_g, df, meta,
+                                         orientation=orientation_g, work_dir=work_dir,
+                                         final_file=final_file,
+                                         section_title=guide.section_title)
+            except Exception as e:                           # noqa: BLE001
+                st.error(f"신텍스를 만들지 못했습니다 — {e}")
+                cmd_txt = tab_txt = None
+            if cmd_txt is not None:
+                cmd_b, bad1 = tg.encode_sps(cmd_txt, enc)
+                tab_b, bad2 = tg.encode_sps(tab_txt, enc)
+                if bad1 + bad2:
+                    st.warning(f"CP949 에 없는 글자 {bad1 + bad2}개가 '?' 로 바뀝니다. "
+                               "제목에 특수문자가 있으면 UTF-8 로 받으세요.")
+                d1, d2 = st.columns(2)
+                d1.download_button("3] Command.sps 내려받기", data=cmd_b,
+                                   file_name=f"3] {proj} - Command.sps",
+                                   mime="text/plain", key="bt_guide_dl_cmd")
+                d2.download_button("4] Table.sps 내려받기", data=tab_b,
+                                   file_name=f"4] {proj} - Table.sps",
+                                   mime="text/plain", key="bt_guide_dl_tab")
+                with st.expander("미리 보기"):
+                    v1, v2 = st.tabs(["Command", "Table"])
+                    v1.code("\n".join(cmd_txt.splitlines()[:120]), language="sql")
+                    v2.code("\n".join(tab_txt.splitlines()[:160]), language="sql")
