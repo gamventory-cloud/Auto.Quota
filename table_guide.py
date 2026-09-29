@@ -645,6 +645,22 @@ class BannerSpec:
     status: str = OK
     reason: str = ""
     extra: bool = False       # 추가 배너 (cv 없음)
+    members: list[str] = field(default_factory=list)   # 복수응답 배너의 원본 변수들
+
+    def member_names(self, prefix: str = "bv") -> list[str]:
+        """복수응답 배너의 bv3_1, bv3_2 … (prefix='cv' 면 cv3_1 …)."""
+        base = prefix + self.name[2:]
+        return [f"{base}_{i}" for i in range(1, len(self.members) + 1)]
+
+
+def _mrg_names(banners: list[BannerSpec]) -> dict[str, tuple[str, str]]:
+    """복수응답 배너 → (bv 쪽 mrg 이름, cv 쪽 mrg 이름). 첫 번째가 mx11 / mc11."""
+    out, j = {}, 0
+    for b in banners:
+        if b.members:
+            j += 1
+            out[b.name] = (f"mx1{j}", f"mc1{j}")
+    return out
 
 
 def extra_banners(specs: list[TableSpec], df, meta, start: int) -> list[BannerSpec]:
@@ -700,11 +716,13 @@ def infer_banners(guide: Guide, specs: list[TableSpec], df, meta) -> list[Banner
         chosen, reason, status, recode = None, "", OK, ""
         ma = [] if src else data.ma_set(b.code.replace("-", "_"))
         if ma:
-            # 복수응답 문항을 배너로 쓰면 bv 하나로 COMPUTE 할 수 없다
-            out.append(BannerSpec(
-                name, b.label, ma[0], "", b.values, NEED,
-                f"{b.code} 는 복수응답({ma[0]} ~ {ma[-1]})이라 COMPUTE 로 만들 수 없습니다. "
-                "복수응답 배너는 직접 작업해야 합니다"))
+            # 복수응답 배너: bv3_1 = Q1_1 … 로 나눠 만들고 표에서는 /mrg=mx11 로 묶는다
+            vals = b.values or [(int(c), _strip_code(l))
+                                for c, l in sorted(data.labels(ma[0]).items())]
+            spec = BannerSpec(name, b.label, ma[0], "", vals, CHECK, "", members=list(ma))
+            spec.reason = (f"복수응답 배너: {', '.join(spec.member_names())} "
+                           f"({ma[0]} ~ {ma[-1]}), 표에서는 /mrg 로 묶습니다")
+            out.append(spec)
             continue
         for c in cands:                         # 보기 문구가 같은 변수를 찾는다
             have = [_norm(_strip_code(l)) for _, l in sorted(data.labels(c).items())]
@@ -882,10 +900,13 @@ def write_command(banners: list[BannerSpec], specs: list[TableSpec], df, meta, *
          "*SET PRINTBACK=OFF.", "", "",
          "*_ Banner _____________________________________________________________________.", ""]
     w = max([len(b.name) for b in banners] + [3])
-    for b in main + ([] if not extra else []):
+    for b in main:
         if b.status == NEED:
             L.append(f"* 확인 필요: {b.reason}")
-        if b.recode:
+        if b.members:                              # 복수응답 배너: bv3_1=Q1_1 …
+            for nm, src in zip(b.member_names(), b.members):
+                L.append(f"COMPUTE {nm}={src}.")
+        elif b.recode:
             L.append(f"RECODE {b.source} {b.recode} into {b.name}.")
         else:
             L.append(f"COMPUTE {b.name.ljust(w)}={b.source}.")
@@ -897,27 +918,39 @@ def write_command(banners: list[BannerSpec], specs: list[TableSpec], df, meta, *
         L.append("")
     L += ["", "", "*_ Banner by Banner ___________________________________________________________.", ""]
     for b in main:
-        L.append(f"Compute {('c' + b.name[1:]).ljust(w)}={b.name.ljust(w)}.")
+        if b.members:
+            for bv_, cv_ in zip(b.member_names(), b.member_names("cv")):
+                L.append(f"Compute {cv_}={bv_}.")
+        else:
+            L.append(f"Compute {('c' + b.name[1:]).ljust(w)}={b.name.ljust(w)}.")
+    # 복수응답 배너의 이름은 표의 /mrg 에 적으므로 변수 라벨을 달지 않는다
     L += ["", "", "", "*_ Variable labels ____________________________________________________________.", "",
           "Variable labels"]
     first = True
-    for b in main + extra:
+    for b in [b for b in main + extra if not b.members]:
         L.append(f"{' ' if first else '/'}{b.name.ljust(w + 1)} '[{_q(b.label)}]'")
         first = False
-    for b in main:
+    for b in [b for b in main if not b.members]:
         L.append(f"/{('c' + b.name[1:]).ljust(w + 1)} '[{_q(b.label)}]'")
     L += [".", "", "", "", "*_ Value labels _______________________________________________________________.", "",
           "Value labels"]
     first = True
     for b in main + extra:
-        names = b.name if b.extra else f"{b.name} cv{b.name[2:]}"
-        L.append(f"{' ' if first else '/'}{names}")
+        if b.members:
+            pairs = [f"{bv_} {cv_}" for bv_, cv_ in zip(b.member_names(), b.member_names("cv"))]
+            L.append(f"{' ' if first else '/'}{pairs[0]}")
+            L += [f" {p}" for p in pairs[1:]]
+        else:
+            L.append(f"{' ' if first else '/'}{b.name if b.extra else f'{b.name} cv{b.name[2:]}'}")
         first = False
         for code, lab in b.values:
             L.append(f"  {str(code).rjust(2) if len(b.values) >= 10 else code}'{_q(lab)}'")
     L += [".", "", "", "", "*_ Banner Check _______________________________________________________________.", ""]
     for b in main:
-        if b.source:
+        if b.members:
+            for nm, src in zip(b.member_names(), b.members):
+                L.append(f"crosstab {src.ljust(6)} by {nm}.")
+        elif b.source:
             L.append(f"crosstab {b.source.ljust(6)} by {b.name}.")
     L += ["", "", "", "*_ RECODE _____________________________________________________________________.", ""]
     for sp in specs:
@@ -970,12 +1003,28 @@ def write_table(specs: list[TableSpec], banners: list[BannerSpec], df, meta, *,
         return f"/table=t3+ {stub}\n       by {tot}+ {b}"
 
     main = [b for b in banners if not b.extra]
+    # 복수응답 배너는 표마다 /mrg=mx11 '[이름]' bv3_1 to bv3_3 로 묶어 배너 자리에 쓴다
+    mrg = _mrg_names(banners)
+    tok = lambda n: mrg[n][0] if n in mrg else n        # noqa: E731
+    mrg_lines = [f"/mrg={mrg[b.name][0]} '[{_q(b.label)}]' "
+                 f"{b.member_names()[0]} to {b.member_names()[-1]} " for b in main if b.members]
+
+    def with_mrg(block: list[str]) -> list[str]:
+        """'Table …' 줄 바로 아래에 복수응답 배너 /mrg 를 넣는다."""
+        if not mrg_lines:
+            return block
+        i = next(i for i, l in enumerate(block) if l.startswith(head_fmt))
+        return block[:i + 1] + mrg_lines + block[i + 1:]
+
     L = [f'CD "{work_dir}".', "", f"GET FILE='{final_file}'.", "", "SET PRINTBACK=OFF.", "", "",
          "*_ Table ______________________________________________________________________.", "", ""]
     # 배너 표
-    bv = [b.name for b in main]
-    cv = ["c" + n[1:] for n in bv]
-    L += [f"Compute {tot}=1.", f"val lab {tot} 1'{tlab}'.", f"{head_fmt}  /* banner */", "/"] + ptotal
+    bv = [tok(b.name) for b in main]
+    cv = [mrg[b.name][1] if b.name in mrg else "c" + b.name[1:] for b in main]
+    cv_mrg = [f"/mrg={mrg[b.name][1]} '[{_q(b.label)}]' "
+              f"{b.member_names('cv')[0]} to {b.member_names('cv')[-1]} " for b in main if b.members]
+    L += [f"Compute {tot}=1.", f"val lab {tot} 1'{tlab}'.", f"{head_fmt}  /* banner */"] \
+        + mrg_lines + cv_mrg + ["/"] + ptotal
     if row:
         L += [f"/table={tot}+ {'+ '.join(bv)}", f"       by t2+ {'+ '.join(cv)}",
               f"/statistics=count (t2 (paren5.0) 'Base for %')"]
@@ -991,7 +1040,7 @@ def write_table(specs: list[TableSpec], banners: list[BannerSpec], df, meta, *,
         if not vs:
             L += [f"* 건너뜀 (변수 없음): {sp.title}", "", ""]
             continue
-        bvs = _banner_axis(banners, sp.extra_banner)
+        bvs = [tok(n) for n in _banner_axis(banners, sp.extra_banner)]
         bl = " ".join(bvs)
         lst = p["list"]
         sel_vars = (", ".join(x for x, _ in p["xvars"]) if sp.kind == "summary" and p.get("xvars")
@@ -1042,7 +1091,7 @@ def write_table(specs: list[TableSpec], banners: list[BannerSpec], df, meta, *,
             B.append(f"/statistics=count ({base_n} (paren5.0) '')")
             B += [f"/statistics=MEAN  ({x} ({dec}) '{_q(lab)}')" for x, lab in xs]
             B += [f"/title='{_q(title)} '", "/", "/", "/caption ''."]
-        L += B + ["", "", "", ""]
+        L += with_mrg(B) + ["", "", "", ""]
     return "\n".join(L)
 
 

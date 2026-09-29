@@ -1467,7 +1467,8 @@ with tab_guide:
                 "배너": [b.name for b in main0],
                 "상태": [tg.STATUS_LABEL[b.status] for b in main0],
                 "이름": [b.label for b in main0],
-                "원본 변수": [b.source for b in main0],
+                "원본 변수": [f"{b.members[0]} to {b.members[-1]}" if b.members else b.source
+                          for b in main0],
                 "리코드": [b.recode for b in main0],
                 "보기": [" / ".join(f"{c}) {l}" for c, l in b.values)[:80] for b in main0],
                 "사유": [b.reason for b in main0],
@@ -1478,19 +1479,26 @@ with tab_guide:
                 column_config={
                     "리코드": st.column_config.TextColumn(
                         help="비우면 COMPUTE 로 그대로 씁니다. 예: (1 2=1)(3=2)(4=3)"),
-                    "원본 변수": st.column_config.TextColumn(help="배너로 쓸 .sav 변수 이름"),
+                    "원본 변수": st.column_config.TextColumn(
+                        help="배너로 쓸 .sav 변수 이름. 복수응답 배너는 'Q1_1 to Q1_3' 처럼 "
+                             "여러 개를 적으면 bv3_1 … 로 나눠 만들고 표에서 /mrg 로 묶습니다."),
                 },
             )
-            cols_up = {c.upper(): c for c in df.columns}
             banners_g = []
+            _gd = tg.Data(df, meta)
             for b, (_, r) in zip(main0, bed.iterrows()):
-                src = cols_up.get(str(r["원본 변수"]).strip().upper(), str(r["원본 변수"]).strip())
-                edited = (src != b.source or str(r["리코드"]).strip() != b.recode
+                # 'Q1_1 to Q1_3' 처럼 여러 변수를 적으면 복수응답 배너 (bv3_1 … + /mrg)
+                src_vars, _bad = tg.parse_vars(str(r["원본 변수"] or ""), _gd)
+                members = src_vars if len(src_vars) > 1 else []
+                src = src_vars[0] if src_vars else str(r["원본 변수"] or "").strip()
+                edited = (src != b.source or members != b.members
+                          or str(r["리코드"]).strip() != b.recode
                           or str(r["이름"]).strip() != b.label)
                 banners_g.append(tg.BannerSpec(
                     b.name, str(r["이름"]).strip() or b.label, src,
-                    str(r["리코드"] or "").strip(), b.values,
-                    tg.OK if edited and src in df.columns else b.status, b.reason))
+                    "" if members else str(r["리코드"] or "").strip(), b.values,
+                    tg.OK if edited and src in df.columns else b.status, b.reason,
+                    members=members))
             bad_src = [b.name for b in banners_g if b.source not in df.columns]
             if bad_src:
                 st.warning(f"원본 변수가 .sav 에 없는 배너: {', '.join(bad_src)}")
