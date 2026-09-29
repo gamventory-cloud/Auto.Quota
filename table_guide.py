@@ -486,6 +486,30 @@ def _base_cond(raw: str, data: Data, grid: dict, family_hint: list[str]):
     return " & ".join(got), worst
 
 
+def _versus_vars(title: str, code: str, data: Data):
+    """'… - 지방비 vs. 국비 (평균값)' → ([Q16_1_1, Q16_1_2], ['지방비', '국비']).
+
+    'vs' 앞뒤 낱말을 같은 문항 변수의 항목 문구와 맞춘다. 수치형(값 라벨 없음)
+    변수가 하나씩 정확히 맞을 때만 돌려준다.
+    """
+    if not re.search(r"\bvs\.?\b", title, re.I):
+        return None
+    tail = re.split(r"\s-\s", title)[-1]
+    tail = re.sub(r"\([^)]*\)\s*$", "", tail)            # '(평균값)' 제거
+    terms = [t.strip() for t in re.split(r"\s*\bvs\.?\s*", tail, flags=re.I) if t.strip()]
+    if len(terms) < 2:
+        return None
+    nums = [c for c in data.family(code) if not data.labels(c)]
+    picked = []
+    for t in terms:
+        hit = [c for c in nums
+               if _norm(re.sub(r"^\d+\)\s*", "", _item_text(data.cl[c]))) == _norm(t)]
+        if len(hit) != 1:
+            return None
+        picked.append(hit[0])
+    return picked, terms
+
+
 # ── 한 줄 추론 ─────────────────────────────────────────────────────────
 def infer_tables(guide: Guide, df: pd.DataFrame, meta) -> list[TableSpec]:
     data = Data(df, meta)
@@ -502,6 +526,21 @@ def infer_tables(guide: Guide, df: pd.DataFrame, meta) -> list[TableSpec]:
             spec = TableSpec(title, "summary", "", "", row=g.row, stats=stats,
                              base=g.base, extra_banner="")
             specs.append(spec)          # 구성 변수는 아래에서 뒤 줄들을 보고 채운다
+            continue
+
+        # 'A vs. B (평균값)' — 같은 문항의 수치형 변수 A·B 를 평균 Summary 로 나란히
+        vs_pair = _versus_vars(title, q_code, data)
+        if vs_pair:
+            cond, cstat = _base_cond(g.base, data, grid, [])
+            reasons = [f"'{' vs. '.join(vs_pair[1])}' 를 {', '.join(vs_pair[0])} 의 "
+                       "평균 Summary 로 봤습니다"]
+            if cond is None:
+                reasons.append(f"베이스 '{g.base}' 를 조건으로 바꾸지 못했습니다")
+            specs.append(TableSpec(
+                title=title, kind="summary", vars=" ".join(v.lower() for v in vs_pair[0]),
+                cond=cond or "", sort=False, extra_banner="", stats=stats, base=g.base,
+                status=CHECK if cond is not None else NEED,
+                reason=" / ".join(reasons), row=g.row))
             continue
 
         vs, hint, status, why = _find_vars(title, data)
@@ -565,7 +604,7 @@ def infer_tables(guide: Guide, df: pd.DataFrame, meta) -> list[TableSpec]:
 
     # ── Summary 구성: 제목 앞부분이 같은 뒤 줄들의 변수 ──
     for i, sp in enumerate(specs):
-        if sp.kind != "summary":
+        if sp.kind != "summary" or sp.vars:       # 'vs.' 처럼 이미 구성이 정해진 것은 둔다
             continue
         prefix = re.split(r"_(?=[^_]*summary)", sp.title, flags=re.I)[0]
         members = []
