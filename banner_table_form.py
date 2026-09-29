@@ -986,24 +986,15 @@ def _scale_summary(labels: dict) -> str:
     return "상2,중,하2,평균" if len(labels) % 2 else "상2,하2,평균"
 
 
-def suggest_form_rows(df: pd.DataFrame, meta) -> tuple[list[list], list[list], list[str]]:
-    """.sav 를 보고 (표목록 줄들, 배너 줄들, 안내) 를 만든다.
+def find_duplicates(df: pd.DataFrame) -> dict[str, str]:
+    """앞 변수와 데이터가 완전히 같은 변수를 찾는다. {뒤쪽 변수: 앞쪽 변수}
 
-    제외하는 것
-      · 문자 변수 — 집계할 수 없다
-      · 값 라벨이 아주 많거나 응답자마다 값이 다른 변수 — 명칭/ID 로 본다
-      · 앞선 변수와 데이터가 완전히 같은 변수 — bv1/cv1/m~ 같은 파생 복제본
+    bv1/cv1/m~ 같은 파생 복제본이다. 모든 변수쌍을 직접 비교하면 변수가
+    많을 때 느려지므로, 먼저 열마다 지문(해시)을 구해 같은 지문끼리만
+    실제로 비교한다.
     """
-    vl = meta.variable_value_labels
-    cl = meta.column_names_to_labels
-    columns = list(df.columns)
-    notes: list[str] = []
-
-    # ── 파생 복제본 찾기: 앞 변수와 데이터가 완전히 같으면 뒤쪽을 버린다 ──
-    # 모든 변수쌍을 직접 비교하면 변수가 많을 때 느려지므로, 먼저 열마다
-    # 지문(해시)을 구해 같은 지문끼리만 실제로 비교한다.
     fingerprint: dict[str, list[str]] = {}
-    for c in columns:
+    for c in df.columns:
         try:
             key = pd.util.hash_pandas_object(df[c], index=False).sum()
         except TypeError:                  # 해시가 안 되는 형이면 비교에서 제외
@@ -1018,17 +1009,21 @@ def suggest_form_rows(df: pd.DataFrame, meta) -> tuple[list[list], list[list], l
             for b in group[i + 1:]:
                 if b not in duplicate_of and df[a].equals(df[b]):
                     duplicate_of[b] = a
-    if duplicate_of:
-        sample = ", ".join(f"{b}={a}" for b, a in list(duplicate_of.items())[:4])
-        notes.append(
-            f"앞 변수와 데이터가 똑같은 변수 {len(duplicate_of)}개는 파생 복제본으로 보고 "
-            f"뺐습니다 ({sample}…). 배너용 변수라면 '배너' 시트에서 쓰세요."
-        )
+    return duplicate_of
 
-    # ── 다중응답 묶음 찾기 ──
+
+def find_ma_sets(df: pd.DataFrame, meta,
+                 duplicate_of: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """다중응답 묶음을 찾는다. {접두사: [변수들]}
+
+    '앞부분 + 숫자' 이름이 이어지고, 보기가 모두 같고, 변수마다 자기
+    코드값만 갖는 묶음이다. 보기가 같아도 변수마다 보기 전체 범위를 값으로
+    가지면 평가 배터리(각각 단수)라서 묶지 않는다.
+    """
+    vl = meta.variable_value_labels
+    duplicate_of = duplicate_of or {}
     ma_sets: dict[str, list[str]] = {}
-    used_in_ma: set[str] = set()
-    for prefix, members in _numeric_suffix_family(columns).items():
+    for prefix, members in _numeric_suffix_family(list(df.columns)).items():
         members = [m for m in members if m not in duplicate_of and vl.get(m)]
         if len(members) < 2:
             continue
@@ -1038,7 +1033,34 @@ def suggest_form_rows(df: pd.DataFrame, meta) -> tuple[list[list], list[list], l
         if not _is_category_coded_set(df, members):
             continue                       # 평가 배터리 → 각각 단수로 둔다
         ma_sets[prefix] = members
-        used_in_ma.update(members)
+    return ma_sets
+
+
+def suggest_form_rows(df: pd.DataFrame, meta) -> tuple[list[list], list[list], list[str]]:
+    """.sav 를 보고 (표목록 줄들, 배너 줄들, 안내) 를 만든다.
+
+    제외하는 것
+      · 문자 변수 — 집계할 수 없다
+      · 값 라벨이 아주 많거나 응답자마다 값이 다른 변수 — 명칭/ID 로 본다
+      · 앞선 변수와 데이터가 완전히 같은 변수 — bv1/cv1/m~ 같은 파생 복제본
+    """
+    vl = meta.variable_value_labels
+    cl = meta.column_names_to_labels
+    columns = list(df.columns)
+    notes: list[str] = []
+
+    # ── 파생 복제본 찾기: 앞 변수와 데이터가 완전히 같으면 뒤쪽을 버린다 ──
+    duplicate_of = find_duplicates(df)
+    if duplicate_of:
+        sample = ", ".join(f"{b}={a}" for b, a in list(duplicate_of.items())[:4])
+        notes.append(
+            f"앞 변수와 데이터가 똑같은 변수 {len(duplicate_of)}개는 파생 복제본으로 보고 "
+            f"뺐습니다 ({sample}…). 배너용 변수라면 '배너' 시트에서 쓰세요."
+        )
+
+    # ── 다중응답 묶음 찾기 ──
+    ma_sets = find_ma_sets(df, meta, duplicate_of)
+    used_in_ma: set[str] = {m for members in ma_sets.values() for m in members}
 
     # ── 표목록 ──
     S = "평균,중위값,최소값,최대값"

@@ -9,6 +9,7 @@
 #   멀티페이지 앱은 session_state 를 모든 페이지가 함께 씁니다.
 #   다른 페이지와 겹치지 않도록 이 페이지의 키는 모두 'bt_' 로 시작합니다.
 
+import hashlib
 import tempfile
 from pathlib import Path
 
@@ -46,6 +47,18 @@ from banner_table_form import (
     read_form,
     write_filled_form,
     write_form_template,
+)
+from table_picker import (
+    KIND_LABEL,
+    KIND_MULTI,
+    KIND_OBSER,
+    KIND_SINGLE,
+    LABEL_KIND,
+    build_plan,
+    detect_items,
+    find_batteries,
+    merge_picks,
+    parse_spec,
 )
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -124,6 +137,25 @@ def to_vars(display_names) -> list[str]:
     return [DISPLAY_MAP[d] for d in display_names]
 
 
+# ── 문항 목록 (여러 문항 한 번에 · 복수응답 세트 묶기) ──
+# 복제본 찾기가 열마다 해시를 구하므로 파일당 한 번만 한다.
+@st.cache_data(show_spinner=False)
+def _pick_items(file_bytes: bytes):
+    return detect_items(df, meta)
+
+
+@st.cache_data(show_spinner=False)
+def _battery_sets(file_bytes: bytes):
+    return find_batteries(df, meta)
+
+
+PICK_ITEMS, PICK_NOTES = _pick_items(sav_file.getvalue())
+PICK_BY_DISPLAY = {it.display: it for it in PICK_ITEMS}
+MA_SETS = {it.key: it.vars for it in PICK_ITEMS if it.kind == KIND_MULTI}
+PICK_BATCH = "여러 문항 한 번에"
+PICK_ONE = "한 문항씩 자세히"
+
+
 st.session_state.setdefault("bt_merge_banners", [])
 st.session_state.setdefault("bt_results", [])
 st.session_state.setdefault("bt_blocks", [])      # 담아둔 표의 '정의' (설정 저장용)
@@ -182,189 +214,297 @@ with tab_manual:
         st.info("배너로 쓸 변수를 최소 1개 골라 주세요. '전체' 컬럼은 항상 자동으로 들어갑니다.")
 
     st.subheader("2. 행 변수")
-    row_type_disp = st.radio(
-        "행 변수 유형",
-        ["단일 응답 (단수)", "다중 응답 (복수)", "수치형 (평균 · 중위값)",
-         "척도 종합표 (문항 여러 개를 한 표에)"],
-        horizontal=True,
-        key="bt_row_type",
+    pick_mode = st.radio(
+        "만드는 방식", [PICK_BATCH, PICK_ONE], horizontal=True, key="bt_pick_mode",
+        help="여러 문항 한 번에 : 고른 문항마다 표가 하나씩 만들어져 바로 목록에 "
+             "담깁니다. 유형은 자동으로 판단하고, 틀린 것만 표에서 고칩니다.\n\n"
+             "한 문항씩 자세히 : 척도 종합표, 수치형 값 분포처럼 세밀한 설정이 "
+             "필요할 때 씁니다.",
     )
+    batch = pick_mode == PICK_BATCH
+    batch_plan: list[dict] = []
 
-    row_vars: list[str] = []
-    row_ma_mode = "category"
-    obser_stats: list[str] = []
-    obser_show_values = False
-    summaries: list = []
-    battery_metric: str | None = None
+    def set_picker(sets: dict[str, list[str]], target_key: str, what: str) -> None:
+        """자동으로 찾은 묶음을 골라 아래 변수 칸을 한 번에 채운다.
 
-    def summary_ui(var: str | None, key_suffix: str = "") -> list:
-        """척도 요약 (Top2 · Middle · Bottom2 · 평균) 을 고르는 칸.
-
-        단수와 수치형이 같은 칸을 쓴다. 다른 점은 '보기' 를 어디서 가져오는지
-        뿐이다 — 단수는 값 라벨, 수치형은 실제 응답된 값.
+        콜백에서 채운다 — 위젯이 그려진 뒤에 session_state 를 바꾸면
+        Streamlit 이 오류를 낸다. 고른 뒤에도 아래 칸에서 더하고 뺄 수 있다.
         """
-        picked_sum: list = []
-        with st.expander(
-            "척도 요약 — Top2 · Middle · Bottom2 · 평균을 '계' 뒤에 붙이기"
-        ):
-            if not var:
-                st.caption("변수를 먼저 골라 주세요.")
-                return picked_sum
+        if not sets:
+            return
+        opts = ["(직접 고르기)"] + [f"{k} ({len(v)}개: {v[0]} ~ {v[-1]})"
+                                  for k, v in sets.items()]
+        keys = [None] + list(sets)
 
-            vl_here = value_labels.get(var, {})
-            if vl_here:
-                codes = sorted(vl_here.keys())
-                labels_txt = ", ".join(
-                    f"{int(c) if float(c).is_integer() else c}={vl_here[c]}"
-                    for c in codes
-                )
-                st.caption(f"보기 {len(codes)}개 — {labels_txt}")
-            else:
-                codes = sorted(df[var].dropna().unique().tolist())
-                if not codes:
-                    st.caption("응답된 값이 없어 요약을 만들 수 없습니다.")
-                    return picked_sum
-                st.caption(
-                    f"값 라벨이 없는 변수입니다. 응답된 값 {len(codes)}종을 "
-                    "보기로 봅니다 — 평균·표준편차는 값 자체로 계산됩니다."
-                )
+        def _fill() -> None:
+            k = keys[opts.index(st.session_state[f"{target_key}_set"])]
+            if k:
+                st.session_state[target_key] = [label_for(v) for v in sets[k]]
 
-            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-            top_n = sc1.number_input("상위 몇 개", 0, len(codes), 0,
-                                     key=f"bt_sum_top{key_suffix}")
-            bot_n = sc2.number_input("하위 몇 개", 0, len(codes), 0,
-                                     key=f"bt_sum_bot{key_suffix}")
-            use_mid = sc3.checkbox("중간(나머지)", key=f"bt_sum_mid{key_suffix}")
-            use_mean = sc4.checkbox("평균", key=f"bt_sum_mean{key_suffix}")
-            use_std = sc5.checkbox("표준편차", key=f"bt_sum_std{key_suffix}")
+        st.selectbox(f"자동으로 찾은 {what}에서 한 번에 고르기", opts,
+                     key=f"{target_key}_set", on_change=_fill)
 
-            parts = []
-            if top_n:
-                parts.append(f"상{int(top_n)}")
-            if use_mid:
-                parts.append("중")
-            if bot_n:
-                parts.append(f"하{int(bot_n)}")
-            if use_mean:
-                parts.append("평균")
-            if use_std:
-                parts.append("표준편차")
-            if not parts:
-                return picked_sum
+    if batch:
+        row_type = "batch"
+        row_vars = []
+        row_ma_mode = "category"
+        obser_stats = ["MEAN", "MEDIAN", "MIN", "MAX"]
+        obser_show_values = False
+        summaries = []
+        battery_metric = None
 
-            picked_sum, sum_problems = parse_summary_spec(
-                ",".join(parts), codes, decimals=1
+        typed = st.text_area(
+            "문항 입력 — 쉼표·줄바꿈으로 구분, 범위는 ~ (예: SQ1, Q1_1~Q1_5, Q3)",
+            key="bt_batch_text", height=80,
+            placeholder="SQ1, Q1_1~Q1_5\nQ3",
+            help="설문지의 문항 번호를 붙여 넣어도 됩니다. 대소문자는 가리지 "
+                 "않습니다. 'Q3' 처럼 묶음 이름만 쓰면 Q3_1, Q3_2 … 전체가 "
+                 "들어가고, 복수응답 세트면 표 하나로 묶입니다.",
+        )
+        typed_items, typed_problems = parse_spec(typed, list(df.columns), PICK_ITEMS)
+        for msg in typed_problems:
+            st.warning(msg)
+        picked_disp = st.multiselect(
+            "목록에서 고르기 — 복수응답 세트는 한 줄로 묶여 있습니다",
+            list(PICK_BY_DISPLAY), key="bt_batch_pick",
+        )
+        for note in PICK_NOTES:
+            st.caption(note)
+        chosen = merge_picks(typed_items,
+                             [PICK_BY_DISPLAY[d] for d in picked_disp
+                              if d in PICK_BY_DISPLAY])
+
+        if chosen:
+            def _vars_txt(vs: list[str]) -> str:
+                return ", ".join(vs) if len(vs) <= 3 else f"{vs[0]} ~ {vs[-1]} ({len(vs)}개)"
+
+            plan_df = pd.DataFrame({
+                "문항": [it.key for it in chosen],
+                "유형": [KIND_LABEL[it.kind] for it in chosen],
+                "표 제목": [it.key for it in chosen],
+                "척도 요약": [it.summary if it.kind == KIND_SINGLE else ""
+                          for it in chosen],
+                "문항 문구": [it.label for it in chosen],
+                "변수": [_vars_txt(it.vars) for it in chosen],
+            })
+            # 고른 문항이 바뀌면 표를 새로 받는다. 같은 key 를 쓰면 예전에
+            # 고친 칸이 줄 번호만 보고 엉뚱한 문항에 붙는다.
+            _sig = hashlib.md5("|".join(",".join(it.vars) for it in chosen)
+                               .encode()).hexdigest()[:12]
+            ed = st.data_editor(
+                plan_df, key=f"bt_batch_ed_{_sig}", hide_index=True,
+                disabled=["문항", "문항 문구", "변수"],
+                column_config={
+                    "유형": st.column_config.SelectboxColumn(
+                        options=list(LABEL_KIND), required=True,
+                        help="자동으로 판단한 유형입니다. 틀렸으면 고르세요. "
+                             "여러 변수를 단수·수치형으로 바꾸면 변수마다 표가 "
+                             "따로 만들어집니다."),
+                    "척도 요약": st.column_config.TextColumn(
+                        help="예: 상2,중,하2,평균 — 단수 문항에만 붙습니다. "
+                             "비우면 붙이지 않습니다."),
+                },
+                **_WIDE,
             )
-            for msg in sum_problems:
-                st.warning(msg)
-            if picked_sum:
-                def _code_txt(c):
-                    if vl_here:
-                        return str(vl_here[c])
-                    return f"{int(c) if float(c).is_integer() else c}"
-
-                st.caption(
-                    "붙는 칸: "
-                    + " · ".join(
-                        x.label if x.kind != "group" else
-                        f"{x.label}(" + ",".join(_code_txt(c) for c in x.codes) + ")"
-                        for x in picked_sum
-                    )
-                )
-        return picked_sum
-
-    if row_type_disp.startswith("단일"):
-        row_type = "single"
-        picked = st.selectbox("행 변수", DISPLAY_NAMES, key="bt_row_single")
-        row_vars = [DISPLAY_MAP[picked]] if picked else []
-        summaries = summary_ui(row_vars[0] if row_vars else None)
-
-    elif row_type_disp.startswith("다중"):
-        row_type = "multi"
-        picked_multi = st.multiselect(
-            "행에 쓸 다중응답 변수들 (예: 봉안시설_1 ~ 봉안시설_4)",
-            DISPLAY_NAMES,
-            key="bt_row_multi",
-        )
-        row_vars = to_vars(picked_multi)
-        st.caption(
-            "변수마다 자기 코드값을 갖고 해당 없으면 결측인 방식으로 읽습니다 "
-            "(SPSS 다중응답 세트의 일반적인 형태)."
-        )
-
-    elif row_type_disp.startswith("척도 종합"):
-        row_type = "battery"
-        picked_bat = st.multiselect(
-            "한 표에 넣을 문항들 — 척도가 같은 문항끼리 (예: Q5_1 ~ Q5_5)",
-            DISPLAY_NAMES,
-            key="bt_row_battery",
-        )
-        row_vars = to_vars(picked_bat)
-        shape = st.radio(
-            "표 모양",
-            ["보기 분포형 — 열이 보기 + 계 + 요약",
-             "평균 서머리(격자형) — 열이 배너, 값은 지표 하나"],
-            key="bt_bat_shape",
-        )
-        summaries = summary_ui(row_vars[0] if row_vars else None, "_bat")
-        if shape.startswith("평균 서머리"):
-            choices = ["mean", "std"] + [s.label for s in summaries
-                                         if s.kind == "group"]
-            battery_metric = st.selectbox(
-                "격자에 넣을 지표",
-                choices,
-                format_func=lambda s: {"mean": "평균", "std": "표준편차"}.get(s, s),
-                key="bt_bat_metric",
-                help="Top2 같은 묶음을 쓰려면 위 '척도 요약' 에서 먼저 정의하세요.",
+            batch_plan = build_plan(
+                chosen,
+                [LABEL_KIND.get(k, "") for k in ed["유형"]],
+                ed["표 제목"].fillna("").tolist(),
+                ed["척도 요약"].fillna("").tolist(),
             )
-            st.caption(
-                "격자형은 열(배너)끼리 비교하므로 아래에서 유의성 검정을 켤 수 있습니다."
-            )
+            row_vars = [v for p in batch_plan for v in p["vars"]]
+            st.caption(f"표 **{len(batch_plan)}개**가 만들어집니다. 제목·유형·척도 "
+                       "요약은 위 표에서 바로 고칠 수 있습니다.")
         else:
-            st.caption(
-                "보기 분포형은 행끼리(문항끼리) 비교하는 표입니다. 같은 응답자가 모든 "
-                "문항에 답했으므로 유의성 검정은 하지 않습니다."
-            )
-        if row_vars:
-            lab_sets = {tuple(sorted(value_labels.get(v, {}).keys())) for v in row_vars}
-            if len(lab_sets) > 1:
-                st.warning(
-                    "고른 문항들의 보기가 서로 다릅니다. 합집합으로 계산하지만, "
-                    "척도가 같은 문항끼리 묶는 것이 좋습니다."
-                )
+            st.info("문항을 입력하거나 목록에서 고르세요.")
 
     else:
-        row_type = "obser"
-        picked = st.selectbox("수치형 변수 (이용료·나이처럼 값이 숫자인 문항)",
-                              DISPLAY_NAMES, key="bt_row_obser")
-        row_vars = [DISPLAY_MAP[picked]] if picked else []
-        obser_stats = st.multiselect(
-            "표시할 통계",
-            ["MEAN", "MEDIAN", "MIN", "MAX"],
-            default=["MEAN", "MEDIAN", "MIN", "MAX"],
-            format_func=lambda s: {"MEAN": "평균", "MEDIAN": "중위값",
-                                   "MIN": "최소값", "MAX": "최대값"}[s],
-            key="bt_obser_stats",
+        row_type_disp = st.radio(
+            "행 변수 유형",
+            ["단일 응답 (단수)", "다중 응답 (복수)", "수치형 (평균 · 중위값)",
+             "척도 종합표 (문항 여러 개를 한 표에)"],
+            horizontal=True,
+            key="bt_row_type",
         )
-        obser_show_values = st.checkbox(
-            "응답된 값의 분포도 함께 (단수 표처럼 값별 %/N → 계 → 통계)",
-            key="bt_obser_values",
-        )
-        if obser_show_values and row_vars:
-            # 값 종류가 많으면 표가 아주 넓어지므로 미리 알려준다
-            n_values = int(df[row_vars[0]].dropna().nunique())
-            if n_values > 30:
-                st.warning(
-                    f"'{row_vars[0]}' 는 응답된 값이 {n_values}종이라 보기가 "
-                    f"{n_values}개 나옵니다. 표가 너무 넓으면 이 옵션을 끄고 통계만 내거나, "
-                    "값을 묶은 변수를 쓰세요."
+
+        row_vars: list[str] = []
+        row_ma_mode = "category"
+        obser_stats: list[str] = []
+        obser_show_values = False
+        summaries: list = []
+        battery_metric: str | None = None
+
+        def summary_ui(var: str | None, key_suffix: str = "") -> list:
+            """척도 요약 (Top2 · Middle · Bottom2 · 평균) 을 고르는 칸.
+
+            단수와 수치형이 같은 칸을 쓴다. 다른 점은 '보기' 를 어디서 가져오는지
+            뿐이다 — 단수는 값 라벨, 수치형은 실제 응답된 값.
+            """
+            picked_sum: list = []
+            with st.expander(
+                "척도 요약 — Top2 · Middle · Bottom2 · 평균을 '계' 뒤에 붙이기"
+            ):
+                if not var:
+                    st.caption("변수를 먼저 골라 주세요.")
+                    return picked_sum
+
+                vl_here = value_labels.get(var, {})
+                if vl_here:
+                    codes = sorted(vl_here.keys())
+                    labels_txt = ", ".join(
+                        f"{int(c) if float(c).is_integer() else c}={vl_here[c]}"
+                        for c in codes
+                    )
+                    st.caption(f"보기 {len(codes)}개 — {labels_txt}")
+                else:
+                    codes = sorted(df[var].dropna().unique().tolist())
+                    if not codes:
+                        st.caption("응답된 값이 없어 요약을 만들 수 없습니다.")
+                        return picked_sum
+                    st.caption(
+                        f"값 라벨이 없는 변수입니다. 응답된 값 {len(codes)}종을 "
+                        "보기로 봅니다 — 평균·표준편차는 값 자체로 계산됩니다."
+                    )
+
+                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                top_n = sc1.number_input("상위 몇 개", 0, len(codes), 0,
+                                         key=f"bt_sum_top{key_suffix}")
+                bot_n = sc2.number_input("하위 몇 개", 0, len(codes), 0,
+                                         key=f"bt_sum_bot{key_suffix}")
+                use_mid = sc3.checkbox("중간(나머지)", key=f"bt_sum_mid{key_suffix}")
+                use_mean = sc4.checkbox("평균", key=f"bt_sum_mean{key_suffix}")
+                use_std = sc5.checkbox("표준편차", key=f"bt_sum_std{key_suffix}")
+
+                parts = []
+                if top_n:
+                    parts.append(f"상{int(top_n)}")
+                if use_mid:
+                    parts.append("중")
+                if bot_n:
+                    parts.append(f"하{int(bot_n)}")
+                if use_mean:
+                    parts.append("평균")
+                if use_std:
+                    parts.append("표준편차")
+                if not parts:
+                    return picked_sum
+
+                picked_sum, sum_problems = parse_summary_spec(
+                    ",".join(parts), codes, decimals=1
+                )
+                for msg in sum_problems:
+                    st.warning(msg)
+                if picked_sum:
+                    def _code_txt(c):
+                        if vl_here:
+                            return str(vl_here[c])
+                        return f"{int(c) if float(c).is_integer() else c}"
+
+                    st.caption(
+                        "붙는 칸: "
+                        + " · ".join(
+                            x.label if x.kind != "group" else
+                            f"{x.label}(" + ",".join(_code_txt(c) for c in x.codes) + ")"
+                            for x in picked_sum
+                        )
+                    )
+            return picked_sum
+
+        if row_type_disp.startswith("단일"):
+            row_type = "single"
+            picked = st.selectbox("행 변수", DISPLAY_NAMES, key="bt_row_single")
+            row_vars = [DISPLAY_MAP[picked]] if picked else []
+            summaries = summary_ui(row_vars[0] if row_vars else None)
+
+        elif row_type_disp.startswith("다중"):
+            row_type = "multi"
+            set_picker(MA_SETS, "bt_row_multi", "복수응답 세트")
+            picked_multi = st.multiselect(
+                "행에 쓸 다중응답 변수들 (예: 봉안시설_1 ~ 봉안시설_4)",
+                DISPLAY_NAMES,
+                key="bt_row_multi",
+            )
+            row_vars = to_vars(picked_multi)
+            st.caption(
+                "변수마다 자기 코드값을 갖고 해당 없으면 결측인 방식으로 읽습니다 "
+                "(SPSS 다중응답 세트의 일반적인 형태)."
+            )
+
+        elif row_type_disp.startswith("척도 종합"):
+            row_type = "battery"
+            set_picker(_battery_sets(sav_file.getvalue()), "bt_row_battery",
+                       "보기가 같은 문항 묶음")
+            picked_bat = st.multiselect(
+                "한 표에 넣을 문항들 — 척도가 같은 문항끼리 (예: Q5_1 ~ Q5_5)",
+                DISPLAY_NAMES,
+                key="bt_row_battery",
+            )
+            row_vars = to_vars(picked_bat)
+            shape = st.radio(
+                "표 모양",
+                ["보기 분포형 — 열이 보기 + 계 + 요약",
+                 "평균 서머리(격자형) — 열이 배너, 값은 지표 하나"],
+                key="bt_bat_shape",
+            )
+            summaries = summary_ui(row_vars[0] if row_vars else None, "_bat")
+            if shape.startswith("평균 서머리"):
+                choices = ["mean", "std"] + [s.label for s in summaries
+                                             if s.kind == "group"]
+                battery_metric = st.selectbox(
+                    "격자에 넣을 지표",
+                    choices,
+                    format_func=lambda s: {"mean": "평균", "std": "표준편차"}.get(s, s),
+                    key="bt_bat_metric",
+                    help="Top2 같은 묶음을 쓰려면 위 '척도 요약' 에서 먼저 정의하세요.",
+                )
+                st.caption(
+                    "격자형은 열(배너)끼리 비교하므로 아래에서 유의성 검정을 켤 수 있습니다."
                 )
             else:
-                st.caption(f"응답된 값 {n_values}종이 보기로 들어갑니다.")
-        summaries = summary_ui(row_vars[0] if row_vars else None, "_obs")
-        # '표시할 통계' 에 평균이 이미 있으면 요약의 평균은 같은 숫자라 뺀다
-        if "MEAN" in obser_stats:
-            summaries = [s for s in summaries if s.kind != "mean"]
+                st.caption(
+                    "보기 분포형은 행끼리(문항끼리) 비교하는 표입니다. 같은 응답자가 모든 "
+                    "문항에 답했으므로 유의성 검정은 하지 않습니다."
+                )
+            if row_vars:
+                lab_sets = {tuple(sorted(value_labels.get(v, {}).keys())) for v in row_vars}
+                if len(lab_sets) > 1:
+                    st.warning(
+                        "고른 문항들의 보기가 서로 다릅니다. 합집합으로 계산하지만, "
+                        "척도가 같은 문항끼리 묶는 것이 좋습니다."
+                    )
+
+        else:
+            row_type = "obser"
+            picked = st.selectbox("수치형 변수 (이용료·나이처럼 값이 숫자인 문항)",
+                                  DISPLAY_NAMES, key="bt_row_obser")
+            row_vars = [DISPLAY_MAP[picked]] if picked else []
+            obser_stats = st.multiselect(
+                "표시할 통계",
+                ["MEAN", "MEDIAN", "MIN", "MAX"],
+                default=["MEAN", "MEDIAN", "MIN", "MAX"],
+                format_func=lambda s: {"MEAN": "평균", "MEDIAN": "중위값",
+                                       "MIN": "최소값", "MAX": "최대값"}[s],
+                key="bt_obser_stats",
+            )
+            obser_show_values = st.checkbox(
+                "응답된 값의 분포도 함께 (단수 표처럼 값별 %/N → 계 → 통계)",
+                key="bt_obser_values",
+            )
+            if obser_show_values and row_vars:
+                # 값 종류가 많으면 표가 아주 넓어지므로 미리 알려준다
+                n_values = int(df[row_vars[0]].dropna().nunique())
+                if n_values > 30:
+                    st.warning(
+                        f"'{row_vars[0]}' 는 응답된 값이 {n_values}종이라 보기가 "
+                        f"{n_values}개 나옵니다. 표가 너무 넓으면 이 옵션을 끄고 통계만 내거나, "
+                        "값을 묶은 변수를 쓰세요."
+                    )
+                else:
+                    st.caption(f"응답된 값 {n_values}종이 보기로 들어갑니다.")
+            summaries = summary_ui(row_vars[0] if row_vars else None, "_obs")
+            # '표시할 통계' 에 평균이 이미 있으면 요약의 평균은 같은 숫자라 뺀다
+            if "MEAN" in obser_stats:
+                summaries = [s for s in summaries if s.kind != "mean"]
 
     st.subheader("3. 옵션")
     use_filter = st.checkbox("특정 조건만 계산 (예: 주체 = 공설)", key="bt_use_filter")
@@ -470,107 +610,191 @@ with tab_manual:
     if not sig_allowed and sig_disp != "안 함":
         st.caption("보기 분포형 종합표에는 검정을 걸 수 없습니다 (위 설명 참고).")
 
-    # ── 표 제목 ──
-    # 이름의 '본체' 만 직접 짓고, ' - %' / ' - N' 표시는 자동으로 붙는다.
-    # 같은 문항으로 % 표와 N 표를 만들면 이름이 같아져 목록·엑셀에서 구분이
-    # 안 되기 때문이다. 표시를 바꾸면 이름도 따라 바뀐다.
-    #
-    # 본체는 직접 고쳐 쓰면 그대로 지키되, 행 변수(또는 문항유형)가 바뀌면
-    # 다른 표이므로 자동 이름으로 되돌린다.
-    if not row_vars:
-        auto_base = "표"
-    elif row_type == "battery" and len(row_vars) > 1:
-        # 종합표는 문항이 여러 개라 첫 변수명만 쓰면 무슨 표인지 알기 어렵다
-        auto_base = f"{row_vars[0]} 외 {len(row_vars) - 1}문항"
+    # 표를 목록에 담는다. 만들면 바로 담기므로 '담기' 단계가 따로 없다.
+    def keep_table(res, block) -> None:
+        st.session_state["bt_results"].append(res)
+        st.session_state["bt_blocks"].append(block)
+
+    if batch:
+        title = ""
+        can_build = bool(batch_plan) and bool(banners)
+        if batch_plan and not banners:
+            st.caption("위에서 배너를 고르면 만들 수 있습니다.")
+        if st.button(f"표 {len(batch_plan)}개 만들어 목록에 담기", type="primary",
+                     disabled=not can_build, key="bt_build_batch"):
+            made, failed, warned = 0, [], []
+            bar = st.progress(0.0, text="표 계산 중…")
+            for n, plan in enumerate(batch_plan, start=1):
+                bar.progress(n / len(batch_plan),
+                             text=f"표 계산 중… {n}/{len(batch_plan)}")
+                is_obs = plan["kind"] == KIND_OBSER
+                try:
+                    summ = []
+                    if plan["summary"]:
+                        v0 = plan["vars"][0]
+                        codes = (sorted(value_labels.get(v0, {}).keys())
+                                 or sorted(df[v0].dropna().unique().tolist()))
+                        summ, sum_problems = parse_summary_spec(
+                            plan["summary"], codes, decimals=1)
+                        warned += [f"{plan['title']}: {m}" for m in sum_problems]
+                    mark = (None if (is_obs or not mark_title)
+                            else ("pct" if show_pct else "n"))
+                    block = build_block(
+                        row_type=plan["kind"],
+                        row_vars=plan["vars"],
+                        banners=banners,
+                        title=title_with_marker(plan["title"], mark),
+                        row_ma_mode="category",
+                        obser_stats=obser_stats if is_obs else None,
+                        extra_cond=extra_cond,
+                        show_pct=show_pct and not is_obs,
+                        decimals=int(decimals),
+                        obser_decimals=int(obser_decimals),
+                        show_total_row=show_total_row and not is_obs,
+                        orientation=orientation,
+                        obser_show_values=False,
+                        summaries=summ,
+                        sig=sig,
+                        min_base_show=int(min_base_show),
+                        sort_values=sort_values,
+                    )
+                    keep_table(compute_table(df, meta, block), block)
+                    made += 1
+                except Exception as e:                   # noqa: BLE001
+                    failed.append(f"{plan['title']} — {e}")
+            bar.empty()
+            st.session_state["bt_batch_msg"] = (made, failed, warned)
+
+        msg = st.session_state.pop("bt_batch_msg", None)
+        if msg:
+            made, failed, warned = msg
+            if made:
+                st.success(f"표 {made}개를 만들어 아래 '담아둔 표' 에 넣었습니다.")
+            for m in warned:
+                st.warning(m)
+            for m in failed:
+                st.error(f"만들지 못한 표: {m}")
     else:
-        auto_base = row_vars[0]
-    subject = f"{row_type}|{battery_metric}|{'|'.join(row_vars)}"
-    untouched = (st.session_state.get("bt_title_base")
-                 == st.session_state.get("bt_title_base_auto"))
-    subject_changed = subject != st.session_state.get("bt_title_subject")
+        # ── 표 제목 ──
+        # 이름의 '본체' 만 직접 짓고, ' - %' / ' - N' 표시는 자동으로 붙는다.
+        # 같은 문항으로 % 표와 N 표를 만들면 이름이 같아져 목록·엑셀에서 구분이
+        # 안 되기 때문이다. 표시를 바꾸면 이름도 따라 바뀐다.
+        #
+        # 본체는 직접 고쳐 쓰면 그대로 지키되, 행 변수(또는 문항유형)가 바뀌면
+        # 다른 표이므로 자동 이름으로 되돌린다.
+        if not row_vars:
+            auto_base = "표"
+        elif row_type == "battery" and len(row_vars) > 1:
+            # 종합표는 문항이 여러 개라 첫 변수명만 쓰면 무슨 표인지 알기 어렵다
+            auto_base = f"{row_vars[0]} 외 {len(row_vars) - 1}문항"
+        else:
+            auto_base = row_vars[0]
+        subject = f"{row_type}|{battery_metric}|{'|'.join(row_vars)}"
+        untouched = (st.session_state.get("bt_title_base")
+                     == st.session_state.get("bt_title_base_auto"))
+        subject_changed = subject != st.session_state.get("bt_title_subject")
 
-    if ("bt_title_base" not in st.session_state or untouched or subject_changed):
-        st.session_state["bt_title_base"] = auto_base
-    st.session_state["bt_title_base_auto"] = auto_base
-    st.session_state["bt_title_subject"] = subject
+        if ("bt_title_base" not in st.session_state or untouched or subject_changed):
+            st.session_state["bt_title_base"] = auto_base
+        st.session_state["bt_title_base_auto"] = auto_base
+        st.session_state["bt_title_subject"] = subject
 
-    # 제목 칸은 화면 폭을 다 쓴다. 여기에 도움말 아이콘(?)을 붙이면 라벨과
-    # 멀리 떨어진 오른쪽 끝에 혼자 앉아 무엇에 붙은 설명인지 알 수 없다.
-    # 짧은 설명이라 라벨에 넣었다.
-    base = st.text_input("표 제목 — 행 변수를 바꾸면 자동 이름으로 돌아갑니다",
-                         key="bt_title_base")
-    kind = ("pct" if show_pct else "n") if (mark_title and has_pct_or_n) else None
-    title = title_with_marker(base or auto_base, kind)
-    st.caption(f"표 이름 → **{title}**")
+        # 제목 칸은 화면 폭을 다 쓴다. 여기에 도움말 아이콘(?)을 붙이면 라벨과
+        # 멀리 떨어진 오른쪽 끝에 혼자 앉아 무엇에 붙은 설명인지 알 수 없다.
+        # 짧은 설명이라 라벨에 넣었다.
+        base = st.text_input("표 제목 — 행 변수를 바꾸면 자동 이름으로 돌아갑니다",
+                             key="bt_title_base")
+        kind = ("pct" if show_pct else "n") if (mark_title and has_pct_or_n) else None
+        title = title_with_marker(base or auto_base, kind)
+        st.caption(f"표 이름 → **{title}**")
 
-    # 보기 분포형 종합표는 배너를 쓰지 않으므로 배너 없이도 만들 수 있다
-    needs_banner = not (row_type == "battery" and not battery_metric)
-    can_build = bool(row_vars) and (bool(banners) or not needs_banner)
-    if st.button("표 만들기", type="primary", disabled=not can_build, key="bt_build"):
-        try:
-            if row_type == "battery":
-                block = build_battery_block(
-                    battery_vars=row_vars,
-                    title=title,
-                    banners=banners if battery_metric else None,
-                    metric=battery_metric,
-                    summaries=summaries,
-                    show_pct=show_pct,
-                    decimals=int(decimals),
-                    show_total_row=show_total_row,
-                    extra_cond=extra_cond,
-                    orientation=orientation,
-                    sig=sig,
-                    min_base_show=int(min_base_show),
-                    sort_rows=sort_values,
+        # 보기 분포형 종합표는 배너를 쓰지 않으므로 배너 없이도 만들 수 있다
+        needs_banner = not (row_type == "battery" and not battery_metric)
+        can_build = bool(row_vars) and (bool(banners) or not needs_banner)
+        if st.button("표 만들고 목록에 담기", type="primary", disabled=not can_build,
+                     key="bt_build"):
+            try:
+                if row_type == "battery":
+                    block = build_battery_block(
+                        battery_vars=row_vars,
+                        title=title,
+                        banners=banners if battery_metric else None,
+                        metric=battery_metric,
+                        summaries=summaries,
+                        show_pct=show_pct,
+                        decimals=int(decimals),
+                        show_total_row=show_total_row,
+                        extra_cond=extra_cond,
+                        orientation=orientation,
+                        sig=sig,
+                        min_base_show=int(min_base_show),
+                        sort_rows=sort_values,
+                    )
+                else:
+                    block = build_block(
+                        row_type=row_type,
+                        row_vars=row_vars,
+                        banners=banners,
+                        title=title,
+                        row_ma_mode=row_ma_mode,
+                        obser_stats=obser_stats or None,
+                        extra_cond=extra_cond,
+                        show_pct=show_pct,
+                        decimals=int(decimals),
+                        obser_decimals=int(obser_decimals),
+                        show_total_row=show_total_row,
+                        orientation=orientation,
+                        obser_show_values=obser_show_values,
+                        summaries=summaries,
+                        sig=sig,
+                        min_base_show=int(min_base_show),
+                        sort_values=sort_values,
+                    )
+                res = compute_table(df, meta, block)
+                keep_table(res, block)
+                st.session_state["bt_last"] = res
+            except Exception as e:                       # noqa: BLE001
+                st.error(f"계산 중 오류 — {e}")
+
+        if "bt_last" in st.session_state:
+            last = st.session_state["bt_last"]
+            kept = st.session_state["bt_results"]
+            # 목록에서 몇 번째인지. 빼거나 옮겼으면 달라지므로 매번 찾는다.
+            pos = next((i for i, r in enumerate(kept) if r is last), None)
+            st.markdown(f"**{last.title}**")
+            st.dataframe(result_to_frame(last), **_WIDE)
+            for note in last.notes:
+                st.caption(f"· {note}")
+            if last.has_marks:
+                st.caption(
+                    "글자는 같은 배너 그룹 안에서 그 칸이 유의하게 높은 상대를 뜻합니다 "
+                    "— '남성 (a)' 행의 `42.6 b` 는 여성(b)보다 높다는 뜻입니다."
                 )
-            else:
-                block = build_block(
-                    row_type=row_type,
-                    row_vars=row_vars,
-                    banners=banners,
-                    title=title,
-                    row_ma_mode=row_ma_mode,
-                    obser_stats=obser_stats or None,
-                    extra_cond=extra_cond,
-                    show_pct=show_pct,
-                    decimals=int(decimals),
-                    obser_decimals=int(obser_decimals),
-                    show_total_row=show_total_row,
-                    orientation=orientation,
-                    obser_show_values=obser_show_values,
-                    summaries=summaries,
-                    sig=sig,
-                    min_base_show=int(min_base_show),
-                    sort_values=sort_values,
-                )
-            st.session_state["bt_last"] = compute_table(df, meta, block)
-            st.session_state["bt_last_block"] = block
-        except Exception as e:                           # noqa: BLE001
-            st.error(f"계산 중 오류 — {e}")
 
-    if "bt_last" in st.session_state:
-        last = st.session_state["bt_last"]
-        st.markdown(f"**{last.title}**")
-        st.dataframe(result_to_frame(last), **_WIDE)
-        for note in last.notes:
-            st.caption(f"· {note}")
-        if last.has_marks:
-            st.caption(
-                "글자는 같은 배너 그룹 안에서 그 칸이 유의하게 높은 상대를 뜻합니다 "
-                "— '남성 (a)' 행의 `42.6 b` 는 여성(b)보다 높다는 뜻입니다."
+            def _undo_last() -> None:
+                res_list = st.session_state["bt_results"]
+                blk_list = st.session_state["bt_blocks"]
+                i = next((i for i, r in enumerate(res_list)
+                          if r is st.session_state.get("bt_last")), None)
+                if i is not None:
+                    res_list.pop(i)
+                    if i < len(blk_list):
+                        blk_list.pop(i)
+                st.session_state.pop("bt_last", None)
+
+            b1, b2, b3 = st.columns([2, 1, 1])
+            b1.caption(f"✅ 담아둔 표 {pos + 1}번에 들어갔습니다."
+                       if pos is not None else "목록에서 뺀 표입니다.")
+            b2.button("방금 표 빼기", key="bt_undo_last", on_click=_undo_last,
+                      disabled=pos is None)
+            b3.download_button(
+                "이 표만 엑셀로",
+                data=write_tables_xlsx([last]),
+                file_name=f"{SAV_STEM}_{safe_stem(last.title, '표')}.xlsx",
+                mime=XLSX_MIME,
+                key="bt_dl_one",
             )
-        b1, b2 = st.columns(2)
-        if b1.button("아래 목록에 담기", key="bt_keep"):
-            st.session_state["bt_results"].append(last)
-            st.session_state["bt_blocks"].append(st.session_state["bt_last_block"])
-        b2.download_button(
-            "이 표만 엑셀로",
-            data=write_tables_xlsx([last]),
-            file_name=f"{SAV_STEM}_{safe_stem(last.title, '표')}.xlsx",
-            mime=XLSX_MIME,
-            key="bt_dl_one",
-        )
+
 
     # ── 설정 저장 / 불러오기 ──
     #
