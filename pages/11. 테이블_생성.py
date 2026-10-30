@@ -84,7 +84,11 @@ def load_sav(file_bytes: bytes):
         with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
-        return pyreadstat.read_sav(tmp_path)
+        try:
+            return pyreadstat.read_sav(tmp_path)
+        except pyreadstat.ReadstatError:
+            # EUC-KR 선언 sav 에 CP949 확장 한글('똠'·'씅' 등)이 있으면 기본 읽기가 실패한다 (2026-10-31, dp-skills#53)
+            return pyreadstat.read_sav(tmp_path, encoding="cp949")
     finally:
         # pyreadstat 이 메모리로 다 읽으므로 임시파일은 바로 지운다.
         if tmp_path:
