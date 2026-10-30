@@ -127,6 +127,10 @@ class IlpSolution:
     all_satisfied: bool = False                          # 메인+추가 전부 100%
     main_hard: bool = False                              # 하드 쿼터로 풀렸는가
     ex_overflow: bool = False                            # 초과 허용 여부
+    # 2026-10-30 (dp-skills#204 7-5) 풀지 못하고 멈춘 뒤 단계 [(단계명, 솔버 상태)]
+    #   ("NOT_RUN" = 앞 단계가 실패해 돌리지 않음). 비어 있지 않으면 앞 단계 해를
+    #   그대로 쓴 것이라 proven_optimal 은 False 다.
+    failed_stages: list = field(default_factory=list)
 
 
 # ==============================================================================
@@ -422,8 +426,12 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
                  부족과 초과에 **대칭으로** 걸린다. 둘 다 0 이면 편차 0 (하드).
     ex_tol_unlimited : True 면 편차 한계 없이 최소화만 한다.
 
-    반환: (ok, status, solver, n_vars, short_main, short_ex, over_ex, stage_values)
+    반환: (ok, status, solver, n_vars, short_main, short_ex, over_ex, stage_values,
+           failed_stages)
       ok : True / None(실패) / "GUARD_INFEASIBLE"
+      failed_stages : 앞 단계 해는 있는데 뒤 단계를 풀지 못해 멈췄을 때
+                      [(단계명, 솔버 상태), (못 돌린 단계명, "NOT_RUN"), ...]
+                      (2026-10-30 dp-skills#204 7-5)
     """
     model = cp_model.CpModel()
 
@@ -625,6 +633,7 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
     solver = None
     st = None
     stage_values = []
+    failed_stages = []
 
     for si, (name, expr) in enumerate(stages):
         # 희소 셀 우선 단계 직전에 '셀별 최소 달성률' 하한을 건다
@@ -648,25 +657,32 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
                 tag = ("BAND_INFEASIBLE" if banded
                        else ("HARD_INFEASIBLE" if main_hard else None))
                 return (tag, st_new, s_new, n_vars, short_main, short_ex,
-                        over_ex, stage_values)
+                        over_ex, stage_values, failed_stages)
             if guard:
                 # 하한 때문에 해가 사라졌다 → 호출부가 하한 없이 재시도
                 return ("GUARD_INFEASIBLE", st_new, solver, n_vars,
-                        short_main, short_ex, over_ex, stage_values)
-            break   # 이전 단계 해를 그대로 사용
+                        short_main, short_ex, over_ex, stage_values,
+                        failed_stages)
+            # 이전 단계 해를 그대로 사용 — 단, 이 단계와 뒤 단계가 최적화되지
+            # 않았음을 남긴다 (예전에는 앞 단계 상태 OPTIMAL 만 돌려줘 '최적 증명'
+            # 으로 보였다. 2026-10-30 dp-skills#204 7-5)
+            failed_stages.append((name, s_new.StatusName(st_new)))
+            failed_stages.extend((n, "NOT_RUN") for n, _e in stages[si + 1:])
+            break
 
         solver, st = s_new, st_new
         if st != cp_model.OPTIMAL:
             # 최적성이 증명되지 않았으면 값을 고정하는 것 자체가 위험하다
             return (True, st, solver, n_vars, short_main, short_ex,
-                    over_ex, stage_values)
+                    over_ex, stage_values, failed_stages)
 
         val = int(round(solver.ObjectiveValue()))
         stage_values.append((name, val))
         if si < len(stages) - 1:
             model.Add(expr == val)
 
-    return True, st, solver, n_vars, short_main, short_ex, over_ex, stage_values
+    return (True, st, solver, n_vars, short_main, short_ex, over_ex,
+            stage_values, failed_stages)
 
 
 # ==============================================================================
@@ -1039,14 +1055,16 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
         (res, used) = _try(main_hard=False)
         ok = res[0]
 
-    (ok, st, solver, n_vars, short_main, short_ex, over_ex, stage_values) = res
+    (ok, st, solver, n_vars, short_main, short_ex, over_ex, stage_values,
+     failed_stages) = res
 
     if ok == "GUARD_INFEASIBLE":
         notes.append(
             f"모든 셀을 목표의 {min_fill:.0%} 이상으로 채우는 것은 불가능해서, "
             "그 조건을 빼고 다시 계산했습니다. 일부 셀이 많이 모자랄 수 있습니다.")
         (res, used) = _try(min_fill=0.0)
-        (ok, st, solver, n_vars, short_main, short_ex, over_ex, stage_values) = res
+        (ok, st, solver, n_vars, short_main, short_ex, over_ex, stage_values,
+         failed_stages) = res
 
     if not ok:
         return IlpSolution(
@@ -1197,9 +1215,21 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
                     if gain > 0:
                         diag.value_relax_gain[(b['group'], b['key'])] = gain
 
+    if failed_stages:
+        # 앞 단계(총 인원 등)까지는 최적이지만, 부족을 어느 셀이 떠안을지 정하는
+        # 뒤 단계가 최적화되지 않아 다시 돌리면 셀별 인원·명단이 달라질 수 있다
+        # → '최적 증명' 으로 보이지 않게 proven_optimal=False (2026-10-30 7-5)
+        _ok_names = ", ".join(n for n, _v in stage_values) or "-"
+        _fail_txt = ", ".join(f"{n}({s})" for n, s in failed_stages)
+        notes.append(
+            f"계산 단계 중 {_fail_txt} 를 풀지 못해 앞 단계({_ok_names}) 결과를 "
+            "그대로 썼습니다. 모자란 인원을 어느 셀이 떠안을지는 최적으로 정해지지 "
+            "않아, 다시 돌리면 셀별 인원·명단이 달라질 수 있습니다. 시간 제한을 "
+            "늘려 다시 계산해 보세요.")
+
     return IlpSolution(
         status=solver.StatusName(st),
-        proven_optimal=(st == cp_model.OPTIMAL),
+        proven_optimal=(st == cp_model.OPTIMAL and not failed_stages),
         selected=selected,
         total=total,
         target_total=target_total,
@@ -1215,6 +1245,7 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
         ex_short_total=ex_short_total,
         ex_over_total=ex_over_total,
         stage_values=stage_values,
+        failed_stages=failed_stages,
         all_satisfied=(main_short_total == 0 and sum(ex_short_total) == 0
                        and sum(ex_over_total) == 0),
         main_hard=main_hard,
