@@ -429,9 +429,9 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
     반환: (ok, status, solver, n_vars, short_main, short_ex, over_ex, stage_values,
            failed_stages)
       ok : True / None(실패) / "GUARD_INFEASIBLE"
-      failed_stages : 앞 단계 해는 있는데 뒤 단계를 풀지 못해 멈췄을 때
-                      [(단계명, 솔버 상태), (못 돌린 단계명, "NOT_RUN"), ...]
-                      (2026-10-30 dp-skills#204 7-5)
+      failed_stages : 뒤 단계를 풀지 못했거나(UNKNOWN 등) 최적 증명 없이(FEASIBLE)
+                      끝나 멈췄을 때 [(단계명, 솔버 상태), (못 돌린 단계명, "NOT_RUN"), ...]
+                      (2026-10-30 dp-skills#204 7-5, FEASIBLE 은 Auto.Quota#8 검수 반영)
     """
     model = cp_model.CpModel()
 
@@ -673,6 +673,9 @@ def _solve_core(profiles, main_map, ex_maps, weights=None,
         solver, st = s_new, st_new
         if st != cp_model.OPTIMAL:
             # 최적성이 증명되지 않았으면 값을 고정하는 것 자체가 위험하다
+            # — 이 단계(FEASIBLE)와 돌리지 않은 뒤 단계를 남긴다 (Auto.Quota#8 검수 반영)
+            failed_stages.append((name, solver.StatusName(st)))
+            failed_stages.extend((n, "NOT_RUN") for n, _e in stages[si + 1:])
             return (True, st, solver, n_vars, short_main, short_ex,
                     over_ex, stage_values, failed_stages)
 
@@ -1221,11 +1224,13 @@ def solve_quota_ilp(m_keys, ex_keys_list, main_map, ex_maps, indices,
         # → '최적 증명' 으로 보이지 않게 proven_optimal=False (2026-10-30 7-5)
         _ok_names = ", ".join(n for n, _v in stage_values) or "-"
         _fail_txt = ", ".join(f"{n}({s})" for n, s in failed_stages)
+        _how = (f"를 시간 안에 최적으로 확정하지 못해 그때까지 찾은 해(최적 확정 단계: "
+                f"{_ok_names})를 썼습니다." if failed_stages[0][1] == "FEASIBLE" else
+                f"를 풀지 못해 앞 단계({_ok_names}) 결과를 그대로 썼습니다.")
         notes.append(
-            f"계산 단계 중 {_fail_txt} 를 풀지 못해 앞 단계({_ok_names}) 결과를 "
-            "그대로 썼습니다. 모자란 인원을 어느 셀이 떠안을지는 최적으로 정해지지 "
-            "않아, 다시 돌리면 셀별 인원·명단이 달라질 수 있습니다. 시간 제한을 "
-            "늘려 다시 계산해 보세요.")
+            f"계산 단계 중 {_fail_txt} {_how} 모자란 인원을 어느 셀이 떠안을지는 "
+            "최적으로 정해지지 않아, 다시 돌리면 셀별 인원·명단이 달라질 수 있습니다. "
+            "시간 제한을 늘려 다시 계산해 보세요.")
 
     return IlpSolution(
         status=solver.StatusName(st),
